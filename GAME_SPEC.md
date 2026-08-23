@@ -182,3 +182,33 @@ Save v:3 (+skillPoints, tree, resource snapshot); silent migration from v1/v2 (p
 
 ### Balance targets
 Stamina must prevent spamming the strongest attack (2-3 uses then breathe); a focused branch build at lvl 25 should clear fights ~30% faster than unspent points; xp pacing: lvl 10 within Act 1 on defaults.
+
+## 13. Room3D — first-person mode (supersedes the 2D scene flow as the ACTIVE game; 2D world stays in the code, unrouted)
+The game is now: title -> account/PIN -> **3D room**. No story, no intro dialogs, no scene routing. One room, one enemy you walk up to; clicking it starts the normal round battle (section 10/12 engine untouched). All meta systems stay reachable via the menu overlay (loadouts, skill tree, sheet, inventory, save).
+
+### Tech
+`game/vendor/three.min.js` (r128 UMD, vendored, classic script — loads BEFORE all game scripts). WebGL canvas fills the screen behind the HUD. Target 60fps; single small scene. file:// safe (textures via THREE.TextureLoader relative paths — works over file:// in Chrome only via http; MUST also handle file:// texture load failure gracefully by falling back to flat colored materials so the game never breaks).
+
+### Files & ownership
+- ASSETS agent: `game/assets/gen/tex/*.jpg` (textures below), `game/assets/gen/enemy-hollow-sprite.jpg`, manifest `tools/room3d-assets.json`.
+- ENGINE agent: `game/js/engine/world3d.js` (all Three.js logic) + `game/js/data/room3d.js` (room layout config: dims, furniture list {kind,x,z,w,d,h,rotY,tex}, enemy spawn, player spawn, light rig).
+- UI agent: `game/js/ui/room3d.js` (screen, HUD, pointer-lock UX, battle handoff), edits to `game/js/main.js` (route after login -> 'room3d'; skip intro/story), `game/index.html` (vendor tag first, then data/room3d.js after data/tree.js, engine/world3d.js after engine/battle.js, ui/room3d.js before ui/menu.js), `game/css/game.css` (append HUD styles).
+
+### Room (data-driven, ~8m x 6m x 3m)
+The dressing room in 3D: dark red carpet floor, padded deep-red club walls, black tile ceiling. Furniture as textured box/plane compositions placed via data: vanity table + DEAD MIRROR plane (slightly emissive, cracked texture) on one wall, torn red couch, old TV on a stand showing static (animated by cycling texture offset or noise), the red DOOR on the far wall (static prop), a floor lamp with a warm point light, 1-2 grungy posters. Light rig: dim ambient (#1a0a0d), red point light center ceiling (flickering subtly), warm lamp light, faint emissive mirror/TV. Atmosphere: fog (black, near), subtle vignette via CSS overlay.
+
+### Textures (Pollinations, house style; 512-768 square; "seamless texture" prompts for tiling surfaces)
+carpet.jpg, wall.jpg, ceiling.jpg, couch.jpg (upholstery), door.jpg (full-frame front view), mirror.jpg (dead cracked black mirror, faint red), tv_static.jpg, poster.jpg. Enemy sprite: full-body gaunt hollow ghost, arms slack, facing camera, PURE BLACK background, red rim light -> billboard.
+
+### Movement & controls (the core deliverable — must feel good)
+Pointer lock on canvas click (overlay until locked: "Click to look - WASD move - ESC release"). Mouse look: yaw free, pitch clamp +-80deg, sensitivity 0.0022. WASD relative to yaw; walk 3.0 m/s, Shift sprint 5.0; acceleration/damping (approach ~10/s lerp) so starts/stops feel smooth; eye height 1.6; subtle head bob while moving (amp 0.03, freq scales with speed). KEYBOARD-ONLY FALLBACK (mandatory, also enables automated testing): ArrowLeft/Right or Q/E rotate yaw 100deg/s, ArrowUp/Down move — fully playable without pointer lock. Collision: axis-separated AABB resolve vs walls + furniture boxes (slide along surfaces, radius 0.35); never able to leave the room or clip furniture.
+
+### Enemy & battle handoff
+the_hollow as a 1.9m billboard (always faces camera) with a custom ShaderMaterial: discard fragments with luminance < 0.09, soft alpha ramp to 0.25 — black bg vanishes; add slow float bob, opacity flicker, faint red glow sprite behind. Crosshair dot center-screen. Raycast center (and on click, the mouse point if unlocked): when enemy hit within 3.5m -> highlight (emissive pulse) + hint "click to engage"; click -> world3d pauses (stop loop, release lock) -> CHLOE.engine.battle.start('the_hollow') + battle screen exactly as today. On victory: return to room3d, enemy dissolves (scale/alpha out), respawns after 15s at spawn. On defeat: normal defeat flow -> respawn player at player spawn, enemy reset. Rewards/XP/levels/loadouts all unchanged.
+
+### API contract
+CHLOE.engine.world3d = { init(canvasEl), start(), stop(), setEnemyAlive(bool), onEngage(cb), resize(), debug() -> {x, z, yaw, pitch, locked, enemyDist, enemyAlive, colliders} }. ui/room3d.js owns the screen div + HUD (crosshair, top bar with shards/level/menu button reusing existing HUD pieces, bottom hint line, lock overlay) and wires engage -> battleui, battle end -> back to room3d + world3d.start().
+Save: scene field becomes 'room3d' (migration: any old scene value -> 'room3d' on load in this mode). Menu overlay must open (and pause the loop + release pointer lock) via button AND Tab/M key.
+
+### Verification hooks
+world3d.debug() is mandatory (used by automated tests to assert movement/collision/turning). Keyboard fallback must be enough to reach and engage the enemy without pointer lock.

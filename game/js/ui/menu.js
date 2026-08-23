@@ -35,9 +35,11 @@ CHLOE.ui.menu = (function(){
       .forEach(function(t){
         var b = ui.el('button', tab === t[0] ? 'on' : '', t[1]);
         b.addEventListener('click', function(){
-          if (t[0] === 'close') { close(); return; }
+          // NOTE: go through the public export — ui/room3d.js wraps
+          // CHLOE.ui.menu.close() to resume the 3D world on close.
+          if (t[0] === 'close') { CHLOE.ui.menu.close(); return; }
           if (t[0] === 'tree') {   // §12: skill tree is its own screen
-            close();
+            CHLOE.ui.menu.close();
             if (CHLOE.ui.tree && CHLOE.ui.tree.open) CHLOE.ui.tree.open();
             else ui.toast('The tree is still growing in the dark.');
             return;
@@ -68,7 +70,7 @@ CHLOE.ui.menu = (function(){
       body.appendChild(back);
       CHLOE.ui.sheet.renderInto(body, sheetChar, {
         onOpenTree: function(id){
-          close();
+          CHLOE.ui.menu.close(); // public export — see note in render()
           if (CHLOE.ui.tree && CHLOE.ui.tree.open) CHLOE.ui.tree.open(id);
         }
       });
@@ -248,7 +250,7 @@ CHLOE.ui.menu = (function(){
     out.addEventListener('click', function(){
       save.saveNow();
       save.logout();
-      close();
+      CHLOE.ui.menu.close(); // public export — see note in render()
       CHLOE.ui.show('title');
     });
     row.appendChild(out);

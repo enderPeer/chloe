@@ -1,0 +1,11 @@
+[
+  { "file": "game/assets/gen/tex/carpet.jpg", "use": "floor tiling texture (dark red worn carpet, top-down)", "size": "512x512" },
+  { "file": "game/assets/gen/tex/wall.jpg", "use": "wall tiling texture (padded deep-red club panels, vertical seams tile horizontally)", "size": "512x512" },
+  { "file": "game/assets/gen/tex/ceiling.jpg", "use": "ceiling tiling texture (dark speckled acoustic tile)", "size": "512x512" },
+  { "file": "game/assets/gen/tex/couch.jpg", "use": "couch upholstery tiling texture (worn red leather panels)", "size": "512x512" },
+  { "file": "game/assets/gen/tex/door.jpg", "use": "door prop texture, full-frame front view (non-tiling)", "size": "512x768" },
+  { "file": "game/assets/gen/tex/mirror.jpg", "use": "dead cracked black vanity mirror plane, slight emissive (non-tiling)", "size": "512x768" },
+  { "file": "game/assets/gen/tex/tv_static.jpg", "use": "TV screen static, procedural grayscale noise + scanlines, seamless, animate via offset cycling", "size": "512x512" },
+  { "file": "game/assets/gen/tex/poster.jpg", "use": "grungy punk gig poster plane (non-tiling)", "size": "512x768" },
+  { "file": "game/assets/gen/enemy-hollow-sprite.jpg", "use": "the_hollow billboard sprite; near-black background for luminance-key shader (discard lum < 0.09), soft glow aura around figure is intentional", "size": "768x768" }
+]

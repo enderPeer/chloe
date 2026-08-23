@@ -1445,3 +1445,128 @@ button:disabled .cost-chip{ opacity:.7; }
   .tree-canvas{ min-width:560px; }
   .tree-card{ left:.4rem; right:.4rem; padding:.55rem .65rem; }
 }
+
+/* ============================================================
+   Room3D — first-person mode HUD (spec sec 13, palette sec 8)
+   ============================================================ */
+#screen-room3d{ background:var(--bg); }
+#room3d-canvas{
+  position:absolute; inset:0;
+  width:100%; height:100%;
+  display:block;
+  background:#050406;
+  cursor:crosshair;
+}
+/* soft red-black vignette over the room */
+.r3d-vignette{
+  position:absolute; inset:0;
+  pointer-events:none;
+  z-index:4;
+  background:
+    radial-gradient(ellipse at center, transparent 52%, rgba(10,3,5,.62) 100%),
+    linear-gradient(180deg, rgba(122,12,34,.06), transparent 22%, transparent 80%, rgba(0,0,0,.35));
+}
+.r3d-hud{ z-index:10; }
+.r3d-level{
+  align-self:center;
+  font-family:var(--font-head);
+  font-size:.95rem; letter-spacing:.12em;
+  color:var(--dim);
+  padding:.2em .7em;
+  border:1px solid rgba(122,12,34,.55);
+  border-radius:999px;
+  background:rgba(20,19,23,.55);
+  white-space:nowrap;
+}
+
+/* center crosshair dot */
+.r3d-crosshair{
+  position:absolute; left:50%; top:50%;
+  width:7px; height:7px;
+  margin:-3.5px 0 0 -3.5px;
+  border-radius:50%;
+  background:rgba(242,238,240,.85);
+  box-shadow:0 0 6px rgba(0,0,0,.8), 0 0 2px rgba(242,238,240,.6);
+  z-index:12;
+  pointer-events:none;
+  transition:background .12s ease, transform .12s ease, box-shadow .12s ease;
+}
+.r3d-crosshair.in-range{
+  background:var(--red);
+  transform:scale(1.7);
+  box-shadow:var(--glow-red);
+  animation:r3dCrossPulse 1s ease-in-out infinite;
+}
+@keyframes r3dCrossPulse{
+  0%,100%{ transform:scale(1.55); }
+  50%    { transform:scale(1.95); }
+}
+/* engage hint under the crosshair */
+.r3d-hint{
+  position:absolute; left:50%; top:50%;
+  transform:translate(-50%, 1.6rem);
+  z-index:12;
+  pointer-events:none;
+  font-family:var(--font-head);
+  font-size:1.05rem; letter-spacing:.22em;
+  text-transform:uppercase;
+  color:var(--red);
+  text-shadow:0 0 10px rgba(229,23,63,.7), 0 1px 3px rgba(0,0,0,.9);
+  animation:r3dHintPulse 1.2s ease-in-out infinite;
+}
+@keyframes r3dHintPulse{
+  0%,100%{ opacity:.65; }
+  50%    { opacity:1; }
+}
+
+/* bottom control hints line */
+.r3d-controls{
+  position:absolute; left:0; right:0; bottom:0;
+  z-index:10;
+  pointer-events:none;
+  text-align:center;
+  padding:.55rem .9rem .7rem;
+  font-size:.78rem; letter-spacing:.06em;
+  color:var(--dim);
+  text-shadow:0 1px 3px rgba(0,0,0,.9);
+  background:linear-gradient(0deg, rgba(5,5,7,.7), transparent);
+}
+
+/* lock overlay — informational; clicks pass through to the canvas */
+.r3d-lock-overlay{
+  position:absolute; inset:0;
+  z-index:14;
+  pointer-events:none;
+  display:flex; align-items:center; justify-content:center;
+  background:radial-gradient(ellipse at center, rgba(5,4,6,.25), rgba(5,4,6,.6) 100%);
+  transition:opacity .25s ease;
+}
+.r3d-lock-overlay.hidden{ display:none; }
+.r3d-lock-card{
+  text-align:center;
+  padding:1.1rem 1.6rem 1.2rem;
+  border:1px solid var(--deep-red);
+  border-radius:10px;
+  background:rgba(20,19,23,.82);
+  box-shadow:0 0 30px rgba(229,23,63,.18), 0 12px 36px rgba(0,0,0,.65);
+  max-width:min(88vw, 30rem);
+}
+.r3d-lock-title{
+  font-family:var(--font-head);
+  font-size:clamp(1.4rem, 3.6vw, 2rem);
+  letter-spacing:.2em;
+  color:var(--red);
+  text-shadow:var(--glow-red);
+  margin-bottom:.35rem;
+}
+.r3d-lock-line{
+  color:var(--dim);
+  font-size:clamp(.78rem, 1.8vw, .95rem);
+  letter-spacing:.05em;
+  animation:r3dHintPulse 1.8s ease-in-out infinite;
+}
+
+@media (max-width:560px){
+  .r3d-level{ font-size:.72rem; }
+  .r3d-controls{ font-size:.66rem; }
+}
