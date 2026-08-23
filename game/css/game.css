@@ -408,6 +408,7 @@ h1,h2,h3,.head{
   padding:clamp(.8rem,3vh,2rem) clamp(1rem,6vw,5rem) 0;
   position:relative;
   min-height:0;
+  overflow:hidden;
 }
 .enemy-wrap{
   position:relative;
@@ -494,12 +495,13 @@ h1,h2,h3,.head{
 .battle-bottom{
   flex:0 0 auto;
   display:grid;
-  grid-template-columns:minmax(230px,300px) minmax(180px,240px) 1fr;
+  grid-template-columns:minmax(230px,300px) minmax(180px,240px) minmax(0,1fr);
   gap:.8rem;
   padding:.8rem clamp(.6rem,2vw,1.4rem) calc(.8rem + env(safe-area-inset-bottom));
   background:linear-gradient(180deg, transparent, rgba(8,8,10,.92) 22%);
   align-items:stretch;
   z-index:5;
+  min-width:0;
 }
 .bpanel{
   background:var(--panel);
@@ -507,6 +509,7 @@ h1,h2,h3,.head{
   border-radius:10px;
   padding:.7rem .8rem;
   min-height:150px;
+  min-width:0;
 }
 .member-panel{ display:flex; gap:.7rem; position:relative; }
 .member-portrait{
@@ -728,7 +731,7 @@ h1,h2,h3,.head{
 /* ---------- Responsive ---------- */
 @media (max-width:820px){
   .battle-bottom{
-    grid-template-columns:1fr 1fr;
+    grid-template-columns:minmax(0,1fr) minmax(0,1fr);
     grid-template-areas:"member cmds" "log log";
   }
   .member-panel{ grid-area:member; }
@@ -742,7 +745,10 @@ h1,h2,h3,.head{
   .enemy-imgbox{ width:clamp(120px,26vh,200px); height:clamp(120px,26vh,200px); }
   .battle-bottom{ gap:.5rem; padding:.5rem .5rem calc(.6rem + env(safe-area-inset-bottom)); }
   .member-portrait{ flex-basis:64px; height:88px; }
-  .cmd-panel button{ font-size:.92rem; }
+  .cmd-panel button{ font-size:.9rem; padding:.32em .3em; letter-spacing:.08em; }
+  .cmd-panel{ gap:.3rem; }
+  .log-panel{ max-height:88px; }
+  .member-info{ gap:.15rem; }
   .dialog-portrait{ flex-basis:58px; height:58px; }
   .stat-grid{ grid-template-columns:repeat(2,1fr); }
   .account-card{ padding:1.2rem 1rem 1rem; }
