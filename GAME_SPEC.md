@@ -74,7 +74,7 @@ CHLOE.data.portraits = { chloe:'assets/chloe/ChloeXXX.jpg', ash:'assets/chloe/Ch
 
 ## 6. Systems
 **Progression**: `xpToNext(level) = Math.round(25 * Math.pow(level, 1.5))`. On level-up: stats += growth, full skill list = union of skillsByLevel ≤ level, show "learned X!" toast. Cap 50.
-**Battle** (`CHLOE.engine.battle`): 1 active party member vs 1 enemy; turn order by spd (tie → player).
+**Battle**: SUPERSEDED by section 10 (Combat v2 — phases & moves). Unchanged from v1: 1 active member vs 1 enemy, spd turn order (tie → player), Items/Switch/Give Up commands, KO/forced switch, victory rewards & defeat/respawn rules below.
 Player commands: **Attack** (basic, element none, 100% atk) / **Skills** (MP) / **Items** / **Switch** (change active member, uses the turn) / **Give Up** (flee: 70% success, else enemy free hit; cannot flee boss fights — battle action `boss:true` later).
 Damage: `max(1, round((usesMag?mag:atk+weaponAtk) * power/100 * elemMult * (0.85..1.15 rand) - def*0.5))`. Fallen ally auto-forces Switch if another alive; all fallen → defeat screen → respawn at start scene with full HP, lose 30% shards.
 Victory: xp + shards + drops, level-up check, `onFirstVictoryDialog` after the first ever win.
@@ -91,3 +91,59 @@ Palette: bg `#0a0a0c`, panel `#141317`, red accent `#e5173f`, deep red `#7a0c22`
 
 ## 9. Hosting (all free)
 GitHub Pages serves repo root (`/index.html` landing links relatively to `game/`). Cloudflare Pages serves the same repo → second URL (redundancy if one is down). Worker (free plan, workers.dev) + KV namespace `CHLOE_KV` for cloud saves; `game/js/data/config.js` holds `apiUrl` (default `''`).
+
+## 10. Combat v2 — Phases & Moves (supersedes skills.js schema and v1 battle rules)
+
+### Phases
+Each combatant (party member AND enemy) is always in exactly one phase:
+`neutral` | `aggressive` | `guarded` | `staggered` | `charged`.
+Modifiers: aggressive deals x1.25 / takes x1.15; guarded takes x0.60; staggered deals x0.75 / takes x1.25; charged next attack x1.5 (then phase is consumed -> neutral); neutral x1.0. Battle always starts both sides neutral. Phase badges shown for both sides at all times.
+
+### Move schema (game/js/data/moves.js — REPLACES skills.js, which is deleted)
+```js
+CHLOE.data.moves = { id: { id, name, cat:'attack'|'defense'|'stance'|'status',
+  element /*'ember'|'frost'|'volt'|'shadow'|'light'|'none'*/, power /*attack only, % of atk|mag*/,
+  usesMag:bool, accuracy /*0-1*/, mpCost, usableIn:['neutral','aggressive',...],
+  blocks:{cats:[],elements:[]} /*defense only: what it blocks*/,
+  stanceTo:'aggressive'|'guarded'|'charged' /*stance only*/,
+  effect:{ hpPct?|mp?|buff?|debuff?|dot? , stat?, amount?, turns? } /*status/defense extras*/,
+  desc } }
+```
+
+### Loadouts — the 5-move rule
+Per character, per phase, the player equips up to **5 moves** chosen from moves that are BOTH learned (level >= learnset entry) AND list that phase in `usableIn`. Stored in save: `loadouts:{charId:{phaseId:[<=5 ids]}}`. Characters define `learnset:{level:[moveIds]}` (replaces skillsByLevel) and `defaultLoadouts` (auto-applied on new game / when a save lacks them). New moves learned on level-up are auto-equipped into matching phases that have a free slot, else left unequipped with a toast. Menu gets a **Loadout editor**: pick character -> phase tabs -> grid of learned moves (cat icon, element, cost, desc) -> tap to equip/unequip, live count x/5, invalid picks disabled.
+
+### Resolution (engine order — implement exactly)
+Sequential turns by spd as v1. When a combatant uses a move:
+1. Pay MP (insufficient MP = move not selectable).
+2. `stance`: set own phase to `stanceTo`, apply optional effect. Done.
+3. `status`: apply effect (buff/debuff 3 turns, dot 3 turns, heal instant). No phase change.
+4. `defense`: own phase -> `guarded`; register block `{cats, elements}` lasting until the start of this combatant's NEXT turn; optional effect (e.g. small heal, counter thorns).
+5. `attack`: accuracy roll — miss => attacker -> `staggered`, log "whiff", done. If defender has an active block matching the move's cat OR element: damage x0.2, attacker -> `staggered`, defender stays `guarded`, done. Else damage = v1 formula x elements.multiplier x attacker-phase deal-mod x defender-phase take-mod (charged: x1.5 then attacker charged->neutral). Then by raw element multiplier: >=2.0 => defender -> `staggered` AND attacker -> `aggressive`; <=0.5 => defender -> `aggressive` (shrugged it off) and attacker aggressive->neutral; else no change.
+6. `staggered` recovery: when a staggered combatant finishes any turn, they return to `neutral` at the start of their next turn.
+7. Failsafes ALWAYS appended to the battle menu regardless of loadout: **Struggle** (attack, none, power 60, acc 1.0, 0 MP, usable in every phase) and **Recover** (stance -> neutral, +5% HP, only shown while staggered). A phase with 0 equipped usable moves still offers these.
+
+### Battle API (contract between engine and UI — battle.js owns state, battleui.js only renders)
+`CHLOE.engine.battle.start(enemyId, opts)` -> state. `state`: {enemy, playerPhase, enemyPhase, blocks, over, result, turn}. Actions: `.act(moveId)`, `.item(itemId)`, `.switchTo(charId)`, `.flee()` — each resolves the full exchange and returns an ordered event array for the UI to animate: `[{t:'move'|'dmg'|'block'|'miss'|'phase'|'status'|'ko'|'switch'|'end', side:'p'|'e', ...detail}]`. `CHLOE.engine.battle.menu()` -> the current <=5 equipped+usable moves (+failsafes) with `disabled` flags (MP). UI never computes rules.
+
+### Enemies
+Enemy schema gains `moveset:[moveIds]` (3-5, from the same moves.js pool) replacing `skills`, and AI 'phased': if staggered -> Recover or best attack; prefer super-effective attack vs current player element; if player is `charged` and enemy has a defense move -> 60% use it; if own HP < 30% and has heal/status -> 40% use it; otherwise random equipped attack. Bosses unchanged: no flee.
+
+### Save v2 + migration
+Save blob v:2 adds `loadouts`. Loading a v:1 save (or missing/invalid loadouts / >5 entries / unlearned ids) silently rebuilds from `defaultLoadouts` + learned level. Everything else unchanged.
+
+### UI requirements
+Battle screen adds: phase badge next to each HP bar (color-coded: neutral #9a939c, aggressive #e5173f, guarded #3d9bdc, staggered #d8a31a, charged #a44ce0) with a one-line tooltip; move buttons show cat icon (attack crossed swords, defense shield, stance footprints, status sparkle), element color dot, MP cost; effectiveness/block/phase-shift events get log lines AND floating labels ("SUPER", "BLOCKED", "STAGGERED!"). How-to-play rewritten to explain the phase loop in plain words. Loadout editor reachable from menu overlay AND from a "Moves" button on the battle screen (read-only during battle).
+
+### Balance targets
+Neon Wisp still dies to a lvl-1 default loadout in 3-5 exchanges; a player who never opens the loadout editor must be able to finish Act 1 on defaults; each character learns 12-16 moves by lvl 10 spread across all four categories (Chloe ember/light lean, Ash volt/shadow lean); phase play (stance into charged, guard-then-punish) should beat mindless attacking by roughly 30% fewer turns.
+
+## 11. The Room — one-room horror start (supersedes the old opening; old scenes stay as the world behind the door)
+The game now starts in ONE generated horror room and stays there until it is cleared. Super small, dense, fully interactive.
+- Scene id `the_room` ("The Dressing Room"). BG: generated image `assets/gen/room-dressing.jpg` (wide, 1152x768): the Red Room dressing room gone wrong — deep red emergency light, broken vanity mirror, old CRT TV static, torn couch, guitar case, scattered polaroids, door ajar into darkness. Horror-movie still.
+- Asset agent generates the room + views it + writes `tools/room-manifest.json`: `{bg, items:[{id,label,x,y,w,h,kind}]}` — x/y/w/h in PERCENT, hand-mapped to the items ACTUALLY VISIBLE in the generated image (must include mirror, door, couch + 3-5 more). Every visible item gets a clickable area.
+- Hotspots (story agent, coords from manifest): mirror → first battle vs **the_hollow** (once, setsFlag `roomCleared`, intro dialog before); door → locked dialog while `!roomCleared` (Ash pounding, muffled, outside), goto `stage` when `roomCleared`; couch → heal; guitar case → pickup bandage (once); every other mapped item → unsettling examine dialog. Old scenes/dialogs unchanged beneath.
+- Story: startScene `the_room`. New 6-8 line intro: Chloe wakes alone after the gig, door locked, Ash's voice wrong through the door, no sound from the club. Tone: horror, wry. Victory: mirror shatters, door clicks open.
+- Party: new game starts **solo Chloe**. When `roomCleared` is set, Ash joins (engine hook on battle victory flag; toast "Ash joined"). Battle Switch is hidden/disabled while party size is 1. Old saves with both members keep working.
+- New enemy `the_hollow` (enemies.js): a hollowed-out stagehand, shadow, lvl 1, image `assets/gen/enemy-the-hollow.jpg` (generated), moveset from moves.js, beatable by solo lvl-1 Chloe on the default loadout in 3-6 exchanges, drops a bandage 50%. It replaces neon_wisp as the first story fight (neon_wisp and the rest stay for the world beyond).
+- Scene UI: hotspots must read as ITEMS: a faint pulsing red glint marker on each interactable, stronger outline + label on hover/tap. (scene.js + css.)

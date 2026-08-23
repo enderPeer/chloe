@@ -1,6 +1,10 @@
 /* CHLOE — engine/save.js
    Accounts:  localStorage['chloe.accounts']  = { <lowername>: {name, pinHash, createdAt} }
    Saves:     localStorage['chloe.save.'+name] (name lowercased)
+   Save blob v:2 (Combat v2): adds loadouts:{charId:{phaseId:[<=5 moveIds]}}.
+   v:1 blobs (or blobs with missing/invalid loadouts) are migrated silently on
+   read — shape here, content in party.applyBlob via progression.sanitizeLoadouts
+   (rebuild from defaultLoadouts + learned level). Everything else unchanged.
    pinHash = SHA-256(lower(name)+':'+pin) via WebCrypto (async, with pure-JS fallback
    so file:// contexts without crypto.subtle never throw).
    Cloud sync: only when CHLOE.data.config.apiUrl is non-empty; always fails silently. */
@@ -163,10 +167,11 @@ CHLOE.engine.save = (function(){
     if (!current) return null;
     var party = CHLOE.engine.party, inv = CHLOE.engine.inventory;
     var blob = {
-      v: 1,
+      v: 2,
       name: current.name,
       savedAt: Date.now(),
-      party: [], activeId: null, inventory: {}, shards: 0, flags: {}, scene: null
+      party: [], activeId: null, inventory: {}, shards: 0, flags: {}, scene: null,
+      loadouts: {}
     };
     if (party && party.state) {
       var st = party.state;
@@ -177,8 +182,23 @@ CHLOE.engine.save = (function(){
       blob.shards = st.shards;
       blob.flags = st.flags || {};
       blob.scene = st.scene;
+      try { blob.loadouts = JSON.parse(JSON.stringify(st.loadouts || {})); }
+      catch(e){ blob.loadouts = {}; }
     }
     if (inv) blob.inventory = inv.serialize();
+    return blob;
+  }
+
+  /* Silent v1 -> v2 migration + shape validation. Never throws, never warns.
+     Loadout CONTENT (learned ids, <=5 per phase, valid phases) is validated in
+     party.applyBlob, which rebuilds invalid entries from defaultLoadouts. */
+  function migrate(blob){
+    if (!blob || typeof blob !== 'object') return null;
+    if (!Array.isArray(blob.party)) blob.party = [];
+    if (!blob.inventory || typeof blob.inventory !== 'object' || Array.isArray(blob.inventory)) blob.inventory = {};
+    if (!blob.flags || typeof blob.flags !== 'object' || Array.isArray(blob.flags)) blob.flags = {};
+    if (!blob.loadouts || typeof blob.loadouts !== 'object' || Array.isArray(blob.loadouts)) blob.loadouts = {};
+    blob.v = 2;
     return blob;
   }
 
@@ -186,7 +206,7 @@ CHLOE.engine.save = (function(){
     return !!lsGet(saveKey(name));
   }
   function readLocal(name){
-    return jsonParse(lsGet(saveKey(name)), null);
+    return migrate(jsonParse(lsGet(saveKey(name)), null));
   }
   function writeLocal(blob){
     if (!blob || !blob.name) return false;
@@ -245,7 +265,7 @@ CHLOE.engine.save = (function(){
     if (!current) return Promise.resolve(null);
     var local = readLocal(current.name);
     return cloudPost('/load', { name: current.name, pinHash: current.pinHash }).then(function(res){
-      var remote = res && res.save ? res.save : null;
+      var remote = res && res.save ? migrate(res.save) : null;
       if (remote && (!local || (remote.savedAt || 0) > (local.savedAt || 0))) {
         writeLocal(remote);
         return remote;
@@ -270,6 +290,7 @@ CHLOE.engine.save = (function(){
     writeLocal: writeLocal,
     deleteLocal: deleteLocal,
     buildBlob: buildBlob,
+    migrate: migrate,
     saveNow: saveNow,
     autosave: autosave,
     cloudRegister: cloudRegister,

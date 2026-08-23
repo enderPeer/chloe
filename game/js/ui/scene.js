@@ -1,7 +1,9 @@
 /* CHLOE — ui/scene.js
    Point-and-click scene screen: full-bleed bg, % positioned hotspots with
-   hover glow + label tooltip, HUD (shards + menu), intro dialog on first visit.
-   Missing scenes/dialogs log a warning and render a safe fallback — no crashes. */
+   a pulsing red glint marker (items must READ as items — spec sec 11),
+   stronger outline + label on hover/tap, HUD (shards + menu), intro dialog
+   on first visit. Missing scenes/dialogs log a warning and render a safe
+   fallback — no crashes. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -115,7 +117,18 @@ CHLOE.ui.scene = (function(){
     d.style.top = (hs.y || 0) + '%';
     d.style.width = (hs.w || 10) + '%';
     d.style.height = (hs.h || 10) + '%';
+    // pulsing red glint marker so interactables read as items
+    var glint = ui.el('span', 'hs-glint');
+    glint.appendChild(ui.el('i'));
+    d.appendChild(glint);
     if (hs.label) d.appendChild(ui.el('div', 'hs-label', hs.label));
+    // stronger outline + label on tap (touch devices don't hover)
+    var touchTimer = null;
+    d.addEventListener('touchstart', function(){
+      d.classList.add('hs-touch');
+      if (touchTimer) window.clearTimeout(touchTimer);
+      touchTimer = window.setTimeout(function(){ d.classList.remove('hs-touch'); }, 1500);
+    }, { passive: true });
     d.addEventListener('click', function(){
       if (CHLOE.ui.dialog.isActive()) return; // let the dialog finish first
       runAction(sc, hs.action || {}, index);

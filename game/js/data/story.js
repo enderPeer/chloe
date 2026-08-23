@@ -4,20 +4,59 @@ window.CHLOE=window.CHLOE||{};CHLOE.data=CHLOE.data||{};
 
 CHLOE.data.dialogs = {
 
-  // ---- Intro: after the gig, the halls start looping (played once at new game) ----
+  // ---- Intro (spec §11): Chloe wakes alone in the dressing room after the gig (played once at new game) ----
   intro: [
-    { speaker: 'chloe', portrait: 'chloe', text: 'Good set. Nobody threw anything. In this district, that\'s a standing ovation.' },
-    { speaker: 'ash', portrait: 'ash', text: 'Chloe. The room\'s empty.' },
-    { speaker: 'chloe', portrait: 'chloe', text: 'It\'s late. People leave.' },
-    { speaker: 'ash', portrait: 'ash', text: 'Mid-song? Their drinks are still on the tables. Marek\'s not at the bar. Marek is ALWAYS at the bar.' },
-    { speaker: 'chloe', portrait: 'chloe', text: '...Okay. That\'s new.' },
-    { speaker: 'ash', portrait: 'ash', text: 'Also — listen. No traffic. No music from upstairs. Nothing.' },
-    { speaker: 'chloe', portrait: 'chloe', text: 'The Red Room is never quiet. It\'s in the lease.' },
-    { speaker: '???', text: '...encore... encore... encore...' },
-    { speaker: 'ash', portrait: 'ash', text: 'Please tell me that was you.' },
-    { speaker: 'chloe', portrait: 'chloe', text: 'Grab Livewire. I\'ve got the Fret. We find whoever\'s doing this and we have a conversation.' },
-    { speaker: 'ash', portrait: 'ash', text: 'A conversation. With the guitar.' },
-    { speaker: 'chloe', portrait: 'chloe', text: 'I\'m very persuasive in E minor. Come on — the corridor\'s this way. I think. It was this way.' }
+    { speaker: 'chloe', portrait: 'chloe', text: 'Ow. Okay. Floor of the dressing room. Last thing I remember is the encore... which we never play.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'Ash? The gig ended. I think the gig ended. Why is the light doing THAT.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'Listen. Forty drunk people, a sound system, a street outside. And I can hear my own heartbeat. Nothing else.' },
+    { speaker: '???', text: '...chloe. open the door, chloe. it\'s me. it\'s asssh.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'That\'s Ash\'s voice. Most of it. Ash doesn\'t hiss her own name, and Ash would just come IN—' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'The door\'s locked. From my side. I didn\'t lock it, and this door doesn\'t HAVE a lock.' },
+    { speaker: '???', text: '...you were so good tonight. do the encore. do it forever.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'Right. Crimson Fret\'s still on my back. Whatever\'s wrong with this room, I\'m very persuasive in E minor.' }
+  ],
+
+  // ---- The Room (spec §11) — dressing room hotspot dialogs ----
+  door_locked: [
+    { speaker: 'chloe', portrait: 'chloe', text: 'Locked. Solid. The knob\'s warm, like someone\'s been holding it from the other side this whole time.' },
+    { speaker: 'ash', portrait: 'ash', text: '*muffled, through the door* Chloe? Chloe, open up — it\'s me, it\'s— *the voice drops an octave mid-word* —meeee.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'See, ninety percent of that was my sister. It\'s the last ten percent I\'m not opening the door for.' }
+  ],
+  dlg_room_mirror_pre: [
+    { speaker: 'chloe', portrait: 'chloe', text: 'The vanity mirror\'s dead — no reflection, just... depth. Like looking into a hallway with the lights off.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'Wait. Something\'s standing in it. Stagehand vest, lanyard, no— where\'s its face. WHERE\'S ITS—' },
+    { speaker: '???', text: '...encore...' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'Okay. It\'s coming through. Fret up. Let\'s see if it likes E minor.' }
+  ],
+  dlg_room_lamp: [
+    { speaker: 'chloe', portrait: 'chloe', text: 'The light strip over the mirror is flickering. Long, short, short, long. That\'s not a dying bulb — that\'s a rhythm.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'It\'s our set list. It\'s flickering our SET LIST. I want to be flattered and I am not.' }
+  ],
+  dlg_room_polaroids: [
+    { speaker: 'chloe', portrait: 'chloe', text: 'Our gig polaroids, swept off the mirror frame. Me and Ash at the bar, on stage, in the alley...' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'Except in every single one, Ash is looking at the camera. She wasn\'t. I took half of these.' }
+  ],
+  dlg_room_stool: [
+    { speaker: 'chloe', portrait: 'chloe', text: 'The vanity stool, tipped on its side. Still spinning. Slowly. It has been spinning this whole time.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'I\'m not touching it. Some furniture you just let win.' }
+  ],
+  dlg_room_armchair: [
+    { speaker: 'chloe', portrait: 'chloe', text: 'The armchair sags in the middle like someone heavy is still sitting in it. The cushion\'s warm.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'Nobody\'s there. I checked twice. I\'m going to stop checking, because third time feels like an invitation.' }
+  ],
+  dlg_room_closet: [
+    { speaker: 'chloe', portrait: 'chloe', text: 'The wardrobe. Door open exactly one hand\'s width. Inside: our stage clothes, and a dark that doesn\'t match the room.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'Something in there is breathing very, very quietly. So we\'re both going to pretend I didn\'t notice.' }
+  ],
+  // Victory beat (spec §11): mirror shatters, door clicks open, Ash gets in — engine adds her to the party on roomCleared.
+  room_victory: [
+    { speaker: 'chloe', portrait: 'chloe', text: 'It just — folded. Like an empty costume. And the mirror went with it—' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'The whole pane\'s shattering. Every shard hitting the floor makes a sound like applause. I hate this venue.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'And the door just clicked. Like it lost interest in me.' },
+    { speaker: 'ash', portrait: 'ash', text: '*bursting in, switchblade out* CHLOE. I\'ve been pounding on that door for an hour — it kept ANSWERING me. In your voice.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'Funny. It was doing yours. Bad impression, by the way — you don\'t hiss nearly that much.' },
+    { speaker: 'ash', portrait: 'ash', text: 'The club\'s empty and the halls are wrong. Livewire\'s charged and I\'m not leaving your side again. Let\'s go.' },
+    { speaker: 'chloe', portrait: 'chloe', text: 'Grab those shards on your way. If tonight runs on broken mirror, we\'re getting paid in it.' }
   ],
 
   // ---- After the first ever battle victory ----
@@ -156,11 +195,14 @@ CHLOE.data.dialogs = {
 };
 
 CHLOE.data.story = {
-  startScene: 'stage',
+  startScene: 'the_room',
   introDialog: 'intro',
-  onFirstVictoryDialog: 'first_victory',
+  // First story fight is now the_hollow in the_room (spec §11); its victory beat covers mirror-shatter + door click + Ash joining.
+  // ('first_victory' is kept above for saves/flows that already passed the old opening.)
+  onFirstVictoryDialog: 'room_victory',
   // Flag documentation — every flag set/required anywhere in scenes.js:
   flags: {
+    roomCleared: 'Set by defeating the_hollow at the dressing-room mirror in the_room (spec §11). Unlocks the door hotspot (goto stage) and triggers the engine hook that adds Ash to the party.',
     firstWispDown: 'Set by defeating the first Neon Wisp in corridor_a. Stops the red corridors looping: opens corridor_loop -> corridor_b.',
     ghoulSilenced: 'Set by defeating the Static Ghoul in corridor_b. Opens backstage_between -> mirror_hall (the glittering doorway).',
     shadeShattered: 'Set by defeating the Mirror Shade in mirror_hall. Shatters the mirror-glass chains: opens corridor_b -> vip_room (boss door).',

@@ -1,0 +1,14 @@
+{
+  "bg": "assets/gen/room-dressing.jpg",
+  "items": [
+    { "id": "mirror",    "label": "Dead vanity mirror",   "x": 37, "y": 24, "w": 25, "h": 28, "kind": "mirror" },
+    { "id": "lamp",      "label": "Flickering light strip","x": 39, "y": 19, "w": 21, "h": 5,  "kind": "lamp" },
+    { "id": "polaroids", "label": "Scattered polaroids",  "x": 34, "y": 52, "w": 32, "h": 8,  "kind": "polaroids" },
+    { "id": "stool",     "label": "Vanity stool",         "x": 43, "y": 60, "w": 12, "h": 16, "kind": "stool" },
+    { "id": "door",      "label": "Door ajar",            "x": 1,  "y": 14, "w": 12, "h": 45, "kind": "door" },
+    { "id": "armchair",  "label": "Sagging armchair",     "x": 0,  "y": 59, "w": 24, "h": 34, "kind": "chair" },
+    { "id": "closet",    "label": "Dark wardrobe",        "x": 64, "y": 29, "w": 11, "h": 23, "kind": "closet" },
+    { "id": "couch",     "label": "Torn leather couch",   "x": 71, "y": 58, "w": 29, "h": 30, "kind": "couch" },
+    { "id": "case",      "label": "Dropped gig bag",      "x": 46, "y": 81, "w": 25, "h": 14, "kind": "case" }
+  ]
+}

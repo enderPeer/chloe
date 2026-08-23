@@ -1,5 +1,5 @@
 /* CHLOE — ui/menu.js
-   Menu overlay: Party / Inventory / Save / How to play. */
+   Menu overlay: Party / Inventory / Moves (loadout editor) / Save / How to play. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -30,7 +30,7 @@ CHLOE.ui.menu = (function(){
     var card = ui.el('div', 'menu-card');
 
     var tabs = ui.el('div', 'menu-tabs');
-    [['party','Party'], ['inventory','Inventory'], ['save','Save'], ['help','How to play'], ['close','✕']]
+    [['party','Party'], ['inventory','Inventory'], ['moves','Moves'], ['save','Save'], ['help','How to play'], ['close','✕']]
       .forEach(function(t){
         var b = ui.el('button', tab === t[0] ? 'on' : '', t[1]);
         b.addEventListener('click', function(){
@@ -44,6 +44,7 @@ CHLOE.ui.menu = (function(){
     var body = ui.el('div', 'menu-body');
     if (tab === 'party') renderParty(body);
     else if (tab === 'inventory') renderInventory(body);
+    else if (tab === 'moves') renderMoves(body);
     else if (tab === 'save') renderSave(body);
     else renderHelp(body);
     card.appendChild(body);
@@ -97,11 +98,14 @@ CHLOE.ui.menu = (function(){
       xt.appendChild(ui.el('span', null, w ? w.name : 'Bare hands'));
       info.appendChild(xt);
 
-      var skills = party.skillsOf(m).map(function(id){
-        var s = (CHLOE.data.skills || {})[id];
+      var moveIds = (CHLOE.ui.loadout && CHLOE.ui.loadout.learnedIds)
+        ? CHLOE.ui.loadout.learnedIds(m.id, m.level)
+        : (party.skillsOf ? party.skillsOf(m) : []);
+      var moveNames = moveIds.map(function(id){
+        var s = (CHLOE.data.moves || {})[id] || (CHLOE.data.skills || {})[id];
         return s ? s.name : id;
       }).join(' · ');
-      var sk = ui.el('div', 'ds', 'Skills: ' + (skills || '—'));
+      var sk = ui.el('div', 'ds', 'Moves: ' + (moveNames || '—'));
       sk.style.color = 'var(--dim)';
       sk.style.fontSize = '.8rem';
       sk.style.marginTop = '.35rem';
@@ -167,6 +171,15 @@ CHLOE.ui.menu = (function(){
     });
   }
 
+  /* ---------- Moves (loadout editor) ---------- */
+  function renderMoves(body){
+    if (CHLOE.ui.loadout && CHLOE.ui.loadout.renderInto) {
+      CHLOE.ui.loadout.renderInto(body, { readOnly: false });
+    } else {
+      body.appendChild(ui.el('div', 'menu-note', 'The moves board is dark right now.'));
+    }
+  }
+
   /* ---------- Save ---------- */
   function renderSave(body){
     var save = CHLOE.engine.save;
@@ -213,10 +226,13 @@ CHLOE.ui.menu = (function(){
       d.innerHTML = html; // static help copy only — no user input
       h.appendChild(d);
     };
-    add('<b>Explore.</b> Click the glowing <span class="k">hotspots</span> in each scene to move, talk, search — and fight what waits in the dark.');
-    add('<b>Battle.</b> Turns go by <span class="k">SPD</span>. <span class="k">Attack</span> is free; <span class="k">Skills</span> cost MP; <span class="k">Items</span>, <span class="k">Switch</span> and fleeing each use your turn. You can\'t run from bosses.');
+    add('<b>Explore.</b> Look for the small <span class="k">red glints</span> in each scene — anything that glints can be touched. Tap or hover to see what it is, click to move, talk, search, and fight what waits in the dark.');
+    add('<b>Phases.</b> In battle, you and the enemy are always in one of five phases: <span class="k">Neutral</span> (normal), <span class="k">Aggressive</span> (hit harder, get hit harder), <span class="k">Guarded</span> (take much less damage), <span class="k">Staggered</span> (weak and wobbly for a turn), and <span class="k">Charged</span> (your next attack hits 1.5x). The badge next to each HP bar shows the current phase.');
+    add('<b>The loop.</b> Stance moves shift your phase — step Aggressive to press, Guard when a big hit is coming, or Charge up and unload. Defense moves block certain attacks: a blocked attacker staggers, and staggered fighters hit soft and bruise easy. Hit an elemental weakness and THEY stagger while you surge Aggressive. Punish staggers, that\'s the whole dance.');
+    add('<b>Moves.</b> Each phase has its own set of up to <span class="k">5 equipped moves</span> — you only see the moves of the phase you\'re in. Missing an attack staggers you; <span class="k">Struggle</span> (free hit) is always there, and <span class="k">Recover</span> appears while staggered. Edit sets any time in <span class="k">Menu → Moves</span>.');
+    add('<b>Turns.</b> Order goes by <span class="k">SPD</span>. Moves cost MP; <span class="k">Items</span>, <span class="k">Switch</span> and fleeing each use your turn. You can\'t run from bosses.');
     add('<b>Elements.</b> Ember &gt; Frost &gt; Volt &gt; Ember (2x with the arrow, 0.5x against it). Shadow and Light burn each other for 2x.');
-    add('<b>Falling.</b> If a bandmate drops, the other steps in. If both fall, you wake at the start and lose 30% of your <span class="k">◆ shards</span>.');
+    add('<b>Falling.</b> If a bandmate drops, the other steps in. If everyone falls, you wake at the start and lose 30% of your <span class="k">◆ shards</span>.');
     add('<b>Shards ◆.</b> Splinters of the club\'s broken mirror wall — the only currency the Between respects.');
     body.appendChild(h);
   }
