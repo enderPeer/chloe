@@ -1,0 +1,128 @@
+[
+  {
+    "file": "Chloe043.jpg",
+    "shot": "full",
+    "people": 2,
+    "setting": "dark void, dirty ground",
+    "mood": "grim, weary",
+    "desc": "Two blondes in leather and tee walk through darkness, one smoking, heads bowed.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe044.jpg",
+    "shot": "half",
+    "people": 2,
+    "setting": "black studio backdrop",
+    "mood": "wary, tense",
+    "desc": "Leather-jacketed girl beside younger girl in black tee, cigarette held low against blackness.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe045.jpg",
+    "shot": "half",
+    "people": 2,
+    "setting": "black studio backdrop",
+    "mood": "defiant, cool",
+    "desc": "Two girls in leather jackets, one smoking, the other with dirt-smudged face.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe046.jpg",
+    "shot": "full",
+    "people": 2,
+    "setting": "dark void",
+    "mood": "startled, anxious",
+    "desc": "Girls in studded vest and oversized tee walk forward holding cigarettes, wide-eyed.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe047.jpg",
+    "shot": "half",
+    "people": 2,
+    "setting": "black void",
+    "mood": "sullen, edgy",
+    "desc": "Smudged blonde in leather and friend in dark tee, cigarette smoke curling between them.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe048.jpg",
+    "shot": "half",
+    "people": 2,
+    "setting": "dark room, bare bulb",
+    "mood": "haunted, cold",
+    "desc": "Pale girls in studded jackets under a single hanging light, cigarette between lips.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe049.jpg",
+    "shot": "full",
+    "people": 2,
+    "setting": "dark stage, littered floor",
+    "mood": "bleak, tired",
+    "desc": "Head-to-toe pair in jeans and shorts trudging across a dark dirty floor.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe050.jpg",
+    "shot": "half",
+    "people": 2,
+    "setting": "dim corridor, skylight above",
+    "mood": "somber, watchful",
+    "desc": "Two girls in leather jackets pause in a dark hallway, one raising a cigarette.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe051.jpg",
+    "shot": "wide",
+    "people": 2,
+    "setting": "leopard-print hotel hallway",
+    "mood": "uneasy, gritty",
+    "desc": "Pair in a patterned corridor, one smoking, the other showing dirt-stained hands.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe052.jpg",
+    "shot": "wide",
+    "people": 2,
+    "setting": "patterned corridor, hanging lamps",
+    "mood": "detached, cool",
+    "desc": "Two smokers walk a wallpapered hallway beneath old ceiling lamps.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe053.jpg",
+    "shot": "wide",
+    "people": 2,
+    "setting": "battered graffiti-flecked corridor",
+    "mood": "wary, grim",
+    "desc": "Full-length pair advancing down a decayed hallway toward camera, cigarette in hand.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe054.jpg",
+    "shot": "wide",
+    "people": 2,
+    "setting": "blue-lit institutional corridor",
+    "mood": "tearful, tense",
+    "desc": "Blonde in white dress and brunette in black walk a cold blue hallway.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe055.jpg",
+    "shot": "wide",
+    "people": 2,
+    "setting": "empty blue room, fluorescent ceiling",
+    "mood": "confrontational, eerie",
+    "desc": "Full-body pair striding through a bare blue-lit room, cigarettes in hands.",
+    "portrait": false
+  },
+  {
+    "file": "Chloe056.jpg",
+    "shot": "wide",
+    "people": 2,
+    "setting": "blue checkered-tile corridor",
+    "mood": "eerie, calm",
+    "desc": "Two blondes walk a glowing blue mosaic corridor, debris scattered on the floor.",
+    "portrait": false
+  }
+]
