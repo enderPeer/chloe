@@ -14,6 +14,41 @@ window.CHLOE=window.CHLOE||{};CHLOE.data=CHLOE.data||{};
 
 CHLOE.data.scenes = {
 
+  // ---- Spec §11: The Room — one-room horror start. Coords hand-mapped in tools/room-manifest.json (percent). ----
+  the_room: {
+    id: 'the_room',
+    name: 'The Dressing Room',
+    bg: 'assets/gen/room-dressing.jpg',
+    intro: 'Red emergency light. A dead mirror. A door that was open a second ago. Somewhere, a TV hisses static at no one.',
+    hotspots: [
+      // mirror — first battle, pre-battle dialog, clears the room
+      { x: 37, y: 24, w: 25, h: 28, label: 'Dead vanity mirror',
+        action: { type: 'battle', enemyId: 'the_hollow', dialogId: 'dlg_room_mirror_pre', once: true, setsFlag: 'roomCleared' } },
+      // door — locked dialog until roomCleared; the goto hotspot below overlays it once the flag is set
+      { x: 1, y: 14, w: 12, h: 45, label: 'Door ajar',
+        action: { type: 'dialog', dialogId: 'door_locked' } },
+      { x: 1, y: 14, w: 12, h: 45, label: 'Door — unlocked',
+        action: { type: 'goto', scene: 'stage', requiresFlag: 'roomCleared' } },
+      // couch — rest / heal
+      { x: 71, y: 58, w: 29, h: 30, label: 'Torn leather couch',
+        action: { type: 'heal' } },
+      // guitar case — one-time bandage pickup
+      { x: 46, y: 81, w: 25, h: 14, label: 'Dropped gig bag',
+        action: { type: 'pickup', itemId: 'bandage', once: true } },
+      // remaining mapped items — examine dialogs
+      { x: 39, y: 19, w: 21, h: 5, label: 'Flickering light strip',
+        action: { type: 'dialog', dialogId: 'dlg_room_lamp' } },
+      { x: 34, y: 52, w: 32, h: 8, label: 'Scattered polaroids',
+        action: { type: 'dialog', dialogId: 'dlg_room_polaroids' } },
+      { x: 43, y: 60, w: 12, h: 16, label: 'Vanity stool',
+        action: { type: 'dialog', dialogId: 'dlg_room_stool' } },
+      { x: 0, y: 59, w: 24, h: 34, label: 'Sagging armchair',
+        action: { type: 'dialog', dialogId: 'dlg_room_armchair' } },
+      { x: 64, y: 29, w: 11, h: 23, label: 'Dark wardrobe',
+        action: { type: 'dialog', dialogId: 'dlg_room_closet' } }
+    ]
+  },
+
   stage: {
     id: 'stage',
     name: 'The Red Room — Stage',
