@@ -9,9 +9,9 @@
      stanceTo:'aggressive'|'guarded'|'charged'|'neutral'  // stance only ('neutral' only on the recover failsafe, per §10 Resolution 7)
      effect:{...}  // status/defense extras. Conventions:
        { hpPct:n }                                  -> instant heal, % of max HP
-       { buff:true,  stat:'atk'|'def'|..., amount:n /*percent*/, turns:n }
-       { debuff:true, stat:'atk'|'def'|..., amount:n /*percent*/, turns:n }
-       { dot:true, amount:n /*flat HP per turn*/, turns:n }
+       { buff:true,  stat:'atk'|'def'|..., amount:n (percent), turns:n }
+       { debuff:true, stat:'atk'|'def'|..., amount:n (percent), turns:n }
+       { dot:true, amount:n (flat HP per turn), turns:n }
      failsafe:true  -> engine failsafes (Struggle / Recover), always in the battle menu
      desc }
 */

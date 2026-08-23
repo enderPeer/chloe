@@ -439,8 +439,9 @@ CHLOE.ui.battle = (function(){
         return 120;
 
       case 'move':
-        logLine(ev.text || ((side === 'e' ? enemyName() : activeName()) + ' uses ' + moveName(ev) + '!'),
-          side === 'e' ? '' : 'hot');
+        // The engine follows every 'move' with its own 'log' line — only log
+        // here if this event carries its own text (avoids duplicate lines).
+        if (ev.text) logLine(ev.text, side === 'e' ? '' : 'hot');
         return 300;
 
       case 'dmg': {
@@ -605,7 +606,7 @@ CHLOE.ui.battle = (function(){
       });
       (rw.learned || []).forEach(function(l){
         var def = (CHLOE.data.characters || {})[l.memberId] || {};
-        lines.appendChild(ui.el('div', 'lvl', (def.name || l.memberId) + ' learned ' + (l.move || l.skill) + '!'));
+        lines.appendChild(ui.el('div', 'lvl', (def.name || l.memberId) + ' learned ' + (l.name || l.move || l.skill || l.moveId) + '!'));
       });
       (rw.drops || []).forEach(function(d){
         lines.appendChild(ui.el('div', null, 'Found: ' + d));

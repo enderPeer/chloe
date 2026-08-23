@@ -8,7 +8,9 @@
        state: { enemy:{hp,mp,maxHp,maxMp}, playerPhase, enemyPhase,
                 blocks:{p,e}, over, result, turn, boss, enemyDef, rewards }
      act(moveId) / item(itemId, targetId) / switchTo(charId) / flee()
-       -> ordered event array for the UI to animate.
+       -> ordered event array for the UI to animate. Each resolves the full
+       exchange; a move pick that is not on the current menu (or MP-disabled)
+       returns a lone log event WITHOUT consuming the exchange.
      menu() -> current <=5 equipped+usable moves (+failsafes) with disabled flags.
      getLoadout(charId) / setLoadout(charId, phase, ids<=5) — loadout editor I/O.
      canSwitch() / canFlee() / phases() — rule lookups so the UI never computes.
@@ -157,17 +159,19 @@ CHLOE.engine.battle = (function(){
   }
 
   /* ---------- damage & healing ---------- */
+  // Returns true if the ORIGINAL target was KO'd by this damage (even when a
+  // forced switch immediately brings in a fresh member on the player side).
   function applyDamage(ev, s, amount, mult, extra){
     extra = extra || {};
     if (s === 'e') {
       state.enemy.hp = Math.max(0, state.enemy.hp - amount);
       ev.push({ t: 'dmg', side: 'e', amount: amount, mult: mult, hpAfter: state.enemy.hp,
                 maxHp: state.enemy.maxHp, blocked: !!extra.blocked, dot: !!extra.dot, label: extra.label || '' });
-      if (state.enemy.hp <= 0) ev.push({ t: 'ko', side: 'e' });
-      return;
+      if (state.enemy.hp <= 0) { ev.push({ t: 'ko', side: 'e' }); return true; }
+      return false;
     }
     var m = party().active();
-    if (!m) return;
+    if (!m) return false;
     var eff = party().effStats(m);
     m.hp = Math.max(0, m.hp - amount);
     ev.push({ t: 'dmg', side: 'p', amount: amount, mult: mult, hpAfter: m.hp, maxHp: eff.maxHp,
@@ -183,7 +187,9 @@ CHLOE.engine.battle = (function(){
         ev.push({ t: 'switch', side: 'p', memberId: next.id, forced: true });
         resetSideCombat(ev, 'p', 'switch');
       }
+      return true;
     }
+    return false;
   }
 
   function healSide(ev, s, amount){
@@ -302,19 +308,21 @@ CHLOE.engine.battle = (function(){
       return;
     }
 
-    applyDamage(ev, b, dmg, elemMult, { label: elemMult >= 2 ? 'SUPER' : (elemMult <= 0.5 ? 'RESIST' : '') });
     if (elemMult >= 2) log(ev, "It's devastating!", 'sys');
-    else if (elemMult <= 0.5) log(ev, actorName(b) + ' shrugs it off...', '');
+    var koed = applyDamage(ev, b, dmg, elemMult,
+      { label: elemMult >= 2 ? 'SUPER' : (elemMult <= 0.5 ? 'RESIST' : '') });
+    if (elemMult <= 0.5 && !koed) log(ev, actorName(b) + ' shrugs it off...', '');
 
     // charged is consumed by the attack (x1.5 already applied via deal-mod)
     if (aPhase === 'charged') setPhase(ev, a, 'neutral', 'charge spent');
 
-    // phase shifts by RAW element multiplier
+    // phase shifts by RAW element multiplier. A KO'd defender gets none — a
+    // freshly switched-in member must not inherit the fallen one's stagger.
     if (elemMult >= 2) {
-      if (hpOf(b) > 0) setPhase(ev, b, 'staggered', 'super-effective hit');
+      if (!koed) setPhase(ev, b, 'staggered', 'super-effective hit');
       setPhase(ev, a, 'aggressive', 'super-effective hit');
     } else if (elemMult <= 0.5) {
-      if (hpOf(b) > 0) setPhase(ev, b, 'aggressive', 'shrugged it off');
+      if (!koed) setPhase(ev, b, 'aggressive', 'shrugged it off');
       if (getPhase(a) === 'aggressive') setPhase(ev, a, 'neutral', 'attack resisted');
     }
   }
@@ -449,16 +457,20 @@ CHLOE.engine.battle = (function(){
     resetSideCombat(ev, 'p', 'switch');
   }
 
+  /* The move pick was validated in act() against the SAME menu the UI rendered.
+     If a forced switch happened earlier in this exchange (enemy went first and
+     KO'd the chooser), the incoming member does NOT execute the fallen one's
+     move — the switch-in ate the action. */
   function playerTurn(ev, action){
     beginTurn(ev, 'p');
     var m = party().active();
     if (m && m.hp > 0) {
       if (action.type === 'move') {
-        var list = menu(), entry = null;
-        for (var i = 0; i < list.length; i++) if (list[i].id === action.id) { entry = list[i]; break; }
-        if (!entry) log(ev, 'Nothing happens.', 'sys');
-        else if (entry.disabled) log(ev, 'Not enough MP!', 'sys');
-        else useMove(ev, 'p', moveDef(entry.id));
+        if (action.memberId && m.id !== action.memberId) {
+          log(ev, charName(m.id) + ' is still finding the beat...', 'sys');
+        } else {
+          useMove(ev, 'p', action.move || moveDef(action.id));
+        }
       } else if (action.type === 'item') {
         playerItem(ev, action.id, action.targetId);
       } else if (action.type === 'switch') {
@@ -663,6 +675,21 @@ CHLOE.engine.battle = (function(){
     var action = normalizeAction(arg);
     if (!action) return ev;
     if (action.type === 'flee') return doFlee(ev);
+
+    /* Validate a move pick NOW, against the exact menu the UI rendered (state
+       has not mutated since render — only act() mutates it). A pick that is
+       not offered / MP-disabled does NOT consume the exchange. The resolved
+       move def + chooser are pinned so mid-exchange phase changes (enemy goes
+       first, staggers or KOs the chooser) can't void a legitimate choice. */
+    if (action.type === 'move') {
+      var list = menu(), entry = null;
+      for (var i = 0; i < list.length; i++) if (list[i].id === action.id) { entry = list[i]; break; }
+      if (!entry) { log(ev, 'Nothing happens.', 'sys'); return ev; }
+      if (entry.disabled) { log(ev, 'Not enough MP!', 'sys'); return ev; }
+      action.move = moveDef(entry.id);
+      var chooser = party().active();
+      action.memberId = chooser ? chooser.id : null;
+    }
 
     state.turn++;
     var pSpd = effStat('p', 'spd'), eSpd = effStat('e', 'spd');
