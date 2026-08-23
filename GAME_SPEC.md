@@ -147,3 +147,38 @@ The game now starts in ONE generated horror room and stays there until it is cle
 - Party: new game starts **solo Chloe**. When `roomCleared` is set, Ash joins (engine hook on battle victory flag; toast "Ash joined"). Battle Switch is hidden/disabled while party size is 1. Old saves with both members keep working.
 - New enemy `the_hollow` (enemies.js): a hollowed-out stagehand, shadow, lvl 1, image `assets/gen/enemy-the-hollow.jpg` (generated), moveset from moves.js, beatable by solo lvl-1 Chloe on the default loadout in 3-6 exchanges, drops a bandage 50%. It replaces neon_wisp as the first story fight (neon_wisp and the rest stay for the world beyond).
 - Scene UI: hotspots must read as ITEMS: a faint pulsing red glint marker on each interactable, stronger outline + label on hover/tap. (scene.js + css.)
+
+## 12. Progression v3 — 100 levels, 11 damage types, skill trees, statuses, 4 resources (supersedes sec 4 and parts of 5/6/10)
+
+### Resources (per character; replace plain hp/mp)
+**life** (was hp), **stamina** (physical resource; regenerates 20% of max at the start of that combatant's turn), **magic** (was mp), **faith** (starts each battle at 3, max base+tree; +1 at the start of your turn; spent by divine/occult moves). Moves declare `cost:{sta?, mp?, faith?}` — physical-cat moves cost stamina (10-25), spells cost magic, divine/occult moves cost faith (1-3). Failsafes stay free. Core stats atk/def/spd/mag unchanged (base + growth per level + tree nodes).
+
+### Damage types — CHLOE.data.types (rewrite of elements.js; keep a back-compat alias CHLOE.data.elements.multiplier)
+Exactly these 11: `physical, magical, lightning, fire, occult, blood, poison, divine, virus, ghost, biological`.
+Old->new migration everywhere: none->physical, ember->fire, volt->lightning, shadow->occult, light->divine, frost->magical.
+`types.multiplier(atkType, defender)` uses defender primary `type` plus optional `resists:{type:mult}` overrides.
+Chart: data agent authors the full 11x11 chart (default 1.0, overrides 2.0/0.5) and documents it as a table in `tools/typechart.md`. MANDATORY anchors: occult<->divine mutual 2.0; ghost RESISTS physical/blood/poison (0.5) and TAKES 2.0 from divine and magical; biological TAKES 2.0 from fire/poison/virus; virus TAKES 2.0 from fire/divine; every type must END UP WITH >=2 offensive strengths and >=2 offensive weaknesses; no type may exceed 4 strengths. Keep it thematic and coherent.
+
+### Status system (buildup meters)
+7 statuses tied to types: burn(fire), shock(lightning), bleed(blood), poisoned(poison), curse(occult), infection(virus), haunt(ghost). Moves may carry `buildup:{status, amount}`. Each combatant has per-status buildup 0-100, decaying 10/turn; at 100 the meter resets and the status ACTIVATES: burn 8% life/turn 3t; shock -25% spd + 30% skip-turn 2t; bleed instant 15% life + 5%/turn 2t; poisoned 5%/turn 5t; curse -20% mag + faith gain stopped 3t; infection healing halved + -15% atk 3t; haunt 20% move whiff 2t. One instance max per status (re-trigger refreshes). All statuses AND buildup clear at battle end. New items: antidote (cures poisoned/infection, 25), tourniquet (cures bleed/burn, 25), sage_smoke (cures curse/haunt/shock, 40). Tree passives grant statusResist (reduces buildup taken %) and type resists.
+
+### Levels & XP — cap 100
+`xpToNext(L) = Math.round(22 * Math.pow(L, 1.75))`. Enemy xp reward = round(baseXp * level^1.35 / 2 + 10). Level-up: +growth, **+1 skill point**, toast, autosave. Learnset keeps working for levels 1-10 (early moves); everything beyond comes from the tree.
+
+### Skill trees — game/js/data/tree.js, CHLOE.data.trees
+Per character 45-60 nodes in 3 themed branches + a small shared trunk (Chloe: Pyre fire/attack, Voice divine/faith/support, Steel physical/defense; Ash: Storm lightning, Veil occult/ghost, Toxin poison/virus/blood). Node schema:
+`{ id, branch, name, desc, cost /*1-3 points*/, requires:[nodeIds] /*any-of; [] = root*/, pos:{x,y} /*percent layout*/, kind:'stat'|'move'|'passive'|'keystone', grant }`
+grant by kind: stat -> `{stat:{life?,stamina?,magic?,faith?,atk?,def?,spd?,mag?}}`; move -> `{move:moveId}` (joins learned pool; 5-per-phase equip rules unchanged); passive -> `{passive:{resist?:{type:pct}, statusResist?:{status:pct}, staminaRegenPct?, onKillLifePct?, blockPower?, ...}}`; keystone -> one build-defining passive, document in desc. Save: `tree:{charId:[nodeIds]}`, `skillPoints:{charId:n}`. Respec (in tree screen): refund ALL nodes for shards = 10*level.
+Engine: `CHLOE.engine.tree` — owned(), canBuy(), buy(), respec(), and `effectiveStats(member)` aggregating base+growth+weapon+tree (battle, sheet and save all consume this; never raw base).
+
+### UI additions
+- **Skill tree screen** (ui/tree.js, from menu): character picker, branch-colored node graph laid out by pos in a pan/scrollable container with connecting lines (SVG or CSS), node states owned/available/locked, tap -> tooltip card (name, cost, grant, requires) -> Buy button, points counter, respec button with confirm. Mobile-friendly.
+- **Character sheet** (ui/sheet.js, from menu Party): 4 resource bars, core stats, compact 11-type resistance grid, active learnset+tree moves count, skill points, weapon.
+- **Battle**: under each fighter add stamina (green) / magic (blue) / faith (gold) bars beside life (red); status icons with buildup rings and floating "BLEED!"-style triggers; move buttons show type dot + cost chips and a 2x/0.5x effectiveness arrow vs the current enemy.
+
+### Data migration
+moves.js: every move gets `type` (via mapping), proper `cost`, and where thematic `buildup`. Add ~10 tree-gated moves so every damage type has >=1 player move somewhere by tree depth 3. enemies.js: every enemy gets `type` + `resists` + thematic status immunities; the_hollow (type occult... choose ghost) must stay beatable by solo lvl-1 default Chloe. characters.js: rename pools to life/stamina/magic/faith with base+growth.
+Save v:3 (+skillPoints, tree, resource snapshot); silent migration from v1/v2 (points = level-1, tree empty, pools mapped).
+
+### Balance targets
+Stamina must prevent spamming the strongest attack (2-3 uses then breathe); a focused branch build at lvl 25 should clear fights ~30% faster than unspent points; xp pacing: lvl 10 within Act 1 on defaults.

@@ -38,6 +38,93 @@ CHLOE.ui.battle = (function(){
                 desc: 'Steady yourself back to Neutral. Restores a little HP.' }
   };
 
+  /* ---- Progression v3 display data (11 damage types, costs, statuses) ---- */
+  var OLD2NEW = { none:'physical', ember:'fire', volt:'lightning', shadow:'occult', light:'divine', frost:'magical' };
+  var TYPE_LABEL = {
+    physical:'Physical', magical:'Magical', lightning:'Lightning', fire:'Fire',
+    occult:'Occult', blood:'Blood', poison:'Poison', divine:'Divine',
+    virus:'Virus', ghost:'Ghost', biological:'Biological'
+  };
+  var STATUS_ORDER = ['burn','shock','bleed','poisoned','curse','infection','haunt'];
+  var STATUS_META = {
+    burn:      { icon:'🔥', label:'Burn',      color:'#ff5a2c' },
+    shock:     { icon:'⚡', label:'Shock',     color:'#f2d024' },
+    bleed:     { icon:'🩸', label:'Bleed',     color:'#c1121f' },
+    poisoned:  { icon:'☠',  label:'Poisoned',  color:'#3fae4a' },
+    curse:     { icon:'🌑', label:'Curse',     color:'#a44ce0' },
+    infection: { icon:'🦠', label:'Infection', color:'#2ec4a6' },
+    haunt:     { icon:'👻', label:'Haunt',     color:'#9ad7e8' }
+  };
+
+  function typeOfMove(entry, def){
+    var t = (entry && entry.type) || (def && def.type) || null;
+    if (t && TYPE_LABEL[t]) return t;
+    var el = (entry && entry.element) || (def && def.element) || 'none';
+    return OLD2NEW[el] || 'physical';
+  }
+  function typeDot(t){
+    var d = ui.el('span', 't-dot t-' + t);
+    d.title = TYPE_LABEL[t] || t;
+    return d;
+  }
+  function normCosts(cost, legacyMp){
+    var c = { sta: 0, mp: 0, faith: 0 };
+    if (cost && typeof cost === 'object') {
+      c.sta   = cost.sta   || cost.stamina || 0;
+      c.mp    = cost.mp    || cost.magic   || 0;
+      c.faith = cost.faith || 0;
+    } else if (typeof cost === 'number') {
+      c.mp = cost;
+    }
+    if (!c.mp && !c.sta && !c.faith && legacyMp) c.mp = legacyMp;
+    return c;
+  }
+  function costChips(c){
+    var wrap = ui.el('span', 'cost-chips');
+    if (c.sta)   wrap.appendChild(ui.el('span', 'cost-chip c-sta',   c.sta + ' STA'));
+    if (c.mp)    wrap.appendChild(ui.el('span', 'cost-chip c-mp',    c.mp + ' MP'));
+    if (c.faith) wrap.appendChild(ui.el('span', 'cost-chip c-faith', c.faith + ' FTH'));
+    if (!wrap.firstChild) wrap.appendChild(ui.el('span', 'cost-chip free', '—'));
+    return wrap;
+  }
+  function curFaith(){
+    var st = state() || {};
+    if (typeof st.playerFaith === 'number') return st.playerFaith;
+    if (st.faith && typeof st.faith === 'object' && typeof st.faith.p === 'number') return st.faith.p;
+    if (typeof st.faith === 'number') return st.faith;
+    var m = party.active();
+    if (m && typeof m.faith === 'number') return m.faith;
+    return null;
+  }
+  function affordable(m, c){
+    if (c.mp) {
+      var mag = (m.magic !== undefined) ? m.magic : m.mp;
+      if ((mag || 0) < c.mp) return false;
+    }
+    if (c.sta) {
+      var sv = (typeof m.stamina === 'number') ? m.stamina : m.sta;
+      if (typeof sv === 'number' && sv < c.sta) return false;
+    }
+    if (c.faith) {
+      var f = curFaith();
+      if (f !== null && f < c.faith) return false;
+    }
+    return true;
+  }
+  /* 2x/0.5x arrow data vs the CURRENT enemy — via CHLOE.data.types.multiplier
+     (defender = enemy with type+resists). UI shows, engine decides. */
+  function effMultVsEnemy(atkType){
+    var types = CHLOE.data.types;
+    if (!types || typeof types.multiplier !== 'function') return 1;
+    var st = state() || {};
+    var defender = (st.enemy && (st.enemy.type || st.enemy.resists)) ? st.enemy : (curEnemyDef || {});
+    try {
+      var m = types.multiplier(atkType, defender);
+      if (typeof m === 'number' && isFinite(m)) return m;
+    } catch (e) {}
+    return 1;
+  }
+
   function root(){ return CHLOE.ui.byId('screen-battle'); }
 
   function state(){
@@ -108,6 +195,137 @@ CHLOE.ui.battle = (function(){
     setBadge(els.enemyBadge, phaseOf('e'));
   }
 
+  /* ---------- v3 resources (life/stamina/magic/faith) ---------- */
+  function pickNum(){
+    for (var i = 0; i < arguments.length; i++) {
+      if (typeof arguments[i] === 'number' && isFinite(arguments[i])) return arguments[i];
+    }
+    return null;
+  }
+  function effAll(m){
+    var t = CHLOE.engine.tree;
+    if (t && typeof t.effectiveStats === 'function') {
+      try { var r = t.effectiveStats(m); if (r && typeof r === 'object') return r; } catch (e) {}
+    }
+    return party.effStats(m) || {};
+  }
+  function poolsOf(m){
+    var eff = effAll(m);
+    var v3 = (m.life !== undefined || typeof m.sta === 'number' ||
+              typeof m.stamina === 'number' || typeof m.faith === 'number' ||
+              eff.life !== undefined);
+    var life = {
+      cur: pickNum(m.life, m.hp, 0),
+      max: pickNum(eff.maxLife, eff.life, eff.maxHp, eff.hp, 1),
+      label: v3 ? 'LIFE' : 'HP'
+    };
+    var magicCur = pickNum(m.magic, m.mp);
+    var magic = (magicCur === null) ? null : {
+      cur: magicCur,
+      max: pickNum(eff.maxMagic, eff.magic, eff.maxMp, eff.mp, 1),
+      label: (m.magic !== undefined) ? 'MAG' : 'MP'
+    };
+    var staCur = (typeof m.stamina === 'number') ? m.stamina
+               : (typeof m.sta === 'number') ? m.sta : null;
+    var sta = (staCur === null) ? null : {
+      cur: staCur, max: pickNum(eff.maxStamina, eff.stamina, 1), label: 'STA'
+    };
+    var f = curFaith();
+    var faith = (f === null) ? null : {
+      cur: f,
+      max: pickNum(eff.maxFaith, eff.faith) || Math.max(f, 5),
+      label: 'FTH'
+    };
+    return { life: life, stamina: sta, magic: magic, faith: faith };
+  }
+
+  /* stamina/magic/faith mini-bars under the life bar (player side only). */
+  function renderMiniRes(m){
+    if (!els.miniRes) return;
+    var box = ui.clear(els.miniRes);
+    var p = poolsOf(m);
+    var mk = function(cls, pool){
+      if (!pool) return;
+      var row = ui.el('div', 'mini-row');
+      row.appendChild(ui.el('span', 'mini-lbl', pool.label));
+      // 'mp' token opts the bar out of the automatic hp-ok/hp-warn recoloring
+      var bar = ui.makeBar('mp mini ' + cls);
+      ui.setBar(bar, pool.cur, pool.max);
+      row.appendChild(bar);
+      row.appendChild(ui.el('span', 'mini-val', pool.cur + '/' + pool.max));
+      row.title = pool.label + ' ' + pool.cur + ' / ' + pool.max;
+      box.appendChild(row);
+    };
+    mk('res-sta', p.stamina);
+    mk('res-mag', p.magic);
+    mk('res-faith', p.faith);
+  }
+
+  /* ---------- v3 status meters (buildup rings + active-turns) ---------- */
+  function sidePick(o, side){
+    if (!o || typeof o !== 'object') return null;
+    return side === 'e' ? (o.e || o.enemy) : (o.p || o.player || o.party);
+  }
+  /* Normalized [{id, buildup 0-100, active, turns}] for one side; tolerant of
+     several engine state shapes, empty when the v3 engine isn't there yet. */
+  function statusesOf(side){
+    var st = state() || {};
+    var m = party.active();
+    var raw =
+      (side === 'e' ? (st.enemyStatuses || st.enemyStatus) : (st.playerStatuses || st.playerStatus)) ||
+      sidePick(st.statuses, side) || sidePick(st.status, side) ||
+      (side === 'e'
+        ? (st.enemy && (st.enemy.statuses || st.enemy.status))
+        : (m && (m.statuses || m.status))) || null;
+    if (!raw || typeof raw !== 'object') return [];
+    var buildup = (raw.buildup && typeof raw.buildup === 'object') ? raw.buildup : raw;
+    var active  = (raw.active  && typeof raw.active  === 'object') ? raw.active  : null;
+    var out = [];
+    for (var i = 0; i < STATUS_ORDER.length; i++) {
+      var id = STATUS_ORDER[i];
+      var b = buildup[id];
+      var a = active ? active[id] : null;
+      var e = { id: id, buildup: 0, active: false, turns: 0 };
+      if (typeof b === 'number') e.buildup = b;
+      else if (b && typeof b === 'object') {
+        e.buildup = b.buildup || b.amount || b.value || 0;
+        e.turns = b.turns || b.left || 0;
+        e.active = !!(b.active || e.turns > 0);
+      }
+      if (typeof a === 'number' && a > 0) { e.active = true; e.turns = a; }
+      else if (a === true) e.active = true;
+      else if (a && typeof a === 'object') { e.active = true; e.turns = a.turns || a.left || e.turns; }
+      if (e.active || e.buildup > 0) out.push(e);
+    }
+    return out;
+  }
+  function renderStatusRow(side){
+    var host = side === 'e' ? els.statusRowE : els.statusRowP;
+    if (!host) return;
+    var box = ui.clear(host);
+    var list = statusesOf(side);
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i];
+      var meta = STATUS_META[s.id] || { icon: '✳', label: s.id, color: '#9a939c' };
+      var chip = ui.el('span', 'status-chip' + (s.active ? ' on' : ''));
+      chip.style.color = meta.color;
+      var ring = ui.el('span', 'status-ring');
+      var pct = Math.max(0, Math.min(100, s.active ? 100 : (s.buildup || 0)));
+      ring.style.background = 'conic-gradient(' + meta.color + ' ' + pct + '%, rgba(255,255,255,.09) 0)';
+      chip.appendChild(ring);
+      chip.appendChild(ui.el('span', 'status-icn', meta.icon));
+      if (s.active && s.turns) chip.appendChild(ui.el('span', 'status-turns', String(s.turns)));
+      chip.title = meta.label + (s.active
+        ? ' — active' + (s.turns ? ', ' + s.turns + ' turn' + (s.turns > 1 ? 's' : '') + ' left' : '')
+        : ' — ' + Math.round(pct) + '% buildup');
+      box.appendChild(chip);
+    }
+  }
+  function refreshStatusRows(){
+    renderStatusRow('p');
+    renderStatusRow('e');
+  }
+
   /* ---------- build ---------- */
   function build(st){
     var r = ui.clear(root());
@@ -127,12 +345,18 @@ CHLOE.ui.battle = (function(){
     els.enemyHp = ui.makeBar('');
     els.enemyHp.classList.add('enemy-hpbar');
     var en = st.enemy || {};
-    els.enemyMaxHp = en.maxHp || en.hp || (curEnemyDef.stats && curEnemyDef.stats.hp) || 1;
-    ui.setBar(els.enemyHp, (en.hp !== undefined ? en.hp : els.enemyMaxHp), els.enemyMaxHp);
+    els.enemyMaxHp = en.maxHp || en.maxLife || en.hp || en.life ||
+      (curEnemyDef.stats && (curEnemyDef.stats.hp || curEnemyDef.stats.life)) || 1;
+    var enCur = (en.hp !== undefined) ? en.hp : en.life;
+    ui.setBar(els.enemyHp, (enCur !== undefined ? enCur : els.enemyMaxHp), els.enemyMaxHp);
     hpRow.appendChild(els.enemyHp);
     els.enemyBadge = makePhaseBadge();
     hpRow.appendChild(els.enemyBadge);
     wrap.appendChild(hpRow);
+
+    // enemy side: life bar only (§12) + status meters
+    els.statusRowE = ui.el('div', 'status-row enemy-status');
+    wrap.appendChild(els.statusRowE);
 
     els.enemyWrap = wrap;
     top.appendChild(wrap);
@@ -154,13 +378,14 @@ CHLOE.ui.battle = (function(){
 
     r.appendChild(bottom);
     updatePhaseBadges();
+    refreshStatusRows();
   }
 
   function renderMember(){
     var m = party.active();
     var panel = ui.clear(els.memberPanel);
     if (!m) return;
-    var eff = party.effStats(m);
+    var pools = poolsOf(m);
     var def = (CHLOE.data.characters || {})[m.id] || {};
 
     els.portrait = ui.el('div', 'member-portrait');
@@ -175,26 +400,26 @@ CHLOE.ui.battle = (function(){
 
     var hpRow = ui.el('div', 'bar-row');
     els.hpBar = ui.makeBar('');
-    ui.setBar(els.hpBar, m.hp, eff.maxHp);
+    ui.setBar(els.hpBar, pools.life.cur, pools.life.max);
     hpRow.appendChild(els.hpBar);
     els.playerBadge = makePhaseBadge();
     hpRow.appendChild(els.playerBadge);
     info.appendChild(hpRow);
 
     els.hpTxt = ui.el('div', 'bar-txt');
-    els.hpTxt.appendChild(ui.el('span', null, 'HP'));
-    els.hpVal = ui.el('span', null, m.hp + ' / ' + eff.maxHp);
+    els.hpTxt.appendChild(ui.el('span', null, pools.life.label));
+    els.hpVal = ui.el('span', null, pools.life.cur + ' / ' + pools.life.max);
     els.hpTxt.appendChild(els.hpVal);
     info.appendChild(els.hpTxt);
 
-    els.mpBar = ui.makeBar('mp');
-    ui.setBar(els.mpBar, m.mp, eff.maxMp);
-    info.appendChild(els.mpBar);
-    els.mpTxt = ui.el('div', 'bar-txt');
-    els.mpTxt.appendChild(ui.el('span', null, 'MP'));
-    els.mpVal = ui.el('span', null, m.mp + ' / ' + eff.maxMp);
-    els.mpTxt.appendChild(els.mpVal);
-    info.appendChild(els.mpTxt);
+    // §12: stamina (green) / magic (blue) / faith (gold) mini-bars under life
+    els.miniRes = ui.el('div', 'mini-res');
+    info.appendChild(els.miniRes);
+    renderMiniRes(m);
+
+    els.statusRowP = ui.el('div', 'status-row');
+    info.appendChild(els.statusRowP);
+    renderStatusRow('p');
 
     panel.appendChild(info);
     updatePhaseBadges();
@@ -203,17 +428,17 @@ CHLOE.ui.battle = (function(){
   function refreshBars(){
     var m = party.active();
     if (!m || !els.hpBar) return;
-    var eff = party.effStats(m);
-    ui.setBar(els.hpBar, m.hp, eff.maxHp);
-    ui.setBar(els.mpBar, m.mp, eff.maxMp);
-    if (els.hpVal) els.hpVal.textContent = m.hp + ' / ' + eff.maxHp;
-    if (els.mpVal) els.mpVal.textContent = m.mp + ' / ' + eff.maxMp;
+    var pools = poolsOf(m);
+    ui.setBar(els.hpBar, pools.life.cur, pools.life.max);
+    if (els.hpVal) els.hpVal.textContent = pools.life.cur + ' / ' + pools.life.max;
+    renderMiniRes(m);
   }
   function refreshEnemyBar(hpAfter, maxHp){
     var st = state() || {};
     var en = st.enemy || {};
-    var max = maxHp || en.maxHp || els.enemyMaxHp || 1;
-    var hp = (hpAfter !== undefined) ? hpAfter : (en.hp !== undefined ? en.hp : max);
+    var max = maxHp || en.maxHp || en.maxLife || els.enemyMaxHp || 1;
+    var cur = (en.hp !== undefined) ? en.hp : en.life;
+    var hp = (hpAfter !== undefined) ? hpAfter : (cur !== undefined ? cur : max);
     els.enemyMaxHp = max;
     ui.setBar(els.enemyHp, hp, max);
     return hp;
@@ -252,15 +477,20 @@ CHLOE.ui.battle = (function(){
     var def = (CHLOE.data.moves || {})[e.id] || FAILSAFE[e.id] || {};
     var m = party.active();
     var mp = (e.mpCost !== undefined) ? e.mpCost : (def.mpCost || 0);
-    var disabled = (e.disabled !== undefined) ? !!e.disabled : !!(m && (m.mp || 0) < mp);
+    var costs = normCosts((e.cost !== undefined) ? e.cost : def.cost, mp);
+    var disabled = (e.disabled !== undefined) ? !!e.disabled : !!(m && !affordable(m, costs));
     return {
       id: e.id,
       name: e.name || def.name || e.id,
       cat: e.cat || def.cat || 'attack',
       element: e.element || def.element || 'none',
+      type: typeOfMove(e, def),
+      mult: (typeof e.mult === 'number' && isFinite(e.mult)) ? e.mult : null,
       mpCost: mp,
+      costs: costs,
       desc: e.desc || def.desc || '',
-      disabled: disabled
+      disabled: disabled,
+      reason: e.reason || ''
     };
   }
 
@@ -269,12 +499,23 @@ CHLOE.ui.battle = (function(){
     var icon = ui.el('span', 'mcat', CAT_ICON[mv.cat] || CAT_ICON.attack);
     icon.title = CAT_LABEL[mv.cat] || mv.cat;
     b.appendChild(icon);
-    var dot = ui.el('span', 'el-dot el-' + (mv.element || 'none'));
-    dot.title = ((CHLOE.data.elements || {}).labels || {})[mv.element] || mv.element || '';
-    b.appendChild(dot);
+    b.appendChild(typeDot(mv.type));
     b.appendChild(ui.el('span', 'mname', mv.name));
-    b.appendChild(ui.el('span', 'mp-chip' + (mv.mpCost ? '' : ' free'), mv.mpCost ? mv.mpCost + ' MP' : '—'));
-    b.title = mv.desc + (mv.disabled && mv.mpCost ? ' (Not enough MP)' : '');
+    // §12: 2x/0.5x effectiveness arrow vs the current enemy (attacks only)
+    if (mv.cat === 'attack') {
+      var mult = (mv.mult !== null && mv.mult !== undefined) ? mv.mult : effMultVsEnemy(mv.type);
+      if (mult >= 2) {
+        var up = ui.el('span', 'eff-arrow eff-up', '▲');
+        up.title = 'Super effective vs ' + enemyName() + ' (x' + mult + ')';
+        b.appendChild(up);
+      } else if (mult > 0 && mult <= 0.5) {
+        var dn = ui.el('span', 'eff-arrow eff-down', '▼');
+        dn.title = 'Weak vs ' + enemyName() + ' (x' + mult + ')';
+        b.appendChild(dn);
+      }
+    }
+    b.appendChild(costChips(mv.costs));
+    b.title = mv.desc + (mv.disabled ? ' (' + (mv.reason || "Can't pay the cost right now") + ')' : '');
     if (mv.disabled) b.disabled = true;
     b.addEventListener('click', function(){ if (!playing) doMove(mv.id); });
     return b;
@@ -417,6 +658,7 @@ CHLOE.ui.battle = (function(){
       renderMember();
       refreshBars();
       updatePhaseBadges();
+      refreshStatusRows();
       renderCommands();
       return;
     }
@@ -424,6 +666,7 @@ CHLOE.ui.battle = (function(){
     var delay = 100;
     try { delay = handleEvent(ev); } catch (e) { console.warn('[CHLOE] battle event failed', ev, e); }
     updatePhaseBadges();
+    refreshStatusRows();
     window.setTimeout(function(){ playEvents(events, i + 1); }, delay);
   }
 
@@ -438,9 +681,14 @@ CHLOE.ui.battle = (function(){
         refreshBars();
         return 120;
 
+      case 'res': // v3 stamina/faith change ({t:'res', side, kind, after})
+        refreshBars();
+        return 120;
+
       case 'move':
-        logLine(ev.text || ((side === 'e' ? enemyName() : activeName()) + ' uses ' + moveName(ev) + '!'),
-          side === 'e' ? '' : 'hot');
+        // The engine follows every 'move' with its own 'log' line — only log
+        // here if this event carries its own text (avoids duplicate lines).
+        if (ev.text) logLine(ev.text, side === 'e' ? '' : 'hot');
         return 300;
 
       case 'dmg': {
@@ -493,17 +741,40 @@ CHLOE.ui.battle = (function(){
         return 340;
       }
 
-      case 'status':
+      case 'status': {
+        // v3 named status events ({t:'status', status:'burn', ...}) — floating
+        // "BURN!" label on activation + a log line; ticks/decay just refresh.
+        if (typeof ev.status === 'string') {
+          var smeta = STATUS_META[ev.status] || { label: ev.status };
+          var stage = ev.stage || ev.kind || '';
+          var anchorS = side === 'e' ? els.enemyBox : (els.portrait || els.memberPanel);
+          // trigger/skip get the floating "BLEED!"-style label; buildup, per-turn
+          // ticks and clears just refresh the chips (the engine logs its own lines).
+          var activation = (stage !== 'tick' && stage !== 'end' && stage !== 'clear' &&
+                            stage !== 'buildup' && stage !== 'decay' && ev.buildup === undefined);
+          if (activation) {
+            floatLabel(anchorS, ev.label || (smeta.label.toUpperCase() + '!'), 'status-pop');
+          }
+          if (ev.text) logLine(ev.text, activation ? 'sys' : '');
+          refreshBars();
+          refreshEnemyBar();
+          return activation ? STEP_MS : 200;
+        }
         refreshBars();
         refreshEnemyBar();
-        if (ev.amount && side === 'p') {
-          popNumber(els.portrait || els.memberPanel, (ev.amount > 0 ? '+' : '') + ev.amount,
-            ev.kind === 'mp' ? 'mp' : 'heal');
-        } else if (ev.amount && side === 'e') {
-          popNumber(els.enemyBox, (ev.amount > 0 ? '+' : '') + ev.amount, 'heal');
+        // legacy heal-ish shapes only pop a number (buffs/debuffs/dots log instead)
+        var popKind = ev.kind || '';
+        if (popKind === '' || popKind === 'hp' || popKind === 'mp' || popKind === 'heal') {
+          if (ev.amount && side === 'p') {
+            popNumber(els.portrait || els.memberPanel, (ev.amount > 0 ? '+' : '') + ev.amount,
+              popKind === 'mp' ? 'mp' : 'heal');
+          } else if (ev.amount && side === 'e') {
+            popNumber(els.enemyBox, (ev.amount > 0 ? '+' : '') + ev.amount, 'heal');
+          }
         }
         if (ev.text) logLine(ev.text);
         return STEP_MS;
+      }
 
       case 'heal': { // legacy shape kept working
         refreshBars();
@@ -605,7 +876,7 @@ CHLOE.ui.battle = (function(){
       });
       (rw.learned || []).forEach(function(l){
         var def = (CHLOE.data.characters || {})[l.memberId] || {};
-        lines.appendChild(ui.el('div', 'lvl', (def.name || l.memberId) + ' learned ' + (l.move || l.skill) + '!'));
+        lines.appendChild(ui.el('div', 'lvl', (def.name || l.memberId) + ' learned ' + (l.name || l.move || l.skill || l.moveId) + '!'));
       });
       (rw.drops || []).forEach(function(d){
         lines.appendChild(ui.el('div', null, 'Found: ' + d));

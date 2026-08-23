@@ -21,12 +21,14 @@ CHLOE.data.scenes = {
     bg: 'assets/gen/room-dressing.jpg',
     intro: 'Red emergency light. A dead mirror. A door that was open a second ago. Somewhere, a TV hisses static at no one.',
     hotspots: [
-      // mirror — first battle, pre-battle dialog, clears the room
+      // mirror — pre-battle dialog first (sets mirrorFaced), then the battle hotspot takes its place
       { x: 37, y: 24, w: 25, h: 28, label: 'Dead vanity mirror',
-        action: { type: 'battle', enemyId: 'the_hollow', dialogId: 'dlg_room_mirror_pre', once: true, setsFlag: 'roomCleared' } },
-      // door — locked dialog until roomCleared; the goto hotspot below overlays it once the flag is set
+        action: { type: 'dialog', dialogId: 'dlg_room_mirror_pre', once: true, setsFlag: 'mirrorFaced', requiresFlag: '!mirrorFaced' } },
+      { x: 37, y: 24, w: 25, h: 28, label: 'Something in the mirror',
+        action: { type: 'battle', enemyId: 'the_hollow', once: true, setsFlag: 'roomCleared', requiresFlag: 'mirrorFaced' } },
+      // door — locked dialog while !roomCleared; the goto hotspot replaces it once the flag is set
       { x: 1, y: 14, w: 12, h: 45, label: 'Door ajar',
-        action: { type: 'dialog', dialogId: 'door_locked' } },
+        action: { type: 'dialog', dialogId: 'door_locked', requiresFlag: '!roomCleared' } },
       { x: 1, y: 14, w: 12, h: 45, label: 'Door — unlocked',
         action: { type: 'goto', scene: 'stage', requiresFlag: 'roomCleared' } },
       // couch — rest / heal

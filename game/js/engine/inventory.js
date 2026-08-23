@@ -1,5 +1,9 @@
 /* CHLOE — engine/inventory.js
-   Item bag {itemId: count}. Items usable in & out of battle. */
+   Item bag {itemId: count}. Items usable in & out of battle.
+   v3 item effects: hp / mp / sta (restore pools), revivePct, and
+   cure:[statusIds] — cures active battle statuses & their buildup on the
+   ACTIVE member (statuses only exist inside battles; outside one, or on a
+   benched target, a pure-cure item is refused as "wasted"). */
 window.CHLOE = window.CHLOE || {};
 CHLOE.engine = CHLOE.engine || {};
 
@@ -69,7 +73,7 @@ CHLOE.engine.inventory = (function(){
     }
     if (member.hp <= 0) return { ok: false, text: name + ' is down — that won\'t help.' };
 
-    var healedHp = 0, healedMp = 0;
+    var healedHp = 0, healedMp = 0, healedSta = 0, cured = [];
     if (eff.hp) {
       var beforeHp = member.hp;
       member.hp = Math.min(max.hp, member.hp + eff.hp);
@@ -80,12 +84,33 @@ CHLOE.engine.inventory = (function(){
       member.mp = Math.min(max.mp, member.mp + eff.mp);
       healedMp = member.mp - beforeMp;
     }
-    if (!healedHp && !healedMp) return { ok: false, text: 'It would be wasted right now.' };
+    if (eff.sta) {
+      var beforeSta = member.stamina || 0;
+      member.stamina = Math.min(max.sta || 0, beforeSta + eff.sta);
+      healedSta = member.stamina - beforeSta;
+    }
+    // cure:[statusIds] — only meaningful mid-battle on the active member
+    // (battle.js owns status state; guarded so out-of-battle use never throws)
+    if (eff.cure && eff.cure.length) {
+      try {
+        var battle = CHLOE.engine.battle;
+        if (battle && !battle.isOver() && party.state.activeId === member.id &&
+            typeof battle.cureStatuses === 'function') {
+          cured = battle.cureStatuses(eff.cure) || [];
+        }
+      } catch(e){}
+    }
+    if (!healedHp && !healedMp && !healedSta && !cured.length) {
+      return { ok: false, text: 'It would be wasted right now.' };
+    }
     remove(id, 1);
     var bits = [];
     if (healedHp) bits.push('+' + healedHp + ' HP');
     if (healedMp) bits.push('+' + healedMp + ' MP');
-    return { ok: true, hp: healedHp, mp: healedMp, text: name + ': ' + bits.join(', ') + '.' };
+    if (healedSta) bits.push('+' + healedSta + ' STA');
+    for (var c = 0; c < cured.length; c++) bits.push(cured[c] + ' cured');
+    return { ok: true, hp: healedHp, mp: healedMp, sta: healedSta, cured: cured,
+             text: name + ': ' + bits.join(', ') + '.' };
   }
 
   return {

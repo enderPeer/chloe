@@ -3,7 +3,8 @@
 - [x] **P1 — Foundation**: GAME_SPEC.md, image catalog, full game v1 (point-and-click scenes, battles, party/switch, items, give-up, XP/levels/skills, Shards currency, name+PIN accounts), landing page, Cloudflare Worker code, free image-gen pipeline (Pollinations), git repo.
 - [ ] **P2 — Go live**: GitHub repo + Pages (landing+game), Cloudflare Pages mirror (second URL), deploy Worker + KV (cloud saves), fix anything found on live.
 - [x] **P3 — Combat v2 + The Room**: phase-based fighting (neutral/aggressive/guarded/staggered/charged), four move categories (attack/defense/stance/status), per-phase loadouts capped at 5, learnsets, loadout editor; new one-room horror opening (generated dressing room, clickable items, the_hollow enemy, solo Chloe start, Ash joins after clear). Spec sections 10-11.
-- [ ] **P4 — Content & depth**: shop (spend Shards), Act 2 scenes, more enemies/moves, boss polish, sound/music.
+- [x] **P4 — Progression v3**: 100-level cap with new XP curve, 11 damage types (physical/magical/lightning/fire/occult/blood/poison/divine/virus/ghost/biological) + authored type chart, 4 resources (Life/Stamina/Magic/Faith), buildup-based status system (burn/shock/bleed/poisoned/curse/infection/haunt), 45-60-node skill trees per character (3 branches, keystones, respec), skill points, character sheet, save v3. Spec section 12.
+- [ ] **P5 — Content & depth**: shop (spend Shards), Act 2 scenes, more enemies/moves, boss polish, sound/music.
 - [ ] **P5 — Polish**: animations, mobile UX, balance pass, achievements.
 - [ ] **P6 — Feedback round**: whatever the playtest surfaces.
 - [ ] **P7 — Release QA**: final sweep, README/landing final, version 1.0.

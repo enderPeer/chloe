@@ -24,6 +24,41 @@ CHLOE.ui.loadout = (function(){
   var CAT_LABEL = { attack: 'Attack', defense: 'Defense', stance: 'Stance', status: 'Status' };
   var MAX = 5;
 
+  /* Progression v3 display data (spec §12) */
+  var OLD2NEW = { none:'physical', ember:'fire', volt:'lightning', shadow:'occult', light:'divine', frost:'magical' };
+  var TYPE_LABEL = {
+    physical:'Physical', magical:'Magical', lightning:'Lightning', fire:'Fire',
+    occult:'Occult', blood:'Blood', poison:'Poison', divine:'Divine',
+    virus:'Virus', ghost:'Ghost', biological:'Biological'
+  };
+  function moveTypeOf(def){
+    def = def || {};
+    if (def.type && TYPE_LABEL[def.type]) return def.type;
+    return OLD2NEW[def.element || 'none'] || 'physical';
+  }
+  function typeDotFor(def){
+    var t = moveTypeOf(def);
+    var d = ui.el('span', 't-dot t-' + t);
+    d.title = TYPE_LABEL[t] || t;
+    return d;
+  }
+  function costChipsFor(def){
+    var c = { sta: 0, mp: 0, faith: 0 };
+    var raw = def.cost;
+    if (raw && typeof raw === 'object') {
+      c.sta = raw.sta || raw.stamina || 0;
+      c.mp = raw.mp || raw.magic || 0;
+      c.faith = raw.faith || 0;
+    } else if (typeof raw === 'number') c.mp = raw;
+    if (!c.sta && !c.mp && !c.faith && def.mpCost) c.mp = def.mpCost;
+    var wrap = ui.el('span', 'cost-chips');
+    if (c.sta) wrap.appendChild(ui.el('span', 'cost-chip c-sta', c.sta + ' STA'));
+    if (c.mp) wrap.appendChild(ui.el('span', 'cost-chip c-mp', c.mp + ' MP'));
+    if (c.faith) wrap.appendChild(ui.el('span', 'cost-chip c-faith', c.faith + ' FTH'));
+    if (!wrap.firstChild) wrap.appendChild(ui.el('span', 'cost-chip free', '—'));
+    return wrap;
+  }
+
   var ui;
   var selChar = null;
   var selPhase = 'neutral';
@@ -114,8 +149,80 @@ CHLOE.ui.loadout = (function(){
     if (save && save.getCurrent && save.getCurrent()) save.autosave();
   }
 
-  /* Learned move ids for a character at a level (learnset union). */
+  /* Learned move ids for a character: learnset union + tree-granted moves
+     (§12 — nodes with grant:{move} join the learned pool). */
   function learnedIds(charId, level){
+    var base = baseLearnedIds(charId, level);
+    var extra = treeMoveIds(charId);
+    if (!extra.length) return base;
+    var out = base.slice(), seen = {};
+    for (var i = 0; i < out.length; i++) seen[out[i]] = 1;
+    for (var j = 0; j < extra.length; j++) {
+      var id = extra[j];
+      if (typeof id === 'string' && !seen[id]) { seen[id] = 1; out.push(id); }
+    }
+    return out;
+  }
+
+  /* Tree-granted move ids — engine.tree accessor first, then owned-node scan. */
+  function treeMoveIds(charId){
+    var eng = (CHLOE.engine || {}).tree;
+    var names = ['treeMoves', 'grantedMoves', 'movesGranted'];
+    if (eng) {
+      for (var i = 0; i < names.length; i++) {
+        if (typeof eng[names[i]] === 'function') {
+          try {
+            var r = eng[names[i]](charId);
+            if (Array.isArray(r)) return r;
+          } catch (e) {}
+        }
+      }
+    }
+    var out = [];
+    try {
+      var ownedIds = null;
+      if (eng && typeof eng.owned === 'function') ownedIds = eng.owned(charId);
+      if (!Array.isArray(ownedIds)) {
+        var st = (party() && party().state) || {};
+        var tr = st.tree || st.trees || {};
+        ownedIds = Array.isArray(tr[charId]) ? tr[charId] : [];
+      }
+      if (ownedIds.length) {
+        var set = {};
+        for (var k = 0; k < ownedIds.length; k++) set[ownedIds[k]] = 1;
+        var t = (CHLOE.data.trees || {})[charId];
+        var nodes = !t ? []
+          : Array.isArray(t) ? t
+          : Array.isArray(t.nodes) ? t.nodes
+          : treeMapNodes(t);
+        for (var n = 0; n < nodes.length; n++) {
+          var node = nodes[n];
+          if (node && node.id && set[node.id] && node.grant && node.grant.move) {
+            out.push(node.grant.move);
+          }
+        }
+      }
+    } catch (e2) {}
+    return out;
+  }
+  function treeMapNodes(t){
+    var out = [];
+    for (var k in t) {
+      if (!t.hasOwnProperty(k)) continue;
+      var n = t[k];
+      if (!n || typeof n !== 'object') continue;
+      if (!n.id) {
+        var c = {};
+        for (var kk in n) if (n.hasOwnProperty(kk)) c[kk] = n[kk];
+        c.id = k;
+        n = c;
+      }
+      out.push(n);
+    }
+    return out;
+  }
+
+  function baseLearnedIds(charId, level){
     var e = CHLOE.engine || {};
     var member = { id: charId, level: level };
     try {
@@ -242,12 +349,9 @@ CHLOE.ui.loadout = (function(){
       var icon = ui.el('span', 'mcat', CAT_ICON[def.cat] || CAT_ICON.attack);
       icon.title = CAT_LABEL[def.cat] || def.cat || '';
       head.appendChild(icon);
-      var dot = ui.el('span', 'el-dot el-' + (def.element || 'none'));
-      dot.title = ((CHLOE.data.elements || {}).labels || {})[def.element] || def.element || '';
-      head.appendChild(dot);
+      head.appendChild(typeDotFor(def));
       head.appendChild(ui.el('span', 'mname', def.name || id));
-      head.appendChild(ui.el('span', 'mp-chip' + (def.mpCost ? '' : ' free'),
-        def.mpCost ? def.mpCost + ' MP' : '—'));
+      head.appendChild(costChipsFor(def));
       cell.appendChild(head);
       cell.appendChild(ui.el('span', 'lo-cell-desc',
         usable ? (def.desc || '') : 'Not usable while ' + PHASE_META[selPhase].label + '.'));

@@ -202,7 +202,8 @@ CHLOE.data.story = {
   onFirstVictoryDialog: 'room_victory',
   // Flag documentation — every flag set/required anywhere in scenes.js:
   flags: {
-    roomCleared: 'Set by defeating the_hollow at the dressing-room mirror in the_room (spec §11). Unlocks the door hotspot (goto stage) and triggers the engine hook that adds Ash to the party.',
+    mirrorFaced: 'Set by the pre-battle mirror dialog in the_room (dlg_room_mirror_pre). Swaps the mirror hotspot from examine-dialog to the the_hollow battle.',
+    roomCleared: 'Set by defeating the_hollow at the dressing-room mirror in the_room (spec §11). Hides the door_locked dialog, unlocks the door hotspot (goto stage) and triggers the engine hook that adds Ash to the party.',
     firstWispDown: 'Set by defeating the first Neon Wisp in corridor_a. Stops the red corridors looping: opens corridor_loop -> corridor_b.',
     ghoulSilenced: 'Set by defeating the Static Ghoul in corridor_b. Opens backstage_between -> mirror_hall (the glittering doorway).',
     shadeShattered: 'Set by defeating the Mirror Shade in mirror_hall. Shatters the mirror-glass chains: opens corridor_b -> vip_room (boss door).',
