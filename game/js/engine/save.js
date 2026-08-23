@@ -1,10 +1,14 @@
 /* CHLOE — engine/save.js
    Accounts:  localStorage['chloe.accounts']  = { <lowername>: {name, pinHash, createdAt} }
    Saves:     localStorage['chloe.save.'+name] (name lowercased)
-   Save blob v:2 (Combat v2): adds loadouts:{charId:{phaseId:[<=5 moveIds]}}.
-   v:1 blobs (or blobs with missing/invalid loadouts) are migrated silently on
-   read — shape here, content in party.applyBlob via progression.sanitizeLoadouts
-   (rebuild from defaultLoadouts + learned level). Everything else unchanged.
+   Save blob v:3 (Progression v3): on top of v:2 loadouts it adds
+     skillPoints:{charId:n}, tree:{charId:[nodeIds]}, and per-member sta/faith
+     resource snapshots (hp stays = life, mp stays = magic).
+   v:1/v:2 blobs are migrated silently on read — shape here (skillPoints seeded
+   to level-1 per member, tree {}, sta/faith left for party.applyBlob to fill
+   from base+growth), content in party.applyBlob (loadouts via
+   progression.sanitizeLoadouts; tree node ids validated via
+   tree.sanitizeState — unknown ids dropped, points refunded).
    pinHash = SHA-256(lower(name)+':'+pin) via WebCrypto (async, with pure-JS fallback
    so file:// contexts without crypto.subtle never throw).
    Cloud sync: only when CHLOE.data.config.apiUrl is non-empty; always fails silently. */
@@ -167,16 +171,19 @@ CHLOE.engine.save = (function(){
     if (!current) return null;
     var party = CHLOE.engine.party, inv = CHLOE.engine.inventory;
     var blob = {
-      v: 2,
+      v: 3,
       name: current.name,
       savedAt: Date.now(),
       party: [], activeId: null, inventory: {}, shards: 0, flags: {}, scene: null,
-      loadouts: {}
+      loadouts: {}, skillPoints: {}, tree: {}
     };
     if (party && party.state) {
       var st = party.state;
       blob.party = st.members.map(function(m){
-        return { id: m.id, level: m.level, xp: m.xp, hp: m.hp, mp: m.mp, weaponId: m.weaponId };
+        return { id: m.id, level: m.level, xp: m.xp, hp: m.hp, mp: m.mp,
+                 sta: (typeof m.stamina === 'number') ? m.stamina : 0,
+                 faith: (typeof m.faith === 'number') ? m.faith : 0,
+                 weaponId: m.weaponId };
       });
       blob.activeId = st.activeId;
       blob.shards = st.shards;
@@ -184,21 +191,41 @@ CHLOE.engine.save = (function(){
       blob.scene = st.scene;
       try { blob.loadouts = JSON.parse(JSON.stringify(st.loadouts || {})); }
       catch(e){ blob.loadouts = {}; }
+      try { blob.skillPoints = JSON.parse(JSON.stringify(st.skillPoints || {})); }
+      catch(e){ blob.skillPoints = {}; }
+      try { blob.tree = JSON.parse(JSON.stringify(st.tree || {})); }
+      catch(e){ blob.tree = {}; }
     }
     if (inv) blob.inventory = inv.serialize();
     return blob;
   }
 
-  /* Silent v1 -> v2 migration + shape validation. Never throws, never warns.
-     Loadout CONTENT (learned ids, <=5 per phase, valid phases) is validated in
-     party.applyBlob, which rebuilds invalid entries from defaultLoadouts. */
+  /* Silent v1/v2 -> v3 migration + shape validation. Never throws, never warns.
+     Loadout CONTENT is validated in party.applyBlob (rebuilds from defaults);
+     tree node ids are validated there too via tree.sanitizeState (unknown ids
+     dropped, points refunded). Pre-v3 blobs: skillPoints = level-1 per member
+     (all points refunded), tree empty; sta/faith snapshots are absent and get
+     filled from base+growth (life=hp, magic=mp mapping is implicit — the
+     runtime keeps using hp/mp as the life/magic pools). */
   function migrate(blob){
     if (!blob || typeof blob !== 'object') return null;
+    var wasPreV3 = !(blob.v >= 3);
     if (!Array.isArray(blob.party)) blob.party = [];
     if (!blob.inventory || typeof blob.inventory !== 'object' || Array.isArray(blob.inventory)) blob.inventory = {};
     if (!blob.flags || typeof blob.flags !== 'object' || Array.isArray(blob.flags)) blob.flags = {};
     if (!blob.loadouts || typeof blob.loadouts !== 'object' || Array.isArray(blob.loadouts)) blob.loadouts = {};
-    blob.v = 2;
+    if (!blob.skillPoints || typeof blob.skillPoints !== 'object' || Array.isArray(blob.skillPoints)) blob.skillPoints = {};
+    if (!blob.tree || typeof blob.tree !== 'object' || Array.isArray(blob.tree)) blob.tree = {};
+    if (wasPreV3) {
+      // refund everything: points = level-1 each, tree stays empty
+      for (var i = 0; i < blob.party.length; i++) {
+        var p = blob.party[i];
+        if (p && p.id && typeof blob.skillPoints[p.id] !== 'number') {
+          blob.skillPoints[p.id] = Math.max(0, (p.level || 1) - 1);
+        }
+      }
+    }
+    blob.v = 3;
     return blob;
   }
 

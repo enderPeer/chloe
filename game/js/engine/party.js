@@ -15,11 +15,14 @@ CHLOE.engine.party = (function(){
   var _loading = false; // suppress join toasts while applying a save blob
 
   var state = {
-    members: [],   // [{id, level, xp, hp, mp, weaponId}]
+    members: [],   // [{id, level, xp, hp, mp, stamina, faith, weaponId}]  (v3
+                   //  pools: hp=life, mp=magic; saved as 'sta' in the blob)
     activeId: null,
     shards: 0,
     flags: {},
-    loadouts: {}   // charId -> { phaseId: [<=5 moveIds] }  (Combat v2)
+    loadouts: {},  // charId -> { phaseId: [<=5 moveIds] }  (Combat v2)
+    skillPoints: {}, // charId -> unspent skill points        (Progression v3)
+    tree: {}         // charId -> [owned nodeIds]             (Progression v3)
   };
 
   // scene.js assigns `party.state.scene = id` directly — intercept it so Ash
@@ -49,7 +52,8 @@ CHLOE.engine.party = (function(){
     var def = charDef(id);
     if (!def) { console.warn('[CHLOE] unknown character id: ' + id); return null; }
     var s = prog().statsAt(def, 1);
-    return { id: id, level: 1, xp: 0, hp: s.hp, mp: s.mp, weaponId: def.weaponId || null };
+    return { id: id, level: 1, xp: 0, hp: s.hp, mp: s.mp,
+             stamina: s.stamina || 0, faith: s.faith || 0, weaponId: def.weaponId || null };
   }
 
   function ensureLoadout(m){
@@ -59,12 +63,21 @@ CHLOE.engine.party = (function(){
     }
   }
 
+  // v3 per-character progression stores (resource init lives in makeMember)
+  function ensureProgress(m){
+    if (!m) return;
+    if (typeof state.skillPoints[m.id] !== 'number') state.skillPoints[m.id] = 0;
+    if (!Array.isArray(state.tree[m.id])) state.tree[m.id] = [];
+  }
+
   function newGame(){
     state.members = [];
     state.loadouts = {};
+    state.skillPoints = {};
+    state.tree = {};
     // §11: new game starts solo Chloe; Ash joins once the Room is cleared.
     var m = makeMember('chloe');
-    if (m) { state.members.push(m); ensureLoadout(m); }
+    if (m) { state.members.push(m); ensureLoadout(m); ensureProgress(m); }
     state.activeId = state.members.length ? state.members[0].id : null;
     state.shards = 0;
     state.flags = {};
@@ -94,6 +107,7 @@ CHLOE.engine.party = (function(){
     if (!m) return false;
     state.members.push(m);
     ensureLoadout(m);
+    ensureProgress(m);
     if (!state.activeId) state.activeId = m.id;
     if (!(opts && opts.silent)) {
       var def = charDef(id);
@@ -117,22 +131,35 @@ CHLOE.engine.party = (function(){
   }
 
   /* ---------- stats ---------- */
+  // Maximum pools & core stats, TREE-AWARE (v3): base + growth + tree grants.
+  // Keys: hp/mp aliases of life/magic, plus sta/faith and the 8 v3 keys.
   function maxStats(member){
-    var def = charDef(member.id);
-    if (!def) return { hp: 1, mp: 0, atk: 1, def: 0, spd: 1, mag: 1 };
-    return prog().statsAt(def, member.level);
+    var e = effStats(member);
+    return { hp: e.life, mp: e.magic, sta: e.stamina, faith: e.faith,
+             life: e.life, stamina: e.stamina, magic: e.magic,
+             atk: e.atk, def: e.def, spd: e.spd, mag: e.mag };
   }
   function weaponOf(member){
     return (CHLOE.data.weapons || {})[member.weaponId] || null;
   }
-  // Effective combat stats incl. weapon atk bonus.
+  /* Effective combat stats — delegates to CHLOE.engine.tree.effectiveStats
+     (spec §12: base + growth + weapon + tree; battle, sheet and save all
+     consume this, never raw base). NOTE: atk INCLUDES weaponAtk now;
+     weaponAtk stays as a separate field for display breakdowns only. */
   function effStats(member){
-    var s = maxStats(member);
+    var tree = CHLOE.engine.tree;
+    if (tree && typeof tree.effectiveStats === 'function') return tree.effectiveStats(member);
+    // fallback (tree.js not loaded): base + growth + weapon, no tree grants
+    var def = charDef(member.id);
+    var s = def ? prog().statsAt(def, member.level)
+                : { hp: 1, mp: 0, stamina: 0, faith: 0, atk: 1, def: 0, spd: 1, mag: 1 };
     var w = weaponOf(member);
+    var wAtk = w ? (w.atkBonus || 0) : 0;
     return {
+      life: s.hp, stamina: s.stamina || 0, magic: s.mp, faith: s.faith || 0,
       maxHp: s.hp, maxMp: s.mp,
-      atk: s.atk, def: s.def, spd: s.spd, mag: s.mag,
-      weaponAtk: w ? (w.atkBonus || 0) : 0
+      atk: s.atk + wAtk, def: s.def, spd: s.spd, mag: s.mag,
+      weaponAtk: wAtk
     };
   }
   // Learned move ids at the member's current level (learnset union).
@@ -206,6 +233,8 @@ CHLOE.engine.party = (function(){
       var s = maxStats(list[i]);
       list[i].hp = s.hp;
       list[i].mp = s.mp;
+      list[i].stamina = s.sta || 0;
+      list[i].faith = s.faith || 0;
     }
   }
 
@@ -257,10 +286,45 @@ CHLOE.engine.party = (function(){
           xp: Math.max(0, p.xp || 0),
           hp: Math.max(0, p.hp || 0),
           mp: Math.max(0, p.mp || 0),
+          // blob field is 'sta' (v3 snapshot); runtime field is 'stamina'
+          stamina: (typeof p.sta === 'number') ? Math.max(0, p.sta)
+                 : ((typeof p.stamina === 'number') ? Math.max(0, p.stamina) : null), // null -> fill below
+          faith: (typeof p.faith === 'number') ? Math.max(0, p.faith) : null,
           weaponId: p.weaponId || (charDef(p.id).weaponId || null)
         });
       }
       if (!state.members.length) { newGame(); return false; }
+
+      /* Skill tree state FIRST (v3) — tree moves must count as learned before
+         loadouts are validated. v1/v2 migration: save.migrate seeded
+         skillPoints = level-1 per member and an empty tree; here node ids are
+         validated per character (unknown ids dropped, points refunded). */
+      state.skillPoints = {};
+      state.tree = {};
+      var rawPts = (blob.skillPoints && typeof blob.skillPoints === 'object') ? blob.skillPoints : {};
+      var rawTree = (blob.tree && typeof blob.tree === 'object') ? blob.tree : {};
+      var treeEng = CHLOE.engine.tree;
+      for (var t = 0; t < state.members.length; t++) {
+        var tm = state.members[t];
+        if (treeEng && typeof treeEng.sanitizeState === 'function') {
+          var clean = treeEng.sanitizeState(tm.id, tm.level, rawTree[tm.id], rawPts[tm.id]);
+          state.tree[tm.id] = clean.owned;
+          state.skillPoints[tm.id] = clean.points;
+        } else {
+          state.tree[tm.id] = Array.isArray(rawTree[tm.id]) ? rawTree[tm.id].slice() : [];
+          state.skillPoints[tm.id] = Math.max(0, Math.floor(rawPts[tm.id] || 0));
+        }
+      }
+
+      // v1/v2 members carried no sta/faith — fill from (tree-aware) maxima,
+      // then clamp everything to the current caps.
+      for (var r = 0; r < state.members.length; r++) {
+        var rm = state.members[r], mx = maxStats(rm);
+        if (rm.stamina === null || rm.stamina === undefined) rm.stamina = mx.sta || 0;
+        if (rm.faith === null || rm.faith === undefined) rm.faith = mx.faith || 0;
+        if (rm.stamina > (mx.sta || 0)) rm.stamina = mx.sta || 0;
+        if (rm.faith > (mx.faith || 0)) rm.faith = mx.faith || 0;
+      }
 
       // Loadouts: silently validate/rebuild per character (save v2 migration —
       // v1 blobs arrive with loadouts:{} and get pure defaults + learned level).

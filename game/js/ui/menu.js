@@ -8,12 +8,13 @@ CHLOE.ui.menu = (function(){
   var ui, party;
   var tab = 'party';
   var pickingItem = null; // itemId while choosing a target member
+  var sheetChar = null;   // charId while a character sheet is open (Party tab)
 
   function layer(){ return CHLOE.ui.byId('overlay-menu'); }
 
   function open(){
     ui = CHLOE.ui; party = CHLOE.engine.party;
-    tab = 'party'; pickingItem = null;
+    tab = 'party'; pickingItem = null; sheetChar = null;
     render();
     layer().classList.remove('hidden');
   }
@@ -30,19 +31,25 @@ CHLOE.ui.menu = (function(){
     var card = ui.el('div', 'menu-card');
 
     var tabs = ui.el('div', 'menu-tabs');
-    [['party','Party'], ['inventory','Inventory'], ['moves','Moves'], ['save','Save'], ['help','How to play'], ['close','✕']]
+    [['party','Party'], ['inventory','Inventory'], ['moves','Moves'], ['tree','Skill Tree'], ['save','Save'], ['help','How to play'], ['close','✕']]
       .forEach(function(t){
         var b = ui.el('button', tab === t[0] ? 'on' : '', t[1]);
         b.addEventListener('click', function(){
           if (t[0] === 'close') { close(); return; }
-          tab = t[0]; pickingItem = null; render();
+          if (t[0] === 'tree') {   // §12: skill tree is its own screen
+            close();
+            if (CHLOE.ui.tree && CHLOE.ui.tree.open) CHLOE.ui.tree.open();
+            else ui.toast('The tree is still growing in the dark.');
+            return;
+          }
+          tab = t[0]; pickingItem = null; sheetChar = null; render();
         });
         tabs.appendChild(b);
       });
     card.appendChild(tabs);
 
     var body = ui.el('div', 'menu-body');
-    if (tab === 'party') renderParty(body);
+    if (tab === 'party') renderPartyOrSheet(body);
     else if (tab === 'inventory') renderInventory(body);
     else if (tab === 'moves') renderMoves(body);
     else if (tab === 'save') renderSave(body);
@@ -53,6 +60,29 @@ CHLOE.ui.menu = (function(){
   }
 
   /* ---------- Party ---------- */
+  /* Party list, or the character sheet (§12) when a member was tapped. */
+  function renderPartyOrSheet(body){
+    if (sheetChar && CHLOE.ui.sheet && CHLOE.ui.sheet.renderInto && party.get(sheetChar)) {
+      var back = ui.el('button', 'sheet-back', '‹ Party');
+      back.addEventListener('click', function(){ sheetChar = null; render(); });
+      body.appendChild(back);
+      CHLOE.ui.sheet.renderInto(body, sheetChar, {
+        onOpenTree: function(id){
+          close();
+          if (CHLOE.ui.tree && CHLOE.ui.tree.open) CHLOE.ui.tree.open(id);
+        }
+      });
+      return;
+    }
+    sheetChar = null;
+    renderParty(body);
+  }
+
+  function openSheet(charId){
+    sheetChar = charId;
+    render();
+  }
+
   function renderParty(body){
     var prog = CHLOE.engine.progression;
     party.state.members.forEach(function(m){
@@ -62,8 +92,10 @@ CHLOE.ui.menu = (function(){
       var isActive = party.state.activeId === m.id;
 
       var cardM = ui.el('div', 'party-card' + (isActive ? ' active-member' : ''));
-      var p = ui.el('div', 'party-portrait');
+      var p = ui.el('div', 'party-portrait clickable');
+      p.title = 'Open character sheet';
       p.appendChild(ui.portraitNode(def.portraitKey || m.id, def.name || m.id));
+      p.addEventListener('click', function(){ openSheet(m.id); });
       cardM.appendChild(p);
 
       var info = ui.el('div', 'party-info');
@@ -111,15 +143,20 @@ CHLOE.ui.menu = (function(){
       sk.style.marginTop = '.35rem';
       info.appendChild(sk);
 
+      var actions = ui.el('div', 'party-actions');
+      var sheetB = ui.el('button', null, 'Sheet');
+      sheetB.title = 'Stats, resistances and skill points';
+      sheetB.addEventListener('click', function(){ openSheet(m.id); });
+      actions.appendChild(sheetB);
       if (!isActive && m.hp > 0) {
         var lead = ui.el('button', null, 'Make lead');
-        lead.style.marginTop = '.5rem';
         lead.addEventListener('click', function(){
           party.setActive(m.id);
           render();
         });
-        info.appendChild(lead);
+        actions.appendChild(lead);
       }
+      info.appendChild(actions);
       cardM.appendChild(info);
       body.appendChild(cardM);
     });

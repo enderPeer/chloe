@@ -15,20 +15,45 @@
      getLoadout(charId) / setLoadout(charId, phase, ids<=5) — loadout editor I/O.
      canSwitch() / canFlee() / phases() — rule lookups so the UI never computes.
 
-   Event types (ordered array; side is 'p' | 'e'):
+   Event types (ordered array; side is 'p' | 'e'). Progression v3 ADDS types &
+   kinds — nothing is renamed:
      {t:'log',    text, cls}                                   — battle log line
      {t:'move',   side, moveId, name, cat}                     — a move is used
      {t:'mp',     side, memberId?, mpAfter}                    — MP paid/restored
+     {t:'res',    side, kind:'sta'|'faith', after, memberId?}  — v3 resource change
      {t:'dmg',    side (the RECEIVER), amount, mult, hpAfter, maxHp,
                   memberId?, blocked?, dot?, label? ('SUPER'|'RESIST')}
      {t:'block',  side, kind:'set'|'hit', cats?, elements?, moveId?, label?}
      {t:'miss',   side (the attacker), moveId, label:'WHIFF'}
      {t:'phase',  side, phase, from, reason}                   — phase badge update
      {t:'status', side, kind:'buff'|'debuff'|'dot'|'dot_tick', stat?, amount?, turns?, name?}
+     {t:'status', side, kind:'buildup', status, value}         — v3 meter change (0-100)
+     {t:'status', side, kind:'trigger', status, turns, label}  — v3 meter hit 100 ("BLEED!")
+     {t:'status', side, kind:'tick', status, amount}           — v3 per-turn damage tick
+     {t:'status', side, kind:'skip', status}                   — v3 shock skip-turn
+     {t:'status', side, kind:'clear', status}                  — v3 status expired/cured
      {t:'heal',   side, amount, kind:'hp'|'mp', hpAfter?, mpAfter?, memberId?}
      {t:'ko',     side, memberId?}
      {t:'switch', side:'p', memberId, forced?}
      {t:'end',    result:'victory'|'defeat'|'fled', rewards?}
+
+   Progression v3 (spec §12) additions on top of the verified v2 engine:
+     - damage type multiplier via CHLOE.data.types.multiplier(move.type, defenderObj)
+       when types.js is loaded (falls back to elements.js on the legacy element),
+       with the old->new mapping none->physical ember->fire volt->lightning
+       shadow->occult light->divine frost->magical. Phase-transition super/resist
+       checks keep using the RAW multiplier, exactly as before.
+     - 4 resources: life(hp)/stamina(sta)/magic(mp)/faith. Moves declare
+       cost:{sta?,mp?,faith?} (legacy mpCost honored). At own turn start: +20%
+       max stamina (x tree staminaRegenPct) and +1 faith (blocked by curse).
+       Faith starts every battle at 3. Enemies ignore stamina. menu() flags
+       unaffordable moves disabled with a reason string.
+     - status buildup meters (7 statuses), +move.buildup{status,amount} on hit,
+       decay 10/turn, activation at 100 with the exact §12 effects/durations,
+       statusImmune respected, tree statusResist reduces buildup taken, item
+       effect cure:[ids] works mid-battle, everything clears at battle end.
+     - tree passive hooks: onKillLifePct, staminaRegenPct, blockPower
+       (multiplies the 80% block reduction), resists:{type:pct} damage cut.
 
    Resolution order per move (spec §10.4, implemented exactly):
      1 MP  2 stance  3 status  4 defense (block until own next turn)
@@ -62,6 +87,61 @@ CHLOE.engine.battle = (function(){
   function log(ev, text, cls){ ev.push({ t: 'log', text: text, cls: cls || '' }); }
   function pick(arr){ return arr[Math.floor(Math.random() * arr.length)]; }
 
+  /* ---------- Progression v3 vocabulary (spec §12) ---------- */
+  // old element -> new damage type (used until every move/char carries .type)
+  var TYPE_MAP = {
+    none: 'physical', ember: 'fire', volt: 'lightning',
+    shadow: 'occult', light: 'divine', frost: 'magical'
+  };
+  // the 7 buildup statuses, with their EXACT §12 effects & durations
+  var STATUS_DEFS = {
+    burn:      { turns: 3, tickPct: 8,  label: 'BURN!' },
+    shock:     { turns: 2, spdMult: 0.75, skip: 0.30, label: 'SHOCK!' },
+    bleed:     { turns: 2, instantPct: 15, tickPct: 5, label: 'BLEED!' },
+    poisoned:  { turns: 5, tickPct: 5,  label: 'POISONED!' },
+    curse:     { turns: 3, magMult: 0.80, stopFaith: true, label: 'CURSE!' },
+    infection: { turns: 3, healMult: 0.5, atkMult: 0.85, label: 'INFECTION!' },
+    haunt:     { turns: 2, whiff: 0.20, label: 'HAUNT!' }
+  };
+  var BUILDUP_DECAY = 10; // meter decay per own turn
+
+  function moveType(mv){
+    return mv.type || TYPE_MAP[mv.element || 'none'] || 'physical';
+  }
+  function typesData(){ return CHLOE.data.types || null; }
+
+  // Defender object for types.multiplier(atkType, defender): uses .type + .resists.
+  function defenderObj(s){
+    if (s === 'e') return state.enemyDef;
+    var m = party().active();
+    var cd = m && (CHLOE.data.characters || {})[m.id];
+    if (!cd) return { type: 'physical' };
+    return {
+      type: cd.type || TYPE_MAP[cd.element || 'none'] || 'physical',
+      resists: cd.resists
+    };
+  }
+
+  /* RAW type multiplier of a move vs a side — types.js when loaded (v3), else
+     the legacy elements chart. Phase transitions read this same raw value. */
+  function typeMultFor(mv, defenderSide){
+    var td = typesData();
+    if (td && typeof td.multiplier === 'function') {
+      return td.multiplier(moveType(mv), defenderObj(defenderSide));
+    }
+    return elements().multiplier(mv.element || 'none', sideElement(defenderSide));
+  }
+
+  // Aggregated tree passives for a side (player only; enemies have no tree).
+  var NO_PASSIVES = { resists: {}, statusResist: {}, staminaRegenPct: 0, onKillLifePct: 0, blockPower: 1 };
+  function treePassives(s){
+    if (s !== 'p') return NO_PASSIVES;
+    var m = party().active();
+    var tree = CHLOE.engine.tree;
+    if (!m || !tree || typeof tree.passives !== 'function') return NO_PASSIVES;
+    try { return tree.passives(m.id); } catch(e){ return NO_PASSIVES; }
+  }
+
   /* ---------- lifecycle ---------- */
   function start(enemyId, opts){
     var def = (CHLOE.data.enemies || {})[enemyId];
@@ -69,21 +149,42 @@ CHLOE.engine.battle = (function(){
       console.warn('[CHLOE] battle: unknown enemy id "' + enemyId + '"');
       return null;
     }
+    var st = def.stats || {};
+    var eHp = (st.hp !== undefined) ? st.hp : (st.life || 1);
+    var eMp = (st.mp !== undefined) ? st.mp : (st.magic || 0);
     state = {
       enemyId: enemyId,
       enemyDef: def,
-      enemy: { hp: def.stats.hp, mp: def.stats.mp, maxHp: def.stats.hp, maxMp: def.stats.mp },
+      enemy: { hp: eHp, mp: eMp, maxHp: eHp, maxMp: eMp,
+               // §12: faith starts every battle at 3 (enemies ignore stamina)
+               faith: Math.min(3, st.faith || 5), maxFaith: st.faith || 5 },
       playerPhase: 'neutral',   // battle always starts both sides neutral
       enemyPhase: 'neutral',
       blocks: { p: null, e: null },     // {cats:[], elements:[], moveId} | null
       effects: { p: [], e: [] },        // [{kind:'buff'|'debuff'|'dot', stat?, amount, turns, name?}]
       recover: { p: false, e: false },  // staggered auto-recovery pending
+      // §12 status buildup meters + active statuses, per side; all of this
+      // dies with the battle state => "everything clears at battle end"
+      status: {
+        p: { buildup: {}, active: {} }, // buildup: {statusId:0-100}; active: {statusId:{turns}}
+        e: { buildup: {}, active: {} }
+      },
       boss: !!(def.boss || (opts && opts.boss)),
       over: false,
       result: null,
       rewards: null,
       turn: 0
     };
+    // §12: every party member's faith resets to 3 at battle start (capped by
+    // their max); stamina carries over from the world (init if a pre-v3 member).
+    try {
+      var members = party().state.members;
+      for (var i = 0; i < members.length; i++) {
+        var m = members[i], eff = party().effStats(m);
+        if (typeof m.stamina !== 'number') m.stamina = eff.stamina || 0;
+        m.faith = Math.min(3, eff.faith || 0);
+      }
+    } catch(e){}
     return state;
   }
   function getState(){ return state; }
@@ -133,12 +234,24 @@ CHLOE.engine.battle = (function(){
     }
     return Math.max(0.25, mod);
   }
-  function effStat(s, stat){ return baseStats(s)[stat] * statMod(s, stat); }
-  function weaponAtkOf(s){
-    if (s === 'e') return 0;
-    var m = party().active();
-    return m ? party().effStats(m).weaponAtk : 0;
+  /* ---------- §12 status lookups ---------- */
+  function statusState(s){ return state.status[s]; }
+  function hasStatus(s, id){ return !!statusState(s).active[id]; }
+  // stat penalties from ACTIVE statuses: shock -25% spd, curse -20% mag, infection -15% atk
+  function statusStatMult(s, stat){
+    var mult = 1, act = statusState(s).active;
+    for (var id in act) {
+      if (!Object.prototype.hasOwnProperty.call(act, id)) continue;
+      var d = STATUS_DEFS[id];
+      if (!d) continue;
+      if (stat === 'spd' && d.spdMult) mult *= d.spdMult;
+      if (stat === 'mag' && d.magMult) mult *= d.magMult;
+      if (stat === 'atk' && d.atkMult) mult *= d.atkMult;
+    }
+    return mult;
   }
+
+  function effStat(s, stat){ return baseStats(s)[stat] * statMod(s, stat) * statusStatMult(s, stat); }
   function maxHpOf(s){
     if (s === 'e') return state.enemy.maxHp;
     var m = party().active();
@@ -150,12 +263,86 @@ CHLOE.engine.battle = (function(){
     return m ? m.hp : 0;
   }
 
-  // Voluntary/forced switch and KO reset the player side's battle state.
+  // Voluntary/forced switch and KO reset the player side's battle state
+  // (statuses & buildup included — the incoming member starts clean).
   function resetSideCombat(ev, s, reason){
     state.blocks[s] = null;
     state.effects[s] = [];
     state.recover[s] = false;
+    state.status[s] = { buildup: {}, active: {} };
     setPhase(ev, s, 'neutral', reason);
+  }
+
+  /* ---------- §12 status machinery ---------- */
+  function statusImmune(s, id){
+    if (s !== 'e') return false;
+    var im = state.enemyDef.statusImmune || state.enemyDef.statusImmunities;
+    return !!(im && im.indexOf && im.indexOf(id) !== -1);
+  }
+  function statusResistPct(s, id){
+    var pct = 0;
+    if (s === 'p') {
+      var sr = treePassives('p').statusResist || {};
+      pct += sr[id] || 0;
+    } else {
+      var esr = state.enemyDef.statusResist || {};
+      pct += esr[id] || 0;
+    }
+    return Math.min(100, Math.max(0, pct));
+  }
+
+  // Activate a status at 100 buildup (meter resets; re-trigger refreshes turns).
+  function triggerStatus(ev, s, id){
+    var d = STATUS_DEFS[id];
+    if (!d) return;
+    statusState(s).active[id] = { turns: d.turns };
+    log(ev, actorName(s) + ' is overtaken by ' + id + '!', s === 'p' ? 'sys' : 'hot');
+    ev.push({ t: 'status', side: s, kind: 'trigger', status: id, turns: d.turns, label: d.label });
+    if (d.instantPct) { // bleed: instant 15% life
+      applyDamage(ev, s, Math.max(1, Math.round(maxHpOf(s) * d.instantPct / 100)), 1, { dot: true });
+    }
+  }
+
+  // +move.buildup on hit; statusImmune blocks it, statusResist reduces it.
+  function addBuildup(ev, s, bu){
+    if (!bu || !bu.status || !(bu.amount > 0) || !STATUS_DEFS[bu.status]) return;
+    var id = bu.status;
+    if (statusImmune(s, id)) { log(ev, actorName(s) + ' is immune to ' + id + '.', ''); return; }
+    var amt = Math.round(bu.amount * (1 - statusResistPct(s, id) / 100));
+    if (amt <= 0) return;
+    var meters = statusState(s).buildup;
+    var v = (meters[id] || 0) + amt;
+    if (v >= 100) {
+      meters[id] = 0;
+      ev.push({ t: 'status', side: s, kind: 'buildup', status: id, value: 100 });
+      triggerStatus(ev, s, id);
+    } else {
+      meters[id] = v;
+      ev.push({ t: 'status', side: s, kind: 'buildup', status: id, value: v });
+    }
+  }
+
+  function decayBuildup(s){
+    var meters = statusState(s).buildup;
+    for (var id in meters) {
+      if (!Object.prototype.hasOwnProperty.call(meters, id)) continue;
+      meters[id] = Math.max(0, meters[id] - BUILDUP_DECAY);
+      if (!meters[id]) delete meters[id];
+    }
+  }
+
+  // Item cure (spec §12): clears active statuses AND their buildup on the
+  // player side. Returns the ids actually cured. Called by inventory.use.
+  function cureStatuses(ids){
+    var out = [];
+    if (!state || state.over || !ids) return out;
+    var st = statusState('p');
+    for (var i = 0; i < ids.length; i++) {
+      var id = ids[i];
+      if (st.active[id]) { delete st.active[id]; out.push(id); }
+      if (st.buildup[id]) delete st.buildup[id];
+    }
+    return out;
   }
 
   /* ---------- damage & healing ---------- */
@@ -194,6 +381,8 @@ CHLOE.engine.battle = (function(){
 
   function healSide(ev, s, amount){
     if (!(amount > 0)) return;
+    // infection: healing halved while active (§12)
+    if (hasStatus(s, 'infection')) amount = Math.max(1, Math.floor(amount * (STATUS_DEFS.infection.healMult || 0.5)));
     if (s === 'e') {
       var before = state.enemy.hp;
       state.enemy.hp = Math.min(state.enemy.maxHp, state.enemy.hp + amount);
@@ -238,6 +427,83 @@ CHLOE.engine.battle = (function(){
     return true;
   }
 
+  /* ---------- §12 resource costs (stamina / magic / faith) ---------- */
+  // Move cost: v3 cost:{sta?,mp?,faith?} object, legacy mpCost honored.
+  function moveCost(mv){
+    var c = mv.cost;
+    if (c && typeof c === 'object') {
+      return { sta: c.sta || 0, mp: c.mp || 0, faith: c.faith || 0 };
+    }
+    return { sta: 0, mp: mv.mpCost || 0, faith: 0 };
+  }
+
+  // Can this side afford the move? -> {ok, reason}. Enemies ignore stamina.
+  function canPay(s, mv){
+    var c = moveCost(mv);
+    if (s === 'e') {
+      if (c.mp && state.enemy.mp < c.mp) return { ok: false, reason: 'Not enough MP' };
+      if (c.faith && state.enemy.faith < c.faith) return { ok: false, reason: 'Not enough faith' };
+      return { ok: true, reason: '' };
+    }
+    var m = party().active();
+    if (!m) return { ok: false, reason: 'No one up front' };
+    if (c.sta && (m.stamina || 0) < c.sta) return { ok: false, reason: 'Not enough stamina' };
+    if (c.mp && m.mp < c.mp) return { ok: false, reason: 'Not enough MP' };
+    if (c.faith && (m.faith || 0) < c.faith) return { ok: false, reason: 'Not enough faith' };
+    return { ok: true, reason: '' };
+  }
+
+  function payCosts(ev, s, mv){
+    if (!canPay(s, mv).ok) return false;
+    var c = moveCost(mv);
+    if (c.mp) payMp(ev, s, c.mp); // affordability pre-checked
+    if (s === 'e') {
+      if (c.faith) {
+        state.enemy.faith -= c.faith;
+        ev.push({ t: 'res', side: 'e', kind: 'faith', after: state.enemy.faith });
+      }
+      return true; // enemies ignore stamina
+    }
+    var m = party().active();
+    if (!m) return false;
+    if (c.sta) {
+      m.stamina = Math.max(0, (m.stamina || 0) - c.sta);
+      ev.push({ t: 'res', side: 'p', kind: 'sta', after: m.stamina, memberId: m.id });
+    }
+    if (c.faith) {
+      m.faith = Math.max(0, (m.faith || 0) - c.faith);
+      ev.push({ t: 'res', side: 'p', kind: 'faith', after: m.faith, memberId: m.id });
+    }
+    return true;
+  }
+
+  /* Turn-start regen (§12): +20% max stamina (x tree staminaRegenPct) and
+     +1 faith — unless cursed (curse stops faith gain). Enemies: faith only. */
+  function regenResources(ev, s){
+    var cursed = hasStatus(s, 'curse');
+    if (s === 'e') {
+      if (!cursed && state.enemy.faith < state.enemy.maxFaith) {
+        state.enemy.faith += 1;
+        ev.push({ t: 'res', side: 'e', kind: 'faith', after: state.enemy.faith });
+      }
+      return;
+    }
+    var m = party().active();
+    if (!m || m.hp <= 0) return;
+    var eff = party().effStats(m);
+    var maxSta = eff.stamina || 0;
+    if (maxSta && (m.stamina || 0) < maxSta) {
+      var pct = 20 * (1 + (treePassives('p').staminaRegenPct || 0) / 100);
+      m.stamina = Math.min(maxSta, (m.stamina || 0) + Math.max(1, Math.round(maxSta * pct / 100)));
+      ev.push({ t: 'res', side: 'p', kind: 'sta', after: m.stamina, memberId: m.id });
+    }
+    var maxFaith = eff.faith || 0;
+    if (!cursed && maxFaith && (m.faith || 0) < maxFaith) {
+      m.faith = (m.faith || 0) + 1;
+      ev.push({ t: 'res', side: 'p', kind: 'faith', after: m.faith, memberId: m.id });
+    }
+  }
+
   /* ---------- move resolution (spec §10.4, steps 1-5) ---------- */
   function applyEffect(ev, s, mv){
     var eff = mv.effect;
@@ -274,36 +540,48 @@ CHLOE.engine.battle = (function(){
 
   function doAttack(ev, a, mv){
     var b = other(a);
-    // accuracy roll — miss => attacker staggered ("whiff")
+    // accuracy roll — miss => attacker staggered ("whiff").
+    // haunt (§12): an extra 20% whiff chance while the attacker is haunted.
     var acc = (mv.accuracy === undefined || mv.accuracy === null) ? 1 : mv.accuracy;
-    if (Math.random() >= acc) {
-      log(ev, actorName(a) + "'s " + mv.name + ' whiffs!', 'sys');
+    var haunted = hasStatus(a, 'haunt') && Math.random() < (STATUS_DEFS.haunt.whiff || 0.2);
+    if (haunted || Math.random() >= acc) {
+      log(ev, actorName(a) + "'s " + mv.name + ' whiffs!' + (haunted ? ' (haunted)' : ''), 'sys');
       ev.push({ t: 'miss', side: a, moveId: mv.id, label: 'WHIFF' });
       setPhase(ev, a, 'staggered', 'whiff');
       return;
     }
 
-    var elemMult = elements().multiplier(mv.element || 'none', sideElement(b));
+    // RAW type multiplier (v3 types.js chart, legacy elements fallback) —
+    // damage AND the phase-transition checks below both read this raw value.
+    var elemMult = typeMultFor(mv, b);
     var aPhase = getPhase(a), bPhase = getPhase(b);
     var mods = phases();
-    var base = mv.usesMag ? effStat(a, 'mag') : (effStat(a, 'atk') + weaponAtkOf(a));
+    // effectiveStats: player atk already includes weapon + tree grants
+    var base = mv.usesMag ? effStat(a, 'mag') : effStat(a, 'atk');
     var dmg = Math.max(1, Math.round(
       base * ((mv.power || 100) / 100) * elemMult *
       mods[aPhase].deal * mods[bPhase].take * rand() -
       effStat(b, 'def') * 0.5
     ));
+    // tree passive: resists:{type:pct} shaves incoming damage of that type
+    var resistPct = (treePassives(b).resists || {})[moveType(mv)] || 0;
+    if (resistPct) dmg = Math.max(1, Math.round(dmg * (1 - Math.min(90, resistPct) / 100)));
 
     // active block matching cat OR element: x0.2, attacker staggered, defender stays guarded
     var blk = state.blocks[b];
     var blocked = !!(blk && (
       (blk.cats && blk.cats.indexOf(mv.cat || 'attack') !== -1) ||
-      (blk.elements && blk.elements.indexOf(mv.element || 'none') !== -1)
+      (blk.elements && (blk.elements.indexOf(mv.element || 'none') !== -1 ||
+                        blk.elements.indexOf(moveType(mv)) !== -1))
     ));
     if (blocked) {
-      dmg = Math.max(1, Math.round(dmg * 0.2));
+      // tree passive: blockPower multiplies the 80% block reduction
+      var reduction = Math.min(0.95, 0.8 * (treePassives(b).blockPower || 1));
+      dmg = Math.max(1, Math.round(dmg * (1 - reduction)));
       log(ev, actorName(b) + ' blocks it!', 'sys');
       ev.push({ t: 'block', side: b, kind: 'hit', moveId: blk.moveId, label: 'BLOCKED' });
       applyDamage(ev, b, dmg, elemMult, { blocked: true });
+      addBuildup(ev, b, mv.buildup); // a blocked hit still lands (x0.2)
       setPhase(ev, a, 'staggered', 'blocked');
       return;
     }
@@ -312,6 +590,12 @@ CHLOE.engine.battle = (function(){
     var koed = applyDamage(ev, b, dmg, elemMult,
       { label: elemMult >= 2 ? 'SUPER' : (elemMult <= 0.5 ? 'RESIST' : '') });
     if (elemMult <= 0.5 && !koed) log(ev, actorName(b) + ' shrugs it off...', '');
+    if (!koed) addBuildup(ev, b, mv.buildup); // §12 status buildup on hit
+    // tree keystone: onKillLifePct — a kill feeds the killer
+    if (koed && b === 'e' && a === 'p') {
+      var lifePct = treePassives('p').onKillLifePct || 0;
+      if (lifePct) healSide(ev, 'p', Math.max(1, Math.round(maxHpOf('p') * lifePct / 100)));
+    }
 
     // charged is consumed by the attack (x1.5 already applied via deal-mod)
     if (aPhase === 'charged') setPhase(ev, a, 'neutral', 'charge spent');
@@ -329,7 +613,9 @@ CHLOE.engine.battle = (function(){
 
   function useMove(ev, s, mv){
     if (!mv) { log(ev, 'Nothing happens.', 'sys'); return; }
-    if (!payMp(ev, s, mv.mpCost || 0)) { log(ev, actorName(s) + ' has no MP left for that!', 'sys'); return; }
+    var pay = canPay(s, mv);
+    if (!pay.ok) { log(ev, actorName(s) + " can't manage " + mv.name + ' (' + pay.reason.toLowerCase() + ')!', 'sys'); return; }
+    payCosts(ev, s, mv);
     var cat = mv.cat || 'attack';
     ev.push({ t: 'move', side: s, moveId: mv.id, name: mv.name, cat: cat });
     if (mv.id === '_basic') log(ev, actorName(s) + ' lashes out!', '');
@@ -361,16 +647,29 @@ CHLOE.engine.battle = (function(){
     doAttack(ev, s, mv); // 'attack' (and unknown cats default to attack)
   }
 
-  /* ---------- turn frame (block expiry, dots, staggered recovery) ---------- */
+  /* ---------- turn frame (block expiry, regen, dots, statuses, recovery) ---------- */
   function beginTurn(ev, s){
     // a registered block lasts until the start of this combatant's NEXT turn
     state.blocks[s] = null;
+    // §12: buildup meters decay 10 per own turn
+    decayBuildup(s);
+    // §12: turn-start regen — +20% max stamina, +1 faith (curse stops faith)
+    regenResources(ev, s);
     // staggered recovery: back to neutral at the start of the turn after a
     // turn finished while staggered
     if (state.recover[s]) {
       state.recover[s] = false;
       if (getPhase(s) === 'staggered') setPhase(ev, s, 'neutral', 'recovered');
     }
+  }
+
+  // shock (§12): 30% chance the shocked side loses its action this turn.
+  function shockSkips(ev, s){
+    if (!hasStatus(s, 'shock')) return false;
+    if (Math.random() >= (STATUS_DEFS.shock.skip || 0.3)) return false;
+    log(ev, actorName(s) + ' seizes up — the shock steals the turn!', s === 'p' ? 'sys' : 'hot');
+    ev.push({ t: 'status', side: s, kind: 'skip', status: 'shock' });
+    return true;
   }
 
   function endTurn(ev, s){
@@ -388,19 +687,44 @@ CHLOE.engine.battle = (function(){
       if (e.turns > 0) keep.push(e);
     }
     state.effects[s] = keep;
+
+    // §12 active statuses: damage ticks (% of max life), then countdown/clear
+    var act = statusState(s).active;
+    for (var id in act) {
+      if (!Object.prototype.hasOwnProperty.call(act, id)) continue;
+      var d = STATUS_DEFS[id];
+      if (d && d.tickPct && hpOf(s) > 0 && !state.over) {
+        var tick = Math.max(1, Math.round(maxHpOf(s) * d.tickPct / 100));
+        log(ev, actorName(s) + ' suffers from ' + id + '!', 'sys');
+        ev.push({ t: 'status', side: s, kind: 'tick', status: id, amount: tick });
+        applyDamage(ev, s, tick, 1, { dot: true });
+      }
+      act[id].turns -= 1;
+      if (act[id].turns <= 0) {
+        delete act[id];
+        log(ev, 'The ' + id + ' on ' + actorName(s) + ' fades.', '');
+        ev.push({ t: 'status', side: s, kind: 'clear', status: id });
+      }
+    }
+
     if (getPhase(s) === 'staggered') state.recover[s] = true;
   }
 
   /* ---------- player turn ---------- */
   function menuEntry(mv, m){
-    var cost = mv.mpCost || 0;
-    var short = m.mp < cost;
+    var cost = moveCost(mv);
+    var pay = canPay('p', mv);
     return {
       id: mv.id, name: mv.name, cat: mv.cat || 'attack', element: mv.element || 'none',
+      type: moveType(mv),                                    // v3 damage type
       power: mv.power, usesMag: !!mv.usesMag,
       accuracy: (mv.accuracy === undefined || mv.accuracy === null) ? 1 : mv.accuracy,
-      mpCost: cost, desc: mv.desc || '', failsafe: !!mv.failsafe,
-      disabled: short, reason: short ? 'Not enough MP' : ''
+      mpCost: cost.mp,                                       // legacy field (kept)
+      cost: cost,                                            // v3 {sta, mp, faith}
+      buildup: mv.buildup || null,
+      mult: typeMultFor(mv, 'e'),                            // effectiveness hint vs enemy
+      desc: mv.desc || '', failsafe: !!mv.failsafe,
+      disabled: !pay.ok, reason: pay.reason
     };
   }
 
@@ -442,6 +766,12 @@ CHLOE.engine.battle = (function(){
     if (res.ok) {
       if (res.revived || res.hp) ev.push({ t: 'heal', side: 'p', amount: res.hp || 0, kind: 'hp', hpAfter: target.hp, memberId: target.id });
       if (res.mp) ev.push({ t: 'heal', side: 'p', amount: res.mp, kind: 'mp', mpAfter: target.mp, memberId: target.id });
+      if (res.sta) ev.push({ t: 'res', side: 'p', kind: 'sta', after: target.stamina, memberId: target.id });
+      // cure items (§12): inventory called battle.cureStatuses; surface it
+      var cured = res.cured || [];
+      for (var c = 0; c < cured.length; c++) {
+        ev.push({ t: 'status', side: 'p', kind: 'clear', status: cured[c] });
+      }
     }
   }
 
@@ -464,7 +794,7 @@ CHLOE.engine.battle = (function(){
   function playerTurn(ev, action){
     beginTurn(ev, 'p');
     var m = party().active();
-    if (m && m.hp > 0) {
+    if (m && m.hp > 0 && !shockSkips(ev, 'p')) {
       if (action.type === 'move') {
         if (action.memberId && m.id !== action.memberId) {
           log(ev, charName(m.id) + ' is still finding the beat...', 'sys');
@@ -494,7 +824,7 @@ CHLOE.engine.battle = (function(){
   function enemyUsable(){
     var phase = state.enemyPhase, all = enemyMoveDefs(), out = [];
     for (var i = 0; i < all.length; i++) {
-      if (prog().usableInPhase(all[i], phase) && state.enemy.mp >= (all[i].mpCost || 0)) out.push(all[i]);
+      if (prog().usableInPhase(all[i], phase) && canPay('e', all[i]).ok) out.push(all[i]);
     }
     return out;
   }
@@ -503,9 +833,9 @@ CHLOE.engine.battle = (function(){
       !!(mv.effect && (mv.effect.hpPct || mv.effect.hp || mv.effect.healPower));
   }
   function bestAttack(attacks){
-    var pe = playerElement(), best = null, bestScore = -1;
+    var best = null, bestScore = -1;
     for (var i = 0; i < attacks.length; i++) {
-      var score = (attacks[i].power || 100) * elements().multiplier(attacks[i].element || 'none', pe);
+      var score = (attacks[i].power || 100) * typeMultFor(attacks[i], 'p');
       if (score > bestScore) { bestScore = score; best = attacks[i]; }
     }
     return best;
@@ -532,10 +862,9 @@ CHLOE.engine.battle = (function(){
         var help = usable.filter(isHealish);
         if (help.length && Math.random() < 0.4) return pick(help);
       }
-      // prefer super-effective vs the current player element
-      var pe = playerElement();
+      // prefer super-effective vs the current player character
       var supers = attacks.filter(function(mv){
-        return elements().multiplier(mv.element || 'none', pe) >= 2;
+        return typeMultFor(mv, 'p') >= 2;
       });
       if (supers.length) return pick(supers);
       if (attacks.length) return pick(attacks);
@@ -554,8 +883,10 @@ CHLOE.engine.battle = (function(){
   function enemyTurn(ev){
     if (state.over || state.enemy.hp <= 0) return;
     beginTurn(ev, 'e');
-    var mv = pickEnemyMove();
-    if (mv) useMove(ev, 'e', mv);
+    if (!shockSkips(ev, 'e')) {
+      var mv = pickEnemyMove();
+      if (mv) useMove(ev, 'e', mv);
+    }
     endTurn(ev, 'e');
   }
 
@@ -572,7 +903,8 @@ CHLOE.engine.battle = (function(){
     state.result = 'victory';
     var def = state.enemyDef;
     var rw = def.rewards || {};
-    var xp = rw.xp || 0, shards = rw.shards || 0;
+    // §12 enemy xp scaling: round(baseXp * level^1.35 / 2 + 10)
+    var xp = prog().enemyXp(def), shards = rw.shards || 0;
     var rewards = { xp: xp, shards: shards, drops: [], levelUps: [], learned: [] };
 
     party().addShards(shards);
@@ -685,7 +1017,7 @@ CHLOE.engine.battle = (function(){
       var list = menu(), entry = null;
       for (var i = 0; i < list.length; i++) if (list[i].id === action.id) { entry = list[i]; break; }
       if (!entry) { log(ev, 'Nothing happens.', 'sys'); return ev; }
-      if (entry.disabled) { log(ev, 'Not enough MP!', 'sys'); return ev; }
+      if (entry.disabled) { log(ev, (entry.reason || 'Not enough MP') + '!', 'sys'); return ev; }
       action.move = moveDef(entry.id);
       var chooser = party().active();
       action.memberId = chooser ? chooser.id : null;
@@ -737,6 +1069,9 @@ CHLOE.engine.battle = (function(){
     canFlee: canFlee,
     phases: phases,
     getLoadout: getLoadout,
-    setLoadout: setLoadout
+    setLoadout: setLoadout,
+    // Progression v3 additions
+    cureStatuses: cureStatuses,   // used by inventory.use for cure items
+    STATUSES: STATUS_DEFS         // status vocabulary for the UI (read-only)
   };
 })();

@@ -1,8 +1,13 @@
-/* CHLOE — engine/progression.js  (Combat v2, spec §6 + §10)
-   xpToNext(level) = round(25 * level^1.5). Level cap 50.
-   On level-up: stats += growth, learned moves = union of learnset entries <= level
-   (falls back to legacy skillsByLevel), new moves auto-equipped into matching
-   phase loadouts with a free slot (else left unequipped, toast).
+/* CHLOE — engine/progression.js  (Progression v3, spec §6 + §10 + §12)
+   xpToNext(level) = round(22 * level^1.75). Level cap 100.
+   Enemy xp reward = round(baseXp * enemyLevel^1.35 / 2 + 10)  -> enemyXp(def).
+   On level-up: stats += growth, +1 skill point (toast), learned moves = union
+   of learnset entries <= level (falls back to legacy skillsByLevel) UNION
+   tree-granted moves; new learnset moves auto-equipped into matching phase
+   loadouts with a free slot (else left unequipped, toast).
+   statsAt covers all 8 v3 stats (life/stamina/magic/faith/atk/def/spd/mag) with
+   silent v2 fallbacks (life<-hp, magic<-mp, stamina/faith defaults) and keeps
+   hp/mp aliases so v2 callers keep working.
    Also owns the shared Combat v2 vocabulary: PHASES, PHASE_MODS, move lookup
    (moves.js -> engine failsafes -> legacy skills.js adapter) and loadout
    validation/defaults used by party.js, save.js migration and battle.js. */
@@ -43,11 +48,22 @@ CHLOE.engine.progression = (function(){
   };
 
   function cap(){
-    return (CHLOE.data && CHLOE.data.config && CHLOE.data.config.levelCap) || 50;
+    var c = CHLOE.data && CHLOE.data.config && CHLOE.data.config.levelCap;
+    // v3 cap is 100; a lingering v2 config value of 50 is superseded (spec §12).
+    if (!c || c === 50) return 100;
+    return c;
   }
 
   function xpToNext(level){
-    return Math.round(25 * Math.pow(level, 1.5));
+    return Math.round(22 * Math.pow(level, 1.75));
+  }
+
+  // Enemy xp reward scaling (spec §12): round(baseXp * level^1.35 / 2 + 10).
+  function enemyXp(enemyDef){
+    if (!enemyDef) return 0;
+    var base = (enemyDef.rewards && enemyDef.rewards.xp) || 0;
+    var lvl = Math.max(1, enemyDef.level || 1);
+    return Math.round(base * Math.pow(lvl, 1.35) / 2 + 10);
   }
 
   // Engine -> UI notification (toast) — guarded, never throws, no DOM here.
@@ -58,15 +74,32 @@ CHLOE.engine.progression = (function(){
   }
 
   /* ---------- stats ---------- */
-  // Stats at a given level: base + growth * (level - 1). No weapon bonus here.
+  // v3 pools with silent v2 fallbacks: life <- hp, magic <- mp; characters
+  // without stamina/faith bases get playable defaults (spec §12 migration).
+  var POOL_ALIASES  = { life: 'hp', magic: 'mp' };
+  var POOL_DEFAULTS = { stamina: { base: 50, growth: 5 }, faith: { base: 5, growth: 0 } };
+
+  function baseAndGrowth(charDef, key){
+    var base = charDef.base || {}, growth = charDef.growth || {};
+    var alias = POOL_ALIASES[key];
+    var b = (base[key] !== undefined) ? base[key] : (alias !== undefined ? base[alias] : undefined);
+    var g = (growth[key] !== undefined) ? growth[key] : (alias !== undefined ? growth[alias] : undefined);
+    if (b === undefined && POOL_DEFAULTS[key]) { b = POOL_DEFAULTS[key].base; g = (g === undefined) ? POOL_DEFAULTS[key].growth : g; }
+    return { b: b || 0, g: g || 0 };
+  }
+
+  // Stats at a given level: base + growth * (level - 1). No weapon or tree
+  // bonus here — CHLOE.engine.tree.effectiveStats is the full aggregator.
+  // Returns all 8 v3 stats plus hp/mp aliases (of life/magic) for v2 callers.
   function statsAt(charDef, level){
-    var out = {}, keys = ['hp','mp','atk','def','spd','mag'];
+    var out = {}, keys = ['life','stamina','magic','faith','atk','def','spd','mag'];
     for (var i = 0; i < keys.length; i++) {
       var k = keys[i];
-      var b = (charDef.base && charDef.base[k]) || 0;
-      var g = (charDef.growth && charDef.growth[k]) || 0;
-      out[k] = Math.round(b + g * (Math.max(1, level) - 1));
+      var bg = baseAndGrowth(charDef || {}, k);
+      out[k] = Math.round(bg.b + bg.g * (Math.max(1, level) - 1));
     }
+    out.hp = out.life;
+    out.mp = out.magic;
     return out;
   }
 
@@ -106,8 +139,10 @@ CHLOE.engine.progression = (function(){
   }
 
   /* ---------- learnset ---------- */
-  // Full learned move list at a level: union of learnset entries <= level,
-  // in level order. Falls back to legacy skillsByLevel.
+  // Full learned move pool at a level: union of learnset entries <= level (in
+  // level order) UNION tree-granted moves (spec §12). Falls back to legacy
+  // skillsByLevel. Loadout validation and defaults all flow through here, so
+  // tree moves are equippable everywhere automatically.
   function movesAt(charDef, level){
     var out = [], seen = {};
     var byLevel = (charDef && (charDef.learnset || charDef.skillsByLevel)) || {};
@@ -117,6 +152,13 @@ CHLOE.engine.progression = (function(){
       var arr = byLevel[lvls[i]] || [];
       for (var j = 0; j < arr.length; j++) {
         if (!seen[arr[j]]) { seen[arr[j]] = true; out.push(arr[j]); }
+      }
+    }
+    var tree = CHLOE.engine.tree;
+    if (charDef && charDef.id && tree && typeof tree.treeMoves === 'function') {
+      var tm = tree.treeMoves(charDef.id);
+      for (var k = 0; k < tm.length; k++) {
+        if (!seen[tm[k]]) { seen[tm[k]] = true; out.push(tm[k]); }
       }
     }
     return out;
@@ -227,12 +269,28 @@ CHLOE.engine.progression = (function(){
       member.xp -= xpToNext(member.level);
       member.level += 1;
       res.levelsGained.push(member.level);
-      // stats += growth; bump current hp/mp along with the new maximums
+      // stats += growth; bump current pools along with the new maximums
       var g = charDef.growth || {};
-      member.hp = Math.max(member.hp, 0) + Math.round(g.hp || 0);
-      member.mp = Math.max(member.mp, 0) + Math.round(g.mp || 0);
+      member.hp = Math.max(member.hp, 0) + Math.round((g.life !== undefined ? g.life : g.hp) || 0);
+      member.mp = Math.max(member.mp, 0) + Math.round((g.magic !== undefined ? g.magic : g.mp) || 0);
+      member.stamina = Math.max(member.stamina || 0, 0) + Math.round(baseAndGrowth(charDef, 'stamina').g);
+      member.faith = Math.max(member.faith || 0, 0) + Math.round(baseAndGrowth(charDef, 'faith').g);
     }
     if (member.level >= cap()) member.xp = 0;
+
+    // §12: each level grants +1 skill point (spent in the skill tree screen)
+    if (res.levelsGained.length) {
+      var pts = res.levelsGained.length;
+      res.skillPoints = pts;
+      try {
+        var pst = CHLOE.engine.party && CHLOE.engine.party.state;
+        if (pst) {
+          if (!pst.skillPoints || typeof pst.skillPoints !== 'object') pst.skillPoints = {};
+          pst.skillPoints[member.id] = (pst.skillPoints[member.id] || 0) + pts;
+        }
+      } catch(e){}
+      notify((charDef.name || member.id) + ' gained ' + (pts === 1 ? 'a skill point!' : pts + ' skill points!'));
+    }
 
     if (res.levelsGained.length) {
       var after = movesAt(charDef, member.level);
@@ -252,10 +310,16 @@ CHLOE.engine.progression = (function(){
         notify((charDef.name || member.id) + ' learned ' + name + '!' +
                (eq.unequipped ? ' (loadout full — not equipped)' : ''));
       }
-      // clamp to new maxima
-      var max = statsAt(charDef, member.level);
-      if (member.hp > max.hp) member.hp = max.hp;
-      if (member.mp > max.mp) member.mp = max.mp;
+      // clamp to new maxima (tree-aware: tree stat grants raise the caps)
+      var tree = CHLOE.engine.tree;
+      var max = (tree && typeof tree.effectiveStats === 'function')
+        ? tree.effectiveStats(member) : statsAt(charDef, member.level);
+      var maxLife = (max.life !== undefined) ? max.life : max.hp;
+      var maxMagic = (max.magic !== undefined) ? max.magic : max.mp;
+      if (member.hp > maxLife) member.hp = maxLife;
+      if (member.mp > maxMagic) member.mp = maxMagic;
+      if (max.stamina !== undefined && (member.stamina || 0) > max.stamina) member.stamina = max.stamina;
+      if (max.faith !== undefined && (member.faith || 0) > max.faith) member.faith = max.faith;
     }
     return res;
   }
@@ -263,6 +327,7 @@ CHLOE.engine.progression = (function(){
   return {
     // v1 surface (kept)
     xpToNext: xpToNext,
+    enemyXp: enemyXp,
     statsAt: statsAt,
     skillsAt: movesAt,          // alias — returns move ids now
     grantXp: grantXp,
