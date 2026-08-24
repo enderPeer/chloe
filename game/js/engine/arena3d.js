@@ -24,7 +24,8 @@ CHLOE.engine = CHLOE.engine || {};
   function noop() {}
   function deadDebug() {
     return { x: 0, z: 0, yaw: 0, pitch: 0, crouch: false, eye: 0, knightDist: 0,
-             mode: 'dead', churchLoaded: false, knightLoaded: false };
+             mode: 'dead', churchLoaded: false, knightLoaded: false,
+             locked: false, squad: 0, squadAlive: 0 };
   }
   function disableAPI(reason) {
     if (reason) console.warn('[arena3d] disabled: ' + reason);
@@ -32,6 +33,27 @@ CHLOE.engine = CHLOE.engine || {};
     A.telegraph = function (p, cb) { if (cb) window.setTimeout(function(){ cb({ hit: true, pattern: p }); }, 300); };
     A.flinch = noop; A.setKnightAlive = noop;
     A.debug = deadDebug; A._teleport = noop; A._setCrouch = noop;
+    /* Everything ui/battle3d.js calls must exist here too, or a machine
+       without WebGL throws its way through the fight instead of degrading.
+       This list had drifted badly: stopAbility alone was already being called
+       unguarded. Keep it in step whenever the public API grows. */
+    A.playAbility = noop; A.stopAbility = noop; A.doEvade = noop;
+    A.showSign = noop; A.spawnTornado = function () { return false; };
+    A.spawnAsteroid = function (cb) { if (cb) cb(); return false; };
+    A.asteroidTargets = function () { return []; };
+    A.asteroidPoint = function () { return { x: 0, z: 0 }; };
+    A.asteroidActive = function () { return false; };
+    A.spawnSquad = noop; A.squadSize = function () { return 1; };
+    A.abilityTargets = function () { return [0]; };   // headless: always connect
+    A.abilityHits = function () { return true; };
+    A.abilityHitsBench = function () { return false; };
+    A.benchDebug = function () { return []; };
+    A.nearestKnightDist = function () { return 2; };
+    A.releaseLock = noop; A.allowLock = noop; A.isLocked = function () { return false; };
+    A.assetsReady = function () { return true; };     // nothing to wait for
+    A.assetProgress = function () { return { done: 1, total: 1, warm: true }; };
+    A._renderOnce = function () { return false; };
+    A._look = noop; A._tick = noop;
   }
 
   if (!window.THREE) { disableAPI('THREE not found'); return; }
@@ -47,6 +69,7 @@ CHLOE.engine = CHLOE.engine || {};
 
   // ---------------------------------------------------------------- state
   var inited = false, running = false, disabled = false;
+  var controlOff = false;   // §21: a panel owns input; the loop still runs
   var canvas = null, renderer = null, scene = null, camera = null;
   var rafId = 0, lastTime = 0, elapsed = 0, renderFailed = false;
   var LIGHT_SCALE = 1;       // becomes PI under physicallyCorrectLights (§14)
@@ -1003,6 +1026,210 @@ CHLOE.engine = CHLOE.engine || {};
     });
   }
 
+  // ------------------------------------------------------- §21 asteroid
+  /* The level-3 spell: a burning rock falls out of the vault onto the spot
+     you aimed at, and everything near the crater takes it. Unlike the tornado,
+     which parks on one knight and chases him, this one commits to a POINT -
+     which is what makes it the answer to a round fielding six knights. */
+  var rock = {
+    root: null, inner: null, mats: [], light: null, motes: [], ring: null,
+    active: false, landed: false, t: 0, dur: 0.85, impact: 0,
+    from: 11, x: 0, z: 0, onLand: null
+  };
+
+  function loadAsteroid() {
+    assetExpect('asteroid');
+    var loader = makeLoader();
+    var models = D().models || {};
+    if (!loader || !models.asteroid) { assetDone('asteroid', 'skipped'); return; }
+    loader.load(versioned(models.asteroid), function (gltf) {
+      try {
+        var cfgA = D().asteroid || {};
+        var root = gltf.scene;
+        var box = new THREE.Box3().setFromObject(root);
+        var d = Math.max(0.01, Math.max(box.max.x - box.min.x,
+                                        box.max.y - box.min.y,
+                                        box.max.z - box.min.z));
+        root.scale.setScalar((cfgA.size || 1.5) / d);
+
+        root.traverse(function (o) {
+          if (!o.isMesh || !o.material) return;
+          var mats = Array.isArray(o.material) ? o.material : [o.material];
+          for (var i = 0; i < mats.length; i++) {
+            var m = mats[i];
+            if (!m) continue;
+            /* The pack ships a molten-crack emissive map. That IS the look of
+               the spell, so push it rather than trying to light the rock. */
+            if (m.emissive) { m.emissive.setHex(cfgA.glow || 0xff6a18); m.emissiveIntensity = 2.4; }
+            if ('envMapIntensity' in m) { m.envMapIntensity = 0.25; m.userData.envClamp = 0.25; }
+            rock.mats.push(m);
+          }
+        });
+
+        var wrap = new THREE.Group();
+        wrap.add(root);
+        wrap.visible = false;
+        scene.add(wrap);
+        rock.root = wrap;
+        rock.inner = root;
+
+        rock.light = new THREE.PointLight(cfgA.glow || 0xff6a18, 0, 14, 1.9);
+        wrap.add(rock.light);
+
+        // ember motes streaming off it on the way down
+        var n = cfgA.trailCount || 14;
+        var moteGeo = new THREE.SphereGeometry(0.06, 6, 5);
+        for (var q = 0; q < n; q++) {
+          var mm = new THREE.Mesh(moteGeo, new THREE.MeshBasicMaterial({
+            color: 0xffa040, transparent: true, opacity: 0,
+            blending: THREE.AdditiveBlending, depthWrite: false
+          }));
+          mm.visible = false;
+          scene.add(mm);
+          rock.motes.push({ mesh: mm, off: Math.random(),
+                            spread: 0.35 + Math.random() * 0.5,
+                            ang: Math.random() * Math.PI * 2 });
+        }
+
+        // the crater flash: a flat ring that punches outward on impact
+        var ringGeo = new THREE.RingGeometry(0.2, 1.0, 28);
+        ringGeo.rotateX(-Math.PI / 2);
+        rock.ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
+          color: cfgA.glow || 0xff6a18, transparent: true, opacity: 0,
+          blending: THREE.AdditiveBlending, depthWrite: false,
+          side: THREE.DoubleSide
+        }));
+        rock.ring.visible = false;
+        scene.add(rock.ring);
+      } catch (e) { console.warn('[arena3d] asteroid failed', e); }
+      assetDone('asteroid');
+    }, undefined, function () {
+      console.warn('[arena3d] asteroid.glb missing');
+      assetDone('asteroid', 'failed');
+    });
+  }
+
+  /* Aim point: the living knight nearest to where you are LOOKING, not the
+     one nearest your body - you should be able to pick which cluster eats it. */
+  function asteroidAim() {
+    var fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+    var best = null, bestScore = -Infinity;
+    for (var i = 0; i < knights.length; i++) {
+      var k = knights[i];
+      if (!k.alive || !k.group) continue;
+      var dx = k.group.position.x - pos.x, dz = k.group.position.z - pos.z;
+      var dist = Math.sqrt(dx * dx + dz * dz) || 0.001;
+      var dot = (dx / dist) * fx + (dz / dist) * fz;   // 1 = dead ahead
+      if (dot < 0.2) continue;                          // behind you: never
+      var score = dot * 2.2 - dist * 0.06;
+      if (score > bestScore) { bestScore = score; best = k; }
+    }
+    if (best) return { x: best.group.position.x, z: best.group.position.z };
+    // nobody in front of you: drop it down your sightline anyway
+    return { x: pos.x + fx * 6, z: pos.z + fz * 6 };
+  }
+
+  /* Start the fall. `onLand` fires on the frame it hits, which is what the UI
+     hangs the damage on, so the number and the crater are the same moment. */
+  A.spawnAsteroid = function (onLand) {
+    if (!rock.root) { if (onLand) onLand(); return false; }
+    var ab = (CHLOE.data.abilities || {}).asteroid || {};
+    var aim = asteroidAim();
+    rock.x = aim.x; rock.z = aim.z;
+    rock.from = ab.fallFrom || 11;
+    rock.dur = (ab.fallMs || 850) / 1000;
+    rock.t = 0;
+    rock.active = true;
+    rock.landed = false;
+    rock.onLand = onLand || null;
+    rock.root.position.set(rock.x, rock.from, rock.z);
+    rock.root.visible = true;
+    if (rock.inner) rock.inner.rotation.set(0, 0, 0);
+    return true;
+  };
+
+  /* Who is standing in the crater. Splash does not care about your facing. */
+  A.asteroidTargets = function (radius) {
+    var r = radius || 3.4, out = [];
+    for (var i = 0; i < knights.length; i++) {
+      var k = knights[i];
+      if (!k.alive || !k.group) continue;
+      var dx = k.group.position.x - rock.x, dz = k.group.position.z - rock.z;
+      if (dx * dx + dz * dz <= r * r) out.push(i);
+    }
+    return out;
+  };
+
+  A.asteroidPoint = function () { return { x: rock.x, z: rock.z }; };
+  A.asteroidActive = function () { return rock.active; };
+
+  function updateAsteroid(dt) {
+    var cfgA = D().asteroid || {};
+
+    // the crater keeps burning after the rock is gone
+    if (rock.ring && rock.ring.visible) {
+      rock.impact += dt;
+      var life = (cfgA.impactMs || 620) / 1000;
+      var f = Math.min(1, rock.impact / life);
+      rock.ring.scale.setScalar(0.6 + f * 3.4);
+      rock.ring.material.opacity = 0.9 * (1 - f);
+      if (rock.light) rock.light.intensity = (1 - f) * 16 * LIGHT_SCALE;
+      if (f >= 1) {
+        rock.ring.visible = false;
+        if (rock.light) rock.light.intensity = 0;
+        for (var z = 0; z < rock.motes.length; z++) rock.motes[z].mesh.visible = false;
+      }
+    }
+
+    if (!rock.active || !rock.root) return;
+    rock.t += dt;
+    var p = Math.min(1, rock.t / rock.dur);
+    var eased = p * p;                 // accelerating: it falls, not descends
+    var y = rock.from * (1 - eased);
+    rock.root.position.set(rock.x, Math.max(0, y), rock.z);
+
+    var spin = cfgA.spin || [1.9, 2.7, -1.4];
+    if (rock.inner) {
+      rock.inner.rotation.x += spin[0] * dt;
+      rock.inner.rotation.y += spin[1] * dt;
+      rock.inner.rotation.z += spin[2] * dt;
+    }
+    if (rock.light) rock.light.intensity = (2 + 10 * eased) * LIGHT_SCALE;
+
+    for (var i = 0; i < rock.motes.length; i++) {
+      var mt = rock.motes[i];
+      var lag = (p + mt.off) % 1;
+      mt.mesh.visible = true;
+      mt.mesh.position.set(
+        rock.x + Math.cos(mt.ang) * mt.spread * lag,
+        Math.max(0.05, y + lag * 2.6),
+        rock.z + Math.sin(mt.ang) * mt.spread * lag
+      );
+      mt.mesh.material.opacity = 0.85 * (1 - lag);
+      mt.mesh.scale.setScalar(0.6 + lag * 0.9);
+    }
+
+    if (p >= 1 && !rock.landed) {
+      rock.landed = true;
+      rock.active = false;
+      rock.root.visible = false;
+      if (rock.ring) {
+        rock.ring.position.set(rock.x, 0.06, rock.z);
+        rock.ring.visible = true;
+        rock.ring.scale.setScalar(0.6);
+        rock.ring.material.opacity = 0.9;
+      }
+      if (rock.light) {
+        // park the glow in the crater rather than following the vanished rock
+        rock.root.position.set(rock.x, 0.4, rock.z);
+        rock.root.visible = false;
+        rock.light.intensity = 16 * LIGHT_SCALE;
+      }
+      rock.impact = 0;
+      if (rock.onLand) { var cb = rock.onLand; rock.onLand = null; cb(); }
+    }
+  }
+
   function loadTornado() {
     assetExpect('tornado');
     var loader = makeLoader();
@@ -1075,6 +1302,7 @@ CHLOE.engine = CHLOE.engine || {};
   };
 
   function updateSignAndTornado(dt) {
+    updateAsteroid(dt);
     // hand sign: rune spins and brightens while the cast winds up
     if (sign.active) {
       sign.t += dt;
@@ -1280,6 +1508,7 @@ CHLOE.engine = CHLOE.engine || {};
     buildBenches();
     loadHandSign();
     loadTornado();
+    loadAsteroid();
     A.reset();
 
     inited = true;
@@ -1323,21 +1552,34 @@ CHLOE.engine = CHLOE.engine || {};
 
   // ---------------------------------------------------------------- input
   var PREVENT = { ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1, Space: 1 };
-  function onKeyDown(e) { keys[e.code] = true; if (PREVENT[e.code]) e.preventDefault(); }
+  function onKeyDown(e) {
+    /* Bail before preventDefault: PREVENT swallows Space, and with a result
+       card up that would stop you activating its focused button. */
+    if (controlOff) return;
+    keys[e.code] = true;
+    if (PREVENT[e.code]) e.preventDefault();
+  }
   function onKeyUp(e) { keys[e.code] = false; }
   function onBlur() { keys = {}; }
   var lockSuppressed = false;   // §21: a panel is up; do not re-grab the cursor
   function isLocked() { return !!(canvas && document.pointerLockElement === canvas); }
   function onMouseMove(e) {
-    if (!isLocked()) return;
+    // exitPointerLock is async — without controlOff a stray move lands in the
+    // gap and drifts the camera behind whatever panel just opened
+    if (controlOff || !isLocked()) return;
     yaw -= (e.movementX || 0) * SENS;
     pitch -= (e.movementY || 0) * SENS;
     if (pitch > PITCH_MAX) pitch = PITCH_MAX;
     if (pitch < -PITCH_MAX) pitch = -PITCH_MAX;
   }
   function onClick() {
-    if (!running || isLocked() || lockSuppressed) return;
-    try { canvas.requestPointerLock(); } catch (e) {}
+    if (!running || controlOff || isLocked() || lockSuppressed) return;
+    try {
+      // modern Chrome returns a promise and REJECTS it inside the exit/enter
+      // cooldown — an unhandled rejection is a console error
+      var pl = canvas.requestPointerLock();
+      if (pl && typeof pl.catch === 'function') pl.catch(function () {});
+    } catch (e) {}
   }
   function addListeners() {
     function on(t, type, fn) { t.addEventListener(type, fn); listeners.push([t, type, fn]); }
@@ -1954,6 +2196,7 @@ CHLOE.engine = CHLOE.engine || {};
   // ---------------------------------------------------------------- API
   A.start = function () {
     lockSuppressed = false;   // a new fight starts in movement mode
+    controlOff = false;       // ...and owns the keyboard again
     if (disabled || !inited || running) return;
     running = true;
     keys = {};
@@ -1972,11 +2215,20 @@ CHLOE.engine = CHLOE.engine || {};
      lock straight back while that panel is still up. */
   A.releaseLock = function (suppress) {
     if (suppress !== false) lockSuppressed = true;
+    /* Releasing the LOCK is not enough on its own: the keydown listener stays
+       live, so WASD kept walking the camera behind the result card and the
+       Space handler kept eating the key that would press its button. Hand
+       back the whole input surface, but deliberately leave the render loop
+       running - stop() would tear the arena down and leave the card sitting
+       on a dead canvas, since the renderer has no preserveDrawingBuffer. */
+    controlOff = true;
+    keys = {};
+    vel.x = 0; vel.z = 0;
     if (isLocked()) { try { document.exitPointerLock(); } catch (e) {} }
   };
 
   /* Let the player put themselves back in movement mode (click-to-look). */
-  A.allowLock = function () { lockSuppressed = false; };
+  A.allowLock = function () { lockSuppressed = false; controlOff = false; };
 
   A.isLocked = function () { return isLocked(); };
 

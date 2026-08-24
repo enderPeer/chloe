@@ -85,7 +85,48 @@ CHLOE.engine.combat3 = (function () {
     }
     if (!out[0] && known.length) out[0] = known[0];
     p.state.binds[charId] = out;
+    autoBind(charId, known, out);
     return out;
+  }
+
+  /* §21: a level that hands you a move should hand it to you READY. The
+     ladder grants an ability and its key on the same level, so a new move
+     drops straight onto the new key and you can use it the moment you walk
+     back into the church - no trip through the menu to arm your reward.
+
+     Each ability is auto-placed ONCE, remembered in `autoBound`. Without that
+     memory, deliberately clearing a key would be impossible: the next call to
+     binds() would helpfully put the ability straight back. Run-scoped like
+     everything else - it dies with the run. */
+  function autoBind(charId, known, out) {
+    var p = party();
+    if (!p.state.autoBound) p.state.autoBound = {};
+    var seen = p.state.autoBound[charId];
+    if (!Array.isArray(seen)) seen = [];
+
+    var placed = [];
+    for (var k = 0; k < known.length; k++) {
+      var id = known[k];
+      if (seen.indexOf(id) !== -1) continue;      // already offered a key once
+      seen.push(id);
+      if (out.indexOf(id) !== -1) continue;       // the player already bound it
+      var slot = out.indexOf(null);
+      if (slot === -1) continue;                  // no free key: leave it in the pool
+      out[slot] = id;
+      placed.push({ abilityId: id, slot: slot });
+    }
+    p.state.autoBound[charId] = seen;
+    p.state.binds[charId] = out;
+    if (placed.length) lastAutoBound = { charId: charId, placed: placed };
+    return placed;
+  }
+
+  /* What the last auto-bind put where, so the victory card can say so. */
+  var lastAutoBound = null;
+  function takeAutoBound() {
+    var v = lastAutoBound;
+    lastAutoBound = null;
+    return v;
   }
 
   function bind(charId, slot, abilityId) {
@@ -501,6 +542,7 @@ CHLOE.engine.combat3 = (function () {
     aliveCount: aliveCount, allDown: allDown,
     flee: flee, snapshot: snapshot,
     knownAbilities: knownAbilities, slotCount: slotCount, binds: binds, bind: bind,
+    takeAutoBound: takeAutoBound,
     readiness: function (id) { return st ? readiness(id) : { ready: false }; }
   };
 })();

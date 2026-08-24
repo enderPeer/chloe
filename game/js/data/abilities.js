@@ -85,6 +85,30 @@ CHLOE.data.abilities = {
     vfx: 'tornado',
     grantedBy: 'tree'
   },
+  /* §21 level 3: the first thing you can throw. You point, you shove both
+     hands up, and a burning rock comes down through the roof onto the spot.
+
+     `splash` is what makes it worth a key: unlike every arc ability above,
+     it damages EVERY knight within `splashRadius` of where it lands, so it is
+     the answer to a round that fields six of them. One hit, no arc, no reach
+     check against your own facing - the aim is where you are looking. */
+  asteroid: {
+    id: 'asteroid', name: 'Asteroid', icon: '☄', type: 'fire',
+    desc: 'Call a burning rock down out of the roof. It falls where you aim and everything near the crater takes it.',
+    cost: { mana: 24, sta: 10 },
+    /* Long enough to read as a real cast, short enough that you can still
+       fit one in between his swings. The fall itself is the wind-up you
+       watch, so the damage lands at the END of it. */
+    castMs: 900, recoverMs: 460, cooldownMs: 9000, charges: 1,
+    range: 14.0, arc: 360,        // aimed, not swung - the whole nave is in reach
+    power: 165, usesMag: true,
+    hits: 1, hitAtMs: [1750],     // 900 cast + ~850 fall from the vault
+    cast: 'sign',                 // both hands up, sigil at the fingertips
+    vfx: 'asteroid',
+    splash: true, splashRadius: 3.4,
+    fallMs: 850, fallFrom: 11.0,  // metres above the floor it starts
+    grantedBy: 'tree'
+  },
   hollow_breaker: {
     id: 'hollow_breaker', name: 'Hollow Breaker', icon: '✨', type: 'divine',
     desc: 'A rising strike that hurts the things armour cannot protect.',

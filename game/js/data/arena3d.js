@@ -12,13 +12,24 @@ CHLOE.data.arena3d = {
      as ?v=N so browsers that cached an older build refetch instead of
      rendering the stale one (a cached all-black church looked like "no
      textures" long after the fix shipped). */
-  assetVersion: 5,
+  assetVersion: 6,
   models: {
     church: 'assets/3d/church.glb',
     knight: 'assets/3d/knight.glb',
     punch:  'assets/3d/punch.glb',
     tornado: 'assets/3d/firetornado.glb',
-    handsign: 'assets/3d/handsign.glb'
+    handsign: 'assets/3d/handsign.glb',
+    asteroid: 'assets/3d/asteroid.glb'
+  },
+  /* §21 Asteroid presentation. The ball is normalised to 1m in the GLB, so
+     `size` is literally its diameter in metres. It tumbles as it falls and
+     the impact throws a short-lived ring of embers. */
+  asteroid: {
+    size: 1.5,
+    spin: [1.9, 2.7, -1.4],   // rad/s per axis, so the tumble never looks flat
+    trailCount: 14,           // ember motes streaming off it on the way down
+    impactMs: 620,            // crater glow + ember burst lifetime
+    glow: 0xff6a18
   },
   /* §18 Fire Tornado presentation: the hand comes up at the camera, a rune
      spins off the fingertips, and the funnel drops on the target. */

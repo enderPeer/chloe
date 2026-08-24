@@ -13,10 +13,25 @@
        ally:'id'      -> a party member joins at this level
        name, desc     -> what the level screen shows }
 
-   Levels 1-12 are authored. 13-100 are generated on a readable cadence so the
-   ladder is complete and honest about what is filler: every 3rd level widens
-   the hotbar until 9 keys, the rest are stat growth. New abilities get slotted
-   into this table as they are built (§19 "each level built out separately"). */
+   §21: LEVELS 1-9 ARE THE AUTHORED GAME. Each of those nine rows is a real,
+   built-out thing - an ability with its own animation and VFX, the key to put
+   it on, or an ally. Every one of the first nine levels hands you something
+   you can feel. 10-100 are generated on a readable cadence and are honest
+   about being growth: hotbar width to 9 keys, then stats.
+
+   The shape of the first nine:
+     1  punch          + key 1     your hands
+     2  fire_tornado   + key 2     the first spell
+     3  asteroid       + key 3     the first ranged spell
+     4  ally           Ash joins, at her own level
+     5  stat           you get harder to kill
+     6  hammer_fist    + key 4
+     7  stat           the well gets deeper
+     8  ember_jab      + key 5
+     9  hollow_breaker + key 6     the early kit is complete
+
+   Abilities and their keys arrive TOGETHER on purpose. Granting a move with
+   nowhere to bind it reads as a bug, not a reward. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.data = CHLOE.data || {};
 
@@ -24,28 +39,37 @@ CHLOE.data = CHLOE.data || {};
   'use strict';
 
   var rows = {
-    1:  { ability: 'punch',        name: 'Fists',          desc: 'You always have your hands. Weak, cheap, always ready.' },
-    /* Level 2 grants the spell AND the key to put it on, so you can actually
-       hold BOTH punch and Fire Tornado from the moment you earn it. */
-    2:  { ability: 'fire_tornado', slot: 1, name: 'Fire Tornado', desc: 'Trace the sign and drop a pillar of fire — and a second keybind to carry it. Both fists and fire from here.' },
-    3:  { ally: 'ash',             name: 'Ash Finds You',  desc: 'Your sister catches up. She fights at her own level.' },
-    4:  { slot: 1,                 name: 'Second Nature',  desc: '+1 ability keybind — key 3.' },
-    5:  { stat: { life: 12, stamina: 6 }, name: 'Roadworn', desc: '+12 life, +6 stamina.' },
-    6:  { ability: 'hammer_fist',  name: 'Hammer Fist',    desc: 'One committed overhand. Slow, heavy, expensive.' },
-    7:  { slot: 1,                 name: 'Quick Hands',    desc: '+1 ability keybind — key 4.' },
-    8:  { stat: { magic: 8, mag: 2 },    name: 'Open Channel', desc: '+8 magic, +2 magic power.' },
-    9:  { ability: 'ember_jab',    name: 'Ember Jab',      desc: 'A jab that lights on contact.' },
-    10: { slot: 1,                 name: 'Third Hand',     desc: '+1 ability keybind — key 5.' },
-    11: { stat: { atk: 3, def: 2 },      name: 'Callused',  desc: '+3 attack, +2 defense.' },
-    12: { ability: 'hollow_breaker', name: 'Hollow Breaker', desc: 'A rising strike that hurts what armour cannot protect.' }
+    1:  { ability: 'punch', slot: 0, name: 'Fists',
+          desc: 'You always have your hands. Weak, cheap, always ready. Key 1.' },
+    2:  { ability: 'fire_tornado', slot: 1, name: 'Fire Tornado',
+          desc: 'Trace the sign and drop a pillar of fire on him. Comes with key 2 to carry it, so you hold fists AND fire.' },
+    /* §21: the first thing you can throw. Everything before this needed you
+       to be standing next to him. */
+    3:  { ability: 'asteroid', slot: 1, name: 'Asteroid',
+          desc: 'Call a burning rock down out of the roof. It falls where you point and everything near the crater takes it. Key 3.' },
+    4:  { ally: 'ash', name: 'Ash Finds You',
+          desc: 'Your sister catches up. She fights at her own level, and if you fall she takes the lead.' },
+    5:  { stat: { life: 12, stamina: 6 }, name: 'Roadworn',
+          desc: '+12 life, +6 stamina.' },
+    6:  { ability: 'hammer_fist', slot: 1, name: 'Hammer Fist',
+          desc: 'One committed overhand. Slow, heavy, expensive. Key 4.' },
+    7:  { stat: { magic: 8, mag: 2 }, name: 'Open Channel',
+          desc: '+8 magic, +2 magic power.' },
+    8:  { ability: 'ember_jab', slot: 1, name: 'Ember Jab',
+          desc: 'A jab that lights on contact. Key 5.' },
+    9:  { ability: 'hollow_breaker', slot: 1, name: 'Hollow Breaker',
+          desc: 'A rising strike that hurts what armour cannot protect. Key 6 — the early kit is complete.' }
   };
 
-  // 13-100: keep widening the hotbar to 9 keys, otherwise steady stat growth.
-  var slotsSoFar = 4;   // granted at 2, 4, 7, 10
-  for (var L = 13; L <= 100; L++) {
-    if (L % 3 === 0 && slotsSoFar < 8) {
+  /* 10-100: growth, and honest about it. Widen the hotbar to its 9-key cap,
+     then steady stats. New authored abilities drop straight into `rows`
+     above and override the generated entry for that level. */
+  var slotsSoFar = 6;   // keys 1-6 handed out across levels 1-9
+  for (var L = 10; L <= 100; L++) {
+    if (rows[L]) continue;
+    if (L % 4 === 0 && slotsSoFar < 9) {
       slotsSoFar++;
-      rows[L] = { slot: 1, name: 'Wider Grip', desc: '+1 ability keybind — key ' + (slotsSoFar + 1) + '.' };
+      rows[L] = { slot: 1, name: 'Wider Grip', desc: '+1 ability keybind - key ' + slotsSoFar + '.' };
     } else if (L % 5 === 0) {
       rows[L] = { stat: { life: 10, stamina: 4 }, name: 'Harder to Kill', desc: '+10 life, +4 stamina.' };
     } else if (L % 5 === 2) {

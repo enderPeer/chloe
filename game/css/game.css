@@ -1807,3 +1807,36 @@ button:disabled .cost-chip{ opacity:.7; }
   color:#6e6774; font-size:.7rem; font-style:italic; margin-top:.6rem;
   min-height:2.4em; line-height:1.5;
 }
+
+/* ------------------------------------------- §21 level ladder (Moves tab)
+   Replaces the Skill Tree screen. Progression is a ladder with nothing to
+   spend, so it lives next to the keys it unlocks rather than on its own page. */
+.moves-who{ display:flex; flex-wrap:wrap; gap:.4rem; margin:.5rem 0 .2rem; }
+.moves-who button{ font-size:.7rem; padding:.28rem .6rem; }
+.moves-who button.on{ border-color:var(--red); color:var(--txt); }
+.ladder-now{ display:flex; align-items:center; gap:.6rem; margin:.4rem 0 .7rem; }
+.ladder-now .lv{ font-family:var(--font-head); font-size:1.1rem; color:var(--red); letter-spacing:.08em; }
+.ladder-now .xp{ font-size:.65rem; color:var(--dim); white-space:nowrap; }
+.ladder-xp{ flex:1; height:5px; border-radius:3px; background:rgba(255,255,255,.08); overflow:hidden; }
+.ladder-xp-fill{ height:100%; background:linear-gradient(90deg,var(--deep-red),var(--red)); border-radius:3px; }
+.ladder-list{ display:flex; flex-direction:column; gap:.3rem; }
+.ladder-row{
+  display:flex; align-items:center; gap:.6rem;
+  border:1px solid #24212a; border-left:3px solid #24212a; border-radius:7px;
+  background:#121116; padding:.4rem .6rem; opacity:.55;
+}
+.ladder-row.got{ opacity:1; border-left-color:var(--deep-red); }
+.ladder-row.here{ border-color:var(--red); border-left-color:var(--red); background:#191218; }
+.ladder-row .l{
+  font-family:var(--font-head); font-size:.95rem; color:var(--dim);
+  min-width:1.6rem; text-align:center;
+}
+.ladder-row.got .l{ color:var(--red); }
+.ladder-row .b{ flex:1; min-width:0; }
+.ladder-row .nm{ font-family:var(--font-head); letter-spacing:.05em; font-size:.82rem; }
+.ladder-row .ds{ color:var(--dim); font-size:.68rem; line-height:1.4; }
+.ladder-row .give{ font-size:.68rem; color:#c8c2cc; white-space:nowrap; text-align:right; }
+@media (max-width:560px){
+  .ladder-row{ flex-wrap:wrap; }
+  .ladder-row .give{ width:100%; text-align:left; padding-left:2.2rem; }
+}

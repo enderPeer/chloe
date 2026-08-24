@@ -235,6 +235,47 @@ CHLOE.ui.battle3d = (function () {
   }
 
   /* ---------- enemy AI loop ---------- */
+  /* Resolve one hit window. Two shapes:
+       - arc abilities hit whoever is inside your reach/facing cone
+       - §21 SPLASH abilities (the asteroid) hit whoever is standing in the
+         crater, regardless of where you happen to be looking by then
+     The asteroid also DELAYS its damage until the rock actually lands, so the
+     number and the impact are the same moment rather than the number arriving
+     while the rock is still in the air. */
+  function resolveStrike(ab, e) {
+    if (ab && ab.vfx === 'asteroid') {
+      a3d.showSign(false);
+      splash('ASTEROID', 'super');
+      var abilityId = e.abilityId;
+      var radius = ab.splashRadius || 3.4;
+      a3d.spawnAsteroid(function () {
+        if (!active || C3.isOver()) return;
+        var hitList = a3d.asteroidTargets ? a3d.asteroidTargets(radius) : [];
+        applyHits(abilityId, hitList, 'CRATER');
+      });
+      return;
+    }
+    var targets = (ab && a3d.abilityTargets) ? a3d.abilityTargets(ab) : [];
+    applyHits(e.abilityId, targets, null);
+  }
+
+  function applyHits(abilityId, targets, tag) {
+    if (!targets || !targets.length) { splash('miss', 'miss'); return; }
+    var shown = 0;
+    targets.forEach(function (ti) {
+      var res = C3.hitEnemy(abilityId, 1, ti);
+      if (!res) return;
+      a3d.flinch(res.dmg, res.killed, ti);
+      if (!shown++) {
+        splash('-' + res.dmg + (res.mult >= 2 ? ' SUPER' : '') +
+               (targets.length > 1 ? ' x' + targets.length : ''),
+               res.mult >= 2 ? 'super' : 'dmg');
+      }
+      if (res.killed) log('A Hollow Knight falls. ' + C3.aliveCount() + ' left.');
+    });
+    if (tag && targets.length > 1) log(tag + ' — ' + targets.length + ' caught in it.');
+  }
+
   function scheduleSwing(now) {
     /* §20: with a squad, swings are staggered — more knights means a faster
        drumbeat, but never all of them winding up on the same frame. */
@@ -311,23 +352,7 @@ CHLOE.ui.battle3d = (function () {
         if (ab && a3d.abilityHitsBench && a3d.abilityHitsBench(ab)) {
           splash('CRASH', 'miss');
         }
-        var targets = (ab && a3d.abilityTargets) ? a3d.abilityTargets(ab) : [];
-        if (targets.length) {
-          var shown = 0;
-          targets.forEach(function (ti) {
-            var res = C3.hitEnemy(e.abilityId, 1, ti);
-            if (!res) return;
-            a3d.flinch(res.dmg, res.killed, ti);
-            if (!shown++) {
-              splash('-' + res.dmg + (res.mult >= 2 ? ' SUPER' : '') +
-                     (targets.length > 1 ? ' x' + targets.length : ''),
-                     res.mult >= 2 ? 'super' : 'dmg');
-            }
-            if (res.killed) log('A Hollow Knight falls. ' + C3.aliveCount() + ' left.');
-          });
-        } else {
-          splash('miss', 'miss');
-        }
+        resolveStrike(ab, e);
       } else if (e.t === 'castEnd') {
         a3d.stopAbility();
       }
@@ -444,7 +469,28 @@ CHLOE.ui.battle3d = (function () {
       lines.appendChild(ui.el('div', 'lvl', (def.name || l.memberId) + ' reached Lv ' + l.level + '!'));
     });
     if ((rw.levelUps || []).length) {
-      lines.appendChild(ui.el('div', null, 'Spend the point in Menu → Skill Tree to unlock a new ability or keybind.'));
+      /* §21: nothing to spend any more — say what the level actually GAVE,
+         and where the new move already is. Reading binds() is what triggers
+         the auto-bind, so ask for it before asking what moved. */
+      (rw.levelUps || []).forEach(function (l) {
+        try { C3.binds(l.memberId); } catch (e) {}
+      });
+      var auto = C3.takeAutoBound ? C3.takeAutoBound() : null;
+      if (auto && auto.placed.length) {
+        auto.placed.forEach(function (pl) {
+          var ad = (CHLOE.data.abilities || {})[pl.abilityId] || {};
+          lines.appendChild(ui.el('div', 'lvl',
+            (ad.icon || '•') + ' ' + (ad.name || pl.abilityId) +
+            ' — ready on key ' + (pl.slot + 1)));
+        });
+      }
+      var sk = CHLOE.engine.skilltree;
+      var lead = party.active();
+      var nxt = (sk && lead) ? sk.nextRow(lead.level) : null;
+      if (nxt) {
+        lines.appendChild(ui.el('div', null,
+          'Next at Lv ' + nxt.level + ': ' + (nxt.row.name || '—')));
+      }
     }
     (rw.drops || []).forEach(function (d) { lines.appendChild(ui.el('div', null, 'Found: ' + d)); });
     card.appendChild(lines);

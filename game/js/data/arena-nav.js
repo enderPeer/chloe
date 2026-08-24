@@ -25,7 +25,9 @@ window.CHLOE = window.CHLOE || {};
 CHLOE.data = CHLOE.data || {};
 
 CHLOE.data.arenaNav = {
-  key: '5|0|34.04|-7.5|1.5708',
+  // assetVersion 6 added asteroid.glb; the CHURCH is byte-identical, so the
+  // baked floor is still valid and only the version half of the key moved.
+  key: '6|0|34.04|-7.5|1.5708',
   cell: 0.4,
   minX: -9.7,
   minZ: -13.5,
