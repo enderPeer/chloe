@@ -373,6 +373,9 @@ CHLOE.ui.room3d = (function(){
     // router hook: (re)entering the screen starts the loop
     ui.onShow('room3d', function(){
       refreshHud();
+      // §19: the mirror and poster show live stats — repaint on every entry
+      var w = world();
+      if (w && typeof w.refreshPanels === 'function') { try { w.refreshPanels(); } catch(e){} }
       resume();
     });
   }

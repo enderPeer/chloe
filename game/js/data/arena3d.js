@@ -12,7 +12,7 @@ CHLOE.data.arena3d = {
      as ?v=N so browsers that cached an older build refetch instead of
      rendering the stale one (a cached all-black church looked like "no
      textures" long after the fix shipped). */
-  assetVersion: 4,
+  assetVersion: 5,
   models: {
     church: 'assets/3d/church.glb',
     knight: 'assets/3d/knight.glb',
@@ -38,13 +38,31 @@ CHLOE.data.arena3d = {
      y ±5, altar chancel toward +X, door at x=-55, center aisle |y|<1.2,
      pew rows from x<=-9. World transform: rotY 90° + offset below maps the
      crossing (blender -7.5,0) onto the world origin. */
+  /* §19: the NAVE WALLS are the arena now — a rectangle matching the stone,
+     not a small circle in the middle of it. You and the knight both roam the
+     whole crossing. `radius` is kept as a fallback for older code paths. */
   arena: {
-    cx: 0, cz: 0, radius: 4.8, knightMinDist: 1.3,
-    // pew banks flanking the aisle (world-space AABBs)
-    colliders: [
-      { kind: 'pews_l', minX: -4.9, maxX: -1.25, minZ: 1.4, maxZ: 10 },
-      { kind: 'pews_r', minX: 1.25, maxX: 4.9, minZ: 1.4, maxZ: 10 }
-    ]
+    cx: 0, cz: 0, radius: 9.0, knightMinDist: 1.3,
+    bounds: { minX: -4.7, maxX: 4.7, minZ: -8.5, maxZ: 9.0 },
+    colliders: []      // the baked pews are scenery; loose benches are below
+  },
+
+  /* Benches shoved out of the rows and left in the fight area. Each one is a
+     real prop: walking into it SLOWS you and shunts it aside, and an ability
+     that connects with it breaks it into a wood pile (§19). */
+  benches: [
+    { x: -2.6, z: 3.0, rotY: 0.12 },
+    { x:  2.7, z: 2.4, rotY: -0.20 },
+    { x: -3.1, z: -1.4, rotY: 0.35 },
+    { x:  3.0, z: -2.2, rotY: -0.10 },
+    { x: -1.9, z: -5.2, rotY: 0.05 },
+    { x:  2.2, z: -5.8, rotY: 0.28 }
+  ],
+  bench: {
+    w: 2.0, h: 0.85, d: 0.55,
+    slowFactor: 0.45,     // your speed while pushing through one
+    pushSpeed: 1.9,       // how fast it slides out of the way
+    hp: 1                 // ability hits needed to break it
   },
 
   // In the aisle facing the altar (and the knight at z -1.8). Camera forward is

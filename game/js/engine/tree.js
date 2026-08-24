@@ -274,10 +274,14 @@ CHLOE.engine.tree = (function(){
     var g = statGrants(member.id);
     var w = (CHLOE.data.weapons || {})[member.weaponId];
     var weaponAtk = w ? (w.atkBonus || 0) : 0;
+    // §19: the shared 1-100 ladder also grants stats, at the member's own level
+    var lad = {};
+    var sk = CHLOE.engine.skilltree;
+    if (sk && typeof sk.stats === 'function') lad = sk.stats(member.id) || {};
     var out = {};
     for (var i = 0; i < STAT_KEYS.length; i++) {
       var k = STAT_KEYS[i];
-      out[k] = Math.max(0, Math.round((s[k] || 0) + (g[k] || 0)));
+      out[k] = Math.max(0, Math.round((s[k] || 0) + (g[k] || 0) + (lad[k] || 0)));
     }
     out.atk += weaponAtk;          // weapon folded in (battle.js does NOT re-add)
     out.weaponAtk = weaponAtk;     // kept for display breakdowns

@@ -278,6 +278,15 @@ CHLOE.engine.progression = (function(){
     }
     // the pool bumps must not silently revive a downed member (revive items own that)
     if (wasDown) member.hp = 0;
+
+    /* §19: the shared ladder can hand you a party member at a level (Ash at
+       3). Check on every level-up so they arrive the moment it is earned. */
+    if (res.levelsGained.length) {
+      try {
+        var pty = CHLOE.engine.party;
+        if (pty && typeof pty.ensureAllies === 'function') pty.ensureAllies(false);
+      } catch (e) {}
+    }
     if (member.level >= cap()) member.xp = 0;
 
     // §12: each level grants +1 skill point (spent in the skill tree screen)

@@ -256,6 +256,13 @@ CHLOE.ui.battle3d = (function () {
         splash('-' + out.dmg, 'hurt');
         flashHurt();
         log(pattern.name + ' lands: ' + out.dmg + '.');
+        // §19: leader fell but someone else is still standing — take over
+        if (out.leaderSwap) {
+          var nm = (CHLOE.data.characters[out.leaderSwap] || {}).name || out.leaderSwap;
+          prompt(nm.toUpperCase() + ' TAKES OVER', 'banner', 1800);
+          log(nm + ' steps over the body and keeps swinging.');
+          buildHotbar(C3.snapshot());   // their level, their abilities, their keys
+        }
       }
       refresh();
       if (C3.isOver()) { finish(); return; }
@@ -290,6 +297,10 @@ CHLOE.ui.battle3d = (function () {
           var span = (ab.hitAtMs[ab.hitAtMs.length - 1] - ab.hitAtMs[0]) + 900;
           a3d.spawnTornado(span);
           splash('FIRE TORNADO', 'super');
+        }
+        // §19: a swing that catches a pew breaks it into a wood pile
+        if (ab && a3d.abilityHitsBench && a3d.abilityHitsBench(ab)) {
+          splash('CRASH', 'miss');
         }
         if (ab && a3d.abilityHits(ab)) {
           var res = C3.hitEnemy(e.abilityId, 1);
