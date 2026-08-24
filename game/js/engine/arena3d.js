@@ -69,7 +69,16 @@ CHLOE.engine = CHLOE.engine || {};
     mats: [],
     light: null,
     alive: true,
-    baseRot: 0
+    baseRot: 0,
+    rig: null,       // §18 limb pivots built from the named armour pieces
+    bob: 0,
+    // §18 animation/AI state
+    anim: {
+      state: 'idle',           // idle | walk | dash
+      stride: 0,
+      swing: 0, swingDur: 1, swingKind: 'overhead', wound: false,
+      dash: 0, dashCd: 0, dashDir: { x: 0, z: 1 }
+    }
   };
 
   /* §17 first-person arms: the punch rig is parented to the camera with its
@@ -237,6 +246,7 @@ CHLOE.engine = CHLOE.engine || {};
       });
       knight.model = model;
       knight.group.add(model);
+      buildKnightRig(model);
       faceKnightTo(cfgSpawn().x, cfgSpawn().z);
       knightLoaded = true;
     };
@@ -276,6 +286,64 @@ CHLOE.engine = CHLOE.engine || {};
     var sword = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.7, 0.05), mat);
     sword.position.set(0.62, 1.1, 0.1); sword.rotation.z = -0.15; g.add(sword);
     return g;
+  }
+
+  /* §18 knight rig. The model has no skeleton — it is 103 separately named
+     armour pieces. Sort them into limb groups by name, split left/right by
+     which side of the body they sit on, and re-parent each piece under a
+     pivot placed at the matching joint. Rotating those pivots then animates
+     real arms, legs and sword without any bones. */
+  function buildKnightRig(model) {
+    var box = new THREE.Box3().setFromObject(model);
+    var h = Math.max(0.01, box.max.y - box.min.y);
+    var floorY = box.min.y;
+    var mid = (box.min.x + box.max.x) / 2;
+
+    var groups = {
+      armL: { y: floorY + h * 0.80, x: mid + h * 0.13 },
+      armR: { y: floorY + h * 0.80, x: mid - h * 0.13 },
+      legL: { y: floorY + h * 0.48, x: mid + h * 0.06 },
+      legR: { y: floorY + h * 0.48, x: mid - h * 0.06 },
+      torso: { y: floorY + h * 0.50, x: mid },
+      head: { y: floorY + h * 0.82, x: mid }
+    };
+    var rig = {};
+    for (var key in groups) {
+      var g = new THREE.Group();
+      g.position.set(groups[key].x, groups[key].y, 0);
+      g.userData.rest = g.position.clone();
+      model.add(g);
+      rig[key] = g;
+    }
+
+    // classify every piece, then attach() so its world transform survives
+    var pieces = [];
+    model.traverse(function (o) { if (o.isMesh) pieces.push(o); });
+    var counts = { armL: 0, armR: 0, legL: 0, legR: 0, torso: 0, head: 0, none: 0 };
+    var pb = new THREE.Box3(), c = new THREE.Vector3();
+
+    pieces.forEach(function (m) {
+      var n = (m.name || '') + ' ' + ((m.parent && m.parent.name) || '');
+      pb.setFromObject(m); pb.getCenter(c);
+      var right = c.x < mid;                     // model faces +Z after fitting
+      var key = null;
+
+      if (/Crown|Hood|Head_Mask|NeckStrap/i.test(n)) key = 'head';
+      else if (/Shoulder|ArmStrap|Bracer|Glove|UnderShoulder|Sword/i.test(n)) {
+        key = right ? 'armR' : 'armL';
+      } else if (/Boot|Knee|Shin|Greave|Leg|Thigh/i.test(n)) {
+        key = right ? 'legR' : 'legL';
+      } else if (/Chest|Padded|Belt|Dress|Cover|Shirt|Pants/i.test(n)) key = 'torso';
+
+      if (!key) { counts.none++; return; }
+      rig[key].attach(m);
+      counts[key]++;
+    });
+
+    knight.rig = rig;
+    knight.rigInfo = counts;
+    knight.height = h;
+    console.log('[arena3d] knight rig:', JSON.stringify(counts));
   }
 
   function faceKnightTo(x, z) {
@@ -477,6 +545,201 @@ CHLOE.engine = CHLOE.engine || {};
     });
   }
 
+  // --------------------------------------------- §18 hand sign + fire tornado
+  var sign = { hand: null, rune: null, t: 0, active: false };
+  var tornado = { root: null, tubes: [], light: null, t: 0, active: false, dur: 2.4 };
+
+  /* A glowing rune traced off the fingertips while a sign-cast winds up. */
+  function makeRuneTexture() {
+    var c = document.createElement('canvas'); c.width = c.height = 256;
+    var g = c.getContext('2d');
+    g.clearRect(0, 0, 256, 256);
+    g.strokeStyle = '#ffb03a'; g.lineWidth = 7; g.shadowColor = '#ff5a1a'; g.shadowBlur = 18;
+    g.beginPath(); g.arc(128, 128, 92, 0, Math.PI * 2); g.stroke();
+    g.lineWidth = 4;
+    g.beginPath(); g.arc(128, 128, 62, 0, Math.PI * 2); g.stroke();
+    // inner triangle + spokes: reads as a sigil at any size
+    g.lineWidth = 6;
+    g.beginPath();
+    for (var i = 0; i < 3; i++) {
+      var a = -Math.PI / 2 + i * (Math.PI * 2 / 3);
+      var x = 128 + Math.cos(a) * 78, y = 128 + Math.sin(a) * 78;
+      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.closePath(); g.stroke();
+    g.lineWidth = 3;
+    for (var k = 0; k < 12; k++) {
+      var ang = k * Math.PI / 6;
+      g.beginPath();
+      g.moveTo(128 + Math.cos(ang) * 94, 128 + Math.sin(ang) * 94);
+      g.lineTo(128 + Math.cos(ang) * 116, 128 + Math.sin(ang) * 116);
+      g.stroke();
+    }
+    var t = new THREE.CanvasTexture(c);
+    t.needsUpdate = true;
+    return t;
+  }
+
+  function loadHandSign() {
+    var loader = makeLoader();
+    var models = D().models || {};
+    if (!loader || !models.handsign) return;
+    loader.load(versioned(models.handsign), function (gltf) {
+      try {
+        var p = D().handSign || {};
+        var h = gltf.scene;
+        h.traverse(function (o) {
+          if (o.isMesh) {
+            o.frustumCulled = false;
+            o.renderOrder = 950;
+            var mats = Array.isArray(o.material) ? o.material : [o.material];
+            for (var i = 0; i < mats.length; i++) {
+              if (!mats[i]) continue;
+              if (mats[i].color) mats[i].color.setRGB(0.30, 0.20, 0.16);
+              if ('envMapIntensity' in mats[i]) mats[i].envMapIntensity = 0.06;
+              if (typeof mats[i].roughness === 'number') mats[i].roughness = 0.9;
+              if (mats[i].emissive) { mats[i].emissive.setHex(0x3a1200); mats[i].emissiveIntensity = 0.0; }
+            }
+          }
+        });
+        h.position.set(p.x || 0.26, p.y != null ? p.y : -0.24, p.z != null ? p.z : -0.42);
+        h.rotation.set(p.rotX || 0, p.rotY || 0, 0);
+        h.scale.setScalar(p.scale || 1.5);
+        h.visible = false;
+        camera.add(h);
+        if (scene.children.indexOf(camera) === -1) scene.add(camera);
+        sign.hand = h;
+
+        // the sigil sits just past the fingertips
+        var rune = new THREE.Mesh(
+          new THREE.PlaneGeometry(0.42, 0.42),
+          new THREE.MeshBasicMaterial({
+            map: makeRuneTexture(), transparent: true, opacity: 0,
+            depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending
+          }));
+        rune.position.set(0.22, -0.1, -0.72);
+        rune.renderOrder = 960;
+        rune.frustumCulled = false;
+        rune.visible = false;
+        camera.add(rune);
+        sign.rune = rune;
+      } catch (e) { console.warn('[arena3d] hand sign failed', e); }
+    }, undefined, function () { console.warn('[arena3d] handsign.glb missing'); });
+  }
+
+  function loadTornado() {
+    var loader = makeLoader();
+    var models = D().models || {};
+    if (!loader || !models.tornado) return;
+    loader.load(versioned(models.tornado), function (gltf) {
+      try {
+        var cfgT = D().tornado || {};
+        var root = gltf.scene;
+        var box = new THREE.Box3().setFromObject(root);
+        var h = Math.max(0.01, box.max.y - box.min.y);
+        root.scale.setScalar((cfgT.height || 3.6) / h);
+        box.setFromObject(root);
+        root.position.y -= box.min.y;          // base on the floor
+
+        root.traverse(function (o) {
+          if (o.isMesh) {
+            tornado.tubes.push(o);
+            var mats = Array.isArray(o.material) ? o.material : [o.material];
+            for (var i = 0; i < mats.length; i++) {
+              var m = mats[i];
+              if (!m) continue;
+              m.transparent = true;
+              m.depthWrite = false;
+              m.blending = THREE.AdditiveBlending;
+              m.side = THREE.DoubleSide;
+              if (m.emissive) { m.emissive.setHex(0xff6a18); m.emissiveIntensity = 2.2; }
+              if (m.color) m.color.setRGB(1.0, 0.55, 0.2);
+              m.opacity = 0;
+            }
+          }
+        });
+        var wrap = new THREE.Group();
+        wrap.add(root);
+        wrap.visible = false;
+        scene.add(wrap);
+        tornado.root = wrap;
+        tornado.inner = root;
+        tornado.light = new THREE.PointLight(0xff7a20, 0, 12, 1.8);
+        tornado.light.position.y = 1.6;
+        wrap.add(tornado.light);
+      } catch (e) { console.warn('[arena3d] tornado failed', e); }
+    }, undefined, function () { console.warn('[arena3d] firetornado.glb missing'); });
+  }
+
+  /* Show the cast pose: hand up, rune spinning up off the fingers. */
+  A.showSign = function (on) {
+    sign.active = !!on;
+    if (!on) sign.t = 0;
+    if (sign.hand) sign.hand.visible = !!on;
+    if (sign.rune) sign.rune.visible = !!on;
+  };
+
+  /* Drop the funnel on the knight (or straight ahead if he is gone). */
+  A.spawnTornado = function (durationMs) {
+    if (!tornado.root) return false;
+    var tx = knight.group ? knight.group.position.x : pos.x;
+    var tz = knight.group ? knight.group.position.z : pos.z - 3;
+    tornado.root.position.set(tx, 0, tz);
+    tornado.root.visible = true;
+    tornado.active = true;
+    tornado.t = 0;
+    tornado.dur = (durationMs || 2400) / 1000;
+    return true;
+  };
+
+  function updateSignAndTornado(dt) {
+    // hand sign: rune spins and brightens while the cast winds up
+    if (sign.active) {
+      sign.t += dt;
+      if (sign.rune) {
+        sign.rune.rotation.z += dt * 3.4;
+        var f = Math.min(1, sign.t / 0.5);
+        sign.rune.material.opacity = 0.35 + 0.55 * f * (0.75 + 0.25 * Math.sin(elapsed * 18));
+        sign.rune.scale.setScalar(0.6 + 0.4 * f);
+      }
+      if (sign.hand) sign.hand.position.y = (D().handSign || {}).y - 0.02 + Math.sin(elapsed * 9) * 0.012;
+    } else if (sign.rune && sign.rune.material.opacity > 0) {
+      sign.rune.material.opacity = Math.max(0, sign.rune.material.opacity - dt * 4);
+    }
+
+    // tornado: rise, churn, fade
+    if (!tornado.active || !tornado.root) return;
+    tornado.t += dt;
+    var cfgT = D().tornado || {};
+    var rise = (cfgT.riseMs || 420) / 1000, fade = (cfgT.fadeMs || 500) / 1000;
+    var p = tornado.t;
+    var a = (p < rise) ? (p / rise)
+          : (p > tornado.dur - fade ? Math.max(0, (tornado.dur - p) / fade) : 1);
+    var spin = cfgT.spin || [2.2, -3.1, 4.4];
+    for (var i = 0; i < tornado.tubes.length; i++) {
+      tornado.tubes[i].rotation.y += (spin[i % spin.length]) * dt;
+      var mats = Array.isArray(tornado.tubes[i].material)
+        ? tornado.tubes[i].material : [tornado.tubes[i].material];
+      for (var m = 0; m < mats.length; m++) {
+        if (mats[m]) mats[m].opacity = a * 0.85;
+      }
+    }
+    if (tornado.inner) {
+      tornado.inner.scale.y = ((cfgT.height || 3.6) / (cfgT.height || 3.6)) * (0.35 + 0.65 * a);
+      tornado.inner.rotation.y += dt * 1.6;
+    }
+    if (tornado.light) tornado.light.intensity = a * 9 * LIGHT_SCALE;
+    // keep chasing the knight so it reads as "on him"
+    if (knight.group && knight.alive) {
+      tornado.root.position.x += (knight.group.position.x - tornado.root.position.x) * Math.min(1, 3 * dt);
+      tornado.root.position.z += (knight.group.position.z - tornado.root.position.z) * Math.min(1, 3 * dt);
+    }
+    if (p >= tornado.dur) {
+      tornado.active = false;
+      tornado.root.visible = false;
+    }
+  }
+
   /* Play an ability's clip once, fitted to its cast length so one clip can
      serve several abilities (§17). */
   A.playAbility = function (abilityId, clipName, speed, durationMs) {
@@ -546,6 +809,7 @@ CHLOE.engine = CHLOE.engine || {};
 
   A.stopAbility = function () {
     castingId = null;
+    A.showSign(false);
     if (fp.action) { fp.action.stop(); fp.action = null; }
     if (fp.root) fp.root.visible = false;
   };
@@ -622,6 +886,8 @@ CHLOE.engine = CHLOE.engine || {};
     loadChurch();
     loadKnight();
     loadFirstPerson();
+    loadHandSign();
+    loadTornado();
     A.reset();
 
     inited = true;
@@ -879,61 +1145,181 @@ CHLOE.engine = CHLOE.engine || {};
   };
 
   // ---------------------------------------------------------------- animate
+  /* §18: pose the limb pivots. `w` blends a pose in (0..1) so states can
+     cross-fade instead of snapping. */
+  function poseKnight(dt) {
+    var r = knight.rig;
+    if (!r) return;
+    var t = elapsed;
+    var st = knight.anim;
+
+    // ---- targets, rebuilt each frame from the current state ----
+    var armLx = 0, armRx = 0, armRz = 0, legLx = 0, legRx = 0;
+    var torsoX = 0, torsoY = 0, headX = 0, bob = 0;
+
+    var breathe = Math.sin(t * 1.6) * 0.03;
+    armLx = breathe; armRx = -breathe;
+
+    if (st.state === 'walk' || st.state === 'dash') {
+      // alternating stride; dash doubles the cadence and the lean
+      var fast = st.state === 'dash' ? 2.1 : 1;
+      st.stride += dt * (st.state === 'dash' ? 13 : 7);
+      var sw = Math.sin(st.stride);
+      legLx = sw * 0.55 * fast;
+      legRx = -sw * 0.55 * fast;
+      armLx = -sw * 0.42 * fast;      // arms counter-swing
+      armRx = sw * 0.34 * fast;
+      bob = Math.abs(Math.cos(st.stride)) * 0.05 * fast;
+      torsoX = (st.state === 'dash' ? 0.34 : 0.08);
+      torsoY = sw * 0.09;
+      headX = -torsoX * 0.5;
+    }
+
+    // ---- attack overrides the arm that holds the sword ----
+    if (st.swing > 0) {
+      st.swing = Math.max(0, st.swing - dt / Math.max(0.05, st.swingDur));
+      var p = 1 - st.swing;                    // 0 -> 1 through the swing
+      if (st.swingKind === 'overhead') {
+        // raise high behind the head, then chop down past the hip
+        armRx = (p < 0.45)
+          ? -2.5 * (p / 0.45)                  // wind up
+          : -2.5 + 3.9 * ((p - 0.45) / 0.55);  // chop
+        armRz = (p < 0.45) ? -0.25 * (p / 0.45) : -0.25 + 0.25 * ((p - 0.45) / 0.55);
+        torsoX = (p < 0.45) ? -0.28 * (p / 0.45) : -0.28 + 0.75 * ((p - 0.45) / 0.55);
+        armLx = -armRx * 0.25;
+        headX = torsoX * 0.4;
+      } else {
+        // wide horizontal sweep
+        armRx = -0.9 + 0.6 * p;
+        armRz = -1.5 + 3.0 * p;
+        torsoY = -0.7 + 1.4 * p;
+        armLx = 0.5 - 0.4 * p;
+      }
+    }
+
+    // ---- ease everything toward the target so poses never snap ----
+    var k = Math.min(1, 14 * dt);
+    function ease(o, prop, target) { o[prop] += (target - o[prop]) * k; }
+    ease(r.armL.rotation, 'x', armLx);
+    ease(r.armR.rotation, 'x', armRx);
+    ease(r.armR.rotation, 'z', armRz);
+    ease(r.legL.rotation, 'x', legLx);
+    ease(r.legR.rotation, 'x', legRx);
+    ease(r.torso.rotation, 'x', torsoX);
+    ease(r.torso.rotation, 'y', torsoY);
+    ease(r.head.rotation, 'x', headX);
+    knight.bob = bob;
+  }
+
+  /* §18 knight brain: always face the player, close the distance on foot,
+     dash when it is off cooldown and the player is far, and swing when in
+     reach. The telegraph/strike windows still come from ui/battle3d.js so
+     the dodge rules of §16 are untouched. */
   function updateKnight(dt) {
     if (!knight.group) return;
     if (!knight.alive) {
-      // sink into the floor and fade the light
       knight.group.position.y = Math.max(-2.6, knight.group.position.y - dt * 0.9);
       if (knight.light) knight.light.intensity = Math.max(0, knight.light.intensity - dt * 0.8);
       if (knight.group.position.y <= -2.55) knight.group.visible = false;
       return;
     }
 
-    var t = elapsed;
-    var breathe = Math.sin(t * 1.1) * 0.015;
-    var base = 0;
+    var st = knight.anim;
+    var kx = knight.group.position.x, kz = knight.group.position.z;
+    var dx = pos.x - kx, dz = pos.z - kz;
+    var dist = Math.sqrt(dx * dx + dz * dz) || 0.001;
+    var ux = dx / dist, uz = dz / dist;
 
-    if (atk.mode === 'telegraph' && atk.pattern) {
-      var p = Math.min(1, (performance.now() - atk.t0) / (atk.pattern.telegraphMs || 1500));
-      // windup: rise + tilt back, red glow ramps
-      base = p * 0.12;
-      if (knight.model) {
-        if (atk.pattern.evade === 'crouch') knight.model.rotation.z = -p * 0.5;   // side windup
-        else knight.model.rotation.x = -p * 0.45;                                  // rear up
-      }
-      if (knight.light) knight.light.intensity = 0.9 + p * 2.2;
-      // facing stays locked with the lane (set once at telegraph start) —
-      // tracking the player here would lie about where the strike lands
-    } else if (atk.mode === 'strike') {
-      if (knight.model) {
-        if (atk.pattern && atk.pattern.evade === 'crouch') knight.model.rotation.z = 0.65;
-        else knight.model.rotation.x = 0.5;
-      }
-      if (atk.pattern && atk.pattern.id === 'charge') {
-        atk.lunge = Math.min(1, atk.lunge + dt * 6);
-      }
-      if (knight.light) knight.light.intensity = 2.6;
-    } else if (atk.mode === 'recover') {
-      if (knight.model) {
-        knight.model.rotation.x *= Math.max(0, 1 - dt * 5);
-        knight.model.rotation.z *= Math.max(0, 1 - dt * 5);
-      }
-      atk.lunge = Math.max(0, atk.lunge - dt * 3);
-      if (knight.light) knight.light.intensity = Math.max(0.9, knight.light.intensity - dt * 4);
+    // ---- always focus the player (except mid-swing, when the lane is locked) ----
+    if (atk.mode === 'telegraph' || atk.mode === 'strike') {
+      faceKnightTo(kx + atk.lockDir.x, kz + atk.lockDir.z);
     } else {
-      if (knight.model) {
-        knight.model.rotation.x *= Math.max(0, 1 - dt * 5);
-        knight.model.rotation.z *= Math.max(0, 1 - dt * 5);
-      }
-      atk.lunge = Math.max(0, atk.lunge - dt * 3);
-      if (knight.light) knight.light.intensity = 0.9 + Math.sin(t * 5.3) * 0.12;
+      faceKnightTo(pos.x, pos.z);
     }
 
-    var kcfg = D().knight || {};
-    var lungeAmt = atk.lunge * 2.2;
-    knight.group.position.x = (kcfg.x || 0) + atk.lockDir.x * lungeAmt;
-    knight.group.position.z = (kcfg.z || 0) + atk.lockDir.z * lungeAmt;
-    knight.group.position.y = base + breathe;
+    st.dashCd = Math.max(0, st.dashCd - dt);
+
+    // ---- movement ----
+    var cfgK = D().knight || {};
+    var keep = cfgK.keepDistance || 2.0;
+    var moving = false;
+
+    if (st.dash > 0) {
+      st.dash = Math.max(0, st.dash - dt);
+      var dspeed = cfgK.dashSpeed || 9.5;
+      kx += st.dashDir.x * dspeed * dt;
+      kz += st.dashDir.z * dspeed * dt;
+      st.state = 'dash';
+      moving = true;
+    } else if (atk.mode === 'idle' || atk.mode === 'recover') {
+      if (dist > keep) {
+        // dash to close a big gap, otherwise walk
+        if (dist > (cfgK.dashRange || 5.0) && st.dashCd <= 0) {
+          st.dash = cfgK.dashTime || 0.42;
+          st.dashCd = cfgK.dashCooldown || 6.0;
+          st.dashDir = { x: ux, z: uz };
+          st.state = 'dash';
+        } else {
+          var sp = cfgK.walkSpeed || 1.5;
+          kx += ux * sp * dt;
+          kz += uz * sp * dt;
+          st.state = 'walk';
+          moving = true;
+        }
+      } else {
+        st.state = 'idle';
+      }
+    } else {
+      st.state = 'idle';
+    }
+
+    // never walk into the player, never leave the arena
+    var ar = cfg.arena || {};
+    var minD = (ar.knightMinDist || 1.3);
+    var ndx = pos.x - kx, ndz = pos.z - kz;
+    var nd = Math.sqrt(ndx * ndx + ndz * ndz) || 1;
+    if (nd < minD) {
+      kx = pos.x - (ndx / nd) * minD;
+      kz = pos.z - (ndz / nd) * minD;
+    }
+    var cxx = kx - (ar.cx || 0), czz = kz - (ar.cz || 0);
+    var rad = Math.sqrt(cxx * cxx + czz * czz);
+    var maxR = (ar.radius || 6) - 0.4;
+    if (rad > maxR) { kx = (ar.cx || 0) + cxx / rad * maxR; kz = (ar.cz || 0) + czz / rad * maxR; }
+
+    // charge pattern still lunges along its locked lane
+    if (atk.mode === 'strike' && atk.pattern && atk.pattern.id === 'charge') {
+      atk.lunge = Math.min(1, atk.lunge + dt * 6);
+      kx += atk.lockDir.x * dt * 5.5;
+      kz += atk.lockDir.z * dt * 5.5;
+    } else {
+      atk.lunge = Math.max(0, atk.lunge - dt * 3);
+    }
+
+    knight.group.position.x = kx;
+    knight.group.position.z = kz;
+
+    // ---- swing + glow driven by the telegraph state ----
+    if (atk.mode === 'telegraph' && atk.pattern) {
+      var p = Math.min(1, (performance.now() - atk.t0) / (atk.pattern.telegraphMs || 1500));
+      if (!st.wound) {
+        st.wound = true;
+        st.swingKind = (atk.pattern.evade === 'crouch') ? 'sweep' : 'overhead';
+        st.swing = 1; st.swingDur = ((atk.pattern.telegraphMs || 1500) / 1000) * 1.25;
+      }
+      if (knight.light) knight.light.intensity = (0.9 + p * 2.6) * LIGHT_SCALE;
+    } else if (atk.mode === 'strike') {
+      if (knight.light) knight.light.intensity = 3.2 * LIGHT_SCALE;
+    } else {
+      st.wound = false;
+      if (knight.light) {
+        knight.light.intensity = (0.55 + Math.sin(elapsed * 5.3) * 0.1) * LIGHT_SCALE;
+      }
+    }
+
+    poseKnight(dt);
+    var breathe = Math.sin(elapsed * 1.1) * 0.012;
+    knight.group.position.y = (knight.bob || 0) + breathe;
   }
 
   function updateFx(dt) {
@@ -951,6 +1337,7 @@ CHLOE.engine = CHLOE.engine || {};
     updatePlayer(dt);
     updateKnight(dt);
     if (fp.mixer) fp.mixer.update(dt);
+    updateSignAndTornado(dt);
     updateFx(dt);
     try { renderer.render(scene, camera); }
     catch (e) {
@@ -1005,6 +1392,10 @@ CHLOE.engine = CHLOE.engine || {};
       knightAlive: knight.alive,
       churchLoaded: churchLoaded, knightLoaded: knightLoaded,
       envMap: envMapOk,
+      knightRig: knight.rigInfo || null,
+      knightState: knight.anim ? knight.anim.state : null,
+      knightDashCd: knight.anim ? +knight.anim.dashCd.toFixed(2) : null,
+      knightPos: knight.group ? [+knight.group.position.x.toFixed(2), +knight.group.position.z.toFixed(2)] : null,
       locked: isLocked()
     };
   };
@@ -1013,6 +1404,19 @@ CHLOE.engine = CHLOE.engine || {};
   A._teleport = function (x, z) { pos.x = x; pos.z = z; vel.x = 0; vel.z = 0; };
   A._setCrouch = function (b) { crouchForced = !!b; };
   A._look = function (y, p) { yaw = y; if (typeof p === 'number') pitch = p; };
+  /* Advance the world by dt without waiting on rAF (test hook): lets
+     automated checks watch the knight walk, dash and swing. */
+  A._tick = function (dt) {
+    if (!inited) return null;
+    dt = dt || 0.016;
+    elapsed += dt;
+    updatePlayer(dt);
+    updateKnight(dt);
+    if (fp.mixer) fp.mixer.update(dt);
+    updateSignAndTornado(dt);
+    updateFx(dt);
+    return A.debug();
+  };
   /* Geometry probe: world bounds of the loaded church and what is directly
      under/ahead of the camera. Used to verify placement without eyeballing. */
   A._diag = function () {

@@ -128,12 +128,18 @@ CHLOE.ui.battle3d = (function () {
         ic.style.color = typeColor(s.type);
         d.appendChild(ic);
         d.appendChild(ui.el('span', 'nm', s.name));
+        // §18: every slot states what it costs and how long until it's back
+        var cost = ui.el('span', 'cost', s.costText || '');
+        if (s.cost && s.cost.mana) cost.classList.add('mana');
+        d.appendChild(cost);
         var sweep = ui.el('div', 'sweep');
         d.appendChild(sweep);
+        var cd = ui.el('span', 'cd', '');
+        d.appendChild(cd);
         var ch = ui.el('span', 'ch', '');
         d.appendChild(ch);
-        d._sweep = sweep; d._ch = ch;
-        d.title = s.name;
+        d._sweep = sweep; d._ch = ch; d._cd = cd; d._cost = cost;
+        d.title = s.name + ' — ' + s.costText;
       } else {
         d.appendChild(ui.el('span', 'nm', '—'));
       }
@@ -149,8 +155,10 @@ CHLOE.ui.battle3d = (function () {
       if (!s.id) continue;
       d.classList.toggle('ready', !!s.ready);
       d.classList.toggle('cooling', s.cdPct > 0);
+      d.classList.toggle('broke', !s.affordable && s.cdPct <= 0);
       if (d._sweep) d._sweep.style.height = Math.round(s.cdPct * 100) + '%';
       if (d._ch) d._ch.textContent = s.maxCharges > 1 ? String(s.charges) : '';
+      if (d._cd) d._cd.textContent = s.cdLeft > 0.05 ? s.cdLeft.toFixed(1) : '';
     }
   }
 
@@ -208,7 +216,13 @@ CHLOE.ui.battle3d = (function () {
     if (!r.ok) { log(r.reason || 'Not ready.'); return; }
     var a = r.ability;
     var total = (a.hitAtMs && a.hitAtMs.length) ? a.hitAtMs[a.hitAtMs.length - 1] : a.castMs;
-    a3d.playAbility(a.id, a.anim, a.animSpeed, total + (a.recoverMs || 0));
+    if (a.cast === 'sign') {
+      // §18: raise the hand and trace the sigil; the funnel drops on the
+      // first hit window (handled in frame()).
+      a3d.showSign(true);
+    } else {
+      a3d.playAbility(a.id, a.anim, a.animSpeed, total + (a.recoverMs || 0));
+    }
     log(a.name);
   }
 
@@ -270,6 +284,13 @@ CHLOE.ui.battle3d = (function () {
       var e = events[i];
       if (e.t === 'strike') {
         var ab = (CHLOE.data.abilities || {})[e.abilityId];
+        // §18: the first hit window of a vfx ability spawns its effect
+        if (ab && ab.vfx === 'tornado' && e.index === 1) {
+          a3d.showSign(false);
+          var span = (ab.hitAtMs[ab.hitAtMs.length - 1] - ab.hitAtMs[0]) + 900;
+          a3d.spawnTornado(span);
+          splash('FIRE TORNADO', 'super');
+        }
         if (ab && a3d.abilityHits(ab)) {
           var res = C3.hitEnemy(e.abilityId, 1);
           if (res) {

@@ -65,6 +65,26 @@ CHLOE.data.abilities = {
     anim: 'Punch', animSpeed: 1.15,
     grantedBy: 'tree'
   },
+  /* §18 signature spell: you raise a hand, a burning sigil spins up off your
+     fingers, and a tornado of fire drops on the knight. Long cast, long
+     cooldown, expensive — the payoff move. */
+  fire_tornado: {
+    id: 'fire_tornado', name: 'Fire Tornado', icon: '🌪', type: 'fire',
+    desc: 'Trace the sign and drop a pillar of fire on them. Long cast, long cooldown — do not start it while he is winding up.',
+    /* Priced to be castable on a base 20-magic pool — an unaffordable
+       signature move is just a greyed-out button. It still empties you. */
+    cost: { mana: 18, sta: 12 },
+    castMs: 1250, recoverMs: 520, cooldownMs: 12000, charges: 1,
+    range: 7.5, arc: 80,
+    /* High power on purpose: the type chart HALVES fire against the knight's
+       occult type, so a "normal" number would make the signature move worse
+       than a free punch. At 0.5x this still lands ~40-48 over four ticks. */
+    power: 210, usesMag: true,
+    hits: 4, hitAtMs: [1250, 1600, 1950, 2300],
+    cast: 'sign',            // hand-sign cast pose (§18)
+    vfx: 'tornado',
+    grantedBy: 'tree'
+  },
   hollow_breaker: {
     id: 'hollow_breaker', name: 'Hollow Breaker', icon: '✨', type: 'divine',
     desc: 'A rising strike that hurts the things armour cannot protect.',

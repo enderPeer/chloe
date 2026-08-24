@@ -331,3 +331,31 @@ In-engine the rig is parented to the camera and **fitted from the SKELETON, not 
 
 ### Balance targets
 Punch alone should beat the knight but slowly and only with clean dodging — it is deliberately the worst option per stamina. Every tree ability must beat it in damage-per-stamina or reach. Sprint + evade together must not outpace stamina regen, so repositioning has a cost.
+
+## 18. The knight fights back — limb animation, hunting AI, Fire Tornado (extends §17)
+
+### The knight has no skeleton — he has 103 named armour pieces
+`knight.glb` ships with zero bones, so the rig is built at load time by sorting every mesh into limb groups by NAME and splitting left/right by which side of the body its bounding-box centre sits on:
+`Crown|Hood|Head_Mask|NeckStrap` → head · `Shoulder|ArmStrap|Bracer|Glove|UnderShoulder|Sword` → arm · `Boot|Knee|Shin|Greave|Leg|Thigh` → leg · `Chest|Padded|Belt|Dress|Cover|Shirt|Pants` → torso.
+Each group gets a pivot Group placed at the matching joint (shoulders 0.80h, hips 0.48h, waist 0.50h, neck 0.82h) and the pieces are moved into it with `Object3D.attach()` so their world transform survives. Rotating those pivots animates real arms, legs and sword without a single bone. The sword falls into the right-arm group, so it swings with the hand for free. Current split: armL 34 / armR 29 / legL 9 / legR 7 / torso 20 / head 4, **none orphaned** — `debug().knightRig` reports it.
+
+### Poses
+`poseKnight()` builds a target pose every frame and eases toward it (~14/s) so states cross-fade instead of snapping.
+- **idle** — slow breathing counter-sway in the arms.
+- **walk** — alternating leg stride, arms counter-swinging, torso bob and a slight forward lean.
+- **dash** — same cycle at ~2x cadence and amplitude with a hard 0.34rad forward lean.
+- **overhead** — right arm winds back to -2.5rad over the first 45% of the swing, then chops through +1.4rad; torso follows, left arm counterbalances.
+- **sweep** — used for the crouch-evade pattern: wide horizontal arc with a torso twist.
+
+### Hunting AI
+He **always faces the player** (`faceKnightTo` every frame) except mid-swing, when facing stays locked to the attack lane so the telegraph never lies about where the strike lands. Movement, all in `data/arena3d.js` `knight`: walks at `walkSpeed` until `keepDistance`, **dashes** at `dashSpeed` for `dashTime` when the player is further than `dashRange` and `dashCooldown` has elapsed, and is clamped so he can neither stand inside the player (`arena.knightMinDist`) nor leave the arena circle. `debug()` exposes `knightState`, `knightDashCd` and `knightPos`.
+
+### Hotbar HUD
+Every bound key shows its number, icon (typed colour), name, **cost chip** (`8 STA`, `18 MAG + 12 STA`, green for stamina, blue for magic, red when unaffordable), a radial-style cooldown sweep, the **seconds remaining** over the icon, and a charge counter when the ability has more than one. Slots you cannot currently pay for dim.
+
+### Fire Tornado (`fire_tornado`)
+The signature spell: `cast: 'sign'` raises the ZBrush hand (decimated 787k → 7.9k faces, 25KB) in front of the camera and spins a procedurally drawn sigil off the fingertips while the cast winds up. At the first hit window the sign drops and `spawnTornado()` drops the funnel (`firetornado.glb`, three nested tubes) on the knight — tubes counter-rotate at different rates, additive blending, an orange point light, and the funnel tracks him as he moves. Four hit windows over ~1s.
+**Power is deliberately high (210):** the §12 chart HALVES fire against the knight's occult type, so a normal number would make the signature move worse than a free punch. Cost is 18 magic + 12 stamina — tuned to be castable on a base 20-magic pool, because an unaffordable button is just a grey button.
+
+### Live slot reads
+`combat3` reads bound slots **live** from `party.state.binds` every frame. A snapshot taken at `start()` meant rebinding mid-fight silently did nothing.

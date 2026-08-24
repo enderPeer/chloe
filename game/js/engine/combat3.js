@@ -163,12 +163,20 @@ CHLOE.engine.combat3 = (function () {
   }
 
   /* ---------- casting ---------- */
+  /* Read the bound slots LIVE from party state — a snapshot taken at start()
+     meant rebinding during a fight silently did nothing. */
+  function liveSlots() {
+    return st ? binds(st.charId) : [];
+  }
   function slotAbility(i) {
-    var id = st.slots[i];
+    var id = liveSlots()[i];
     return id ? ABIL()[id] : null;
   }
 
   function readiness(id) {
+    if (!st.cd[id] && ABIL()[id]) {
+      st.cd[id] = { charges: ABIL()[id].charges || 1, nextAt: 0 };
+    }
     var c = st.cd[id];
     if (!c) return { ready: false, reason: 'Unknown ability.' };
     var a = ABIL()[id];
@@ -364,15 +372,25 @@ CHLOE.engine.combat3 = (function () {
   function snapshot() {
     if (!st) return null;
     var slots = [];
-    for (var i = 0; i < st.slots.length; i++) {
-      var id = st.slots[i];
+    var live = liveSlots();
+    for (var i = 0; i < live.length; i++) {
+      var id = live[i];
       var a = id ? ABIL()[id] : null;
       slots.push(a ? {
         key: i + 1, id: id, name: a.name, icon: a.icon, type: a.type,
         cost: a.cost || {},
+        // "8 STA" / "14 MAG" / "14 MAG + 6 STA" for the HUD chip
+        costText: (function (c) {
+          var b = [];
+          if (c.mana) b.push(c.mana + ' MAG');
+          if (c.sta) b.push(c.sta + ' STA');
+          return b.join(' + ') || 'free';
+        })(a.cost || {}),
         charges: st.cd[id] ? st.cd[id].charges : 0,
         maxCharges: a.charges || 1,
         cdPct: cooldownPct(id),
+        cdLeft: st.cd[id] ? Math.max(0, (st.cd[id].nextAt - st.now) / 1000) : 0,
+        affordable: canPay(a.cost),
         ready: readiness(id).ready
       } : { key: i + 1, id: null });
     }
