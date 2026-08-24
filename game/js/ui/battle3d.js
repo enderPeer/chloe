@@ -467,7 +467,12 @@ CHLOE.ui.battle3d = (function () {
     a3d.stopAbility();
     /* §21: the fight is over, so put the player in cursor mode BEFORE the
        result card goes up. Pointer lock hides the mouse and eats clicks, so
-       the Continue button was unreachable until you knew to press Escape. */
+       the Continue button was unreachable until you knew to press Escape.
+       Drop OUR keys too rather than relying on the `active` flag having been
+       cleared first: this handler calls preventDefault on Space, which is the
+       key that would activate the card's focused button. */
+    unwireKeys();
+    hidePrompt();
     if (a3d.releaseLock) a3d.releaseLock();
     if (snap && snap.result === 'victory') showVictory();
     else if (snap && snap.result === 'defeat') showDefeat();
@@ -559,6 +564,10 @@ CHLOE.ui.battle3d = (function () {
     begin: begin,
     /* test hooks */
     _fire: fire, _evade: doEvade, _active: function () { return active; },
-    _swing: enemySwing
+    _swing: enemySwing,
+    /* The resolve path only runs off rAF, which is frozen whenever the tab
+       is not compositing — so without this the victory/defeat card and the
+       mode switch that goes with it cannot be tested headlessly at all. */
+    _finish: finish
   };
 })();
