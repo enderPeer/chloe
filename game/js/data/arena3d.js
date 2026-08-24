@@ -43,7 +43,7 @@ CHLOE.data.arena3d = {
      whole crossing. `radius` is kept as a fallback for older code paths. */
   arena: {
     cx: 0, cz: 0, radius: 9.0, knightMinDist: 1.3,
-    bounds: { minX: -4.7, maxX: 4.7, minZ: -8.5, maxZ: 9.0 },
+    bounds: { minX: -8.0, maxX: 8.0, minZ: -7.4, maxZ: 7.0 },
     colliders: []      // the baked pews are scenery; loose benches are below
   },
 
@@ -67,9 +67,15 @@ CHLOE.data.arena3d = {
 
   // In the aisle facing the altar (and the knight at z -1.8). Camera forward is
   // (-sin yaw, -cos yaw), so yaw 0 looks down -Z — yaw PI would face the door.
-  playerSpawn: { x: 0, z: 4.2, yaw: 0 },
+  /* §20: the baked navgrid (data/arena-nav.js) proved the nave centre is the
+     ALTAR - a platform 1.75m up with a wall on it - so the old spawns had
+     both sides standing inside solid stone. The arena is really a ring
+     around that block, and the fight now happens in its north transept:
+     ~15m of clear floor, no pew rows in the way, stained glass down one
+     side. yaw -PI/2 looks toward +X, which is where the knights come from. */
+  playerSpawn: { x: -6.0, z: -5.4, yaw: -Math.PI / 2 },
   knight: {
-    x: 0, z: -1.8,          // before the chancel steps, altar at its back
+    x: 5.0, z: -5.4,        // 11m across the transept, closing on foot
     targetHeight: 2.15,     // model is bbox-normalized to this height
     name: 'Hollow Black Knight',
     /* §18 movement: he hunts you. Walks to close, dashes across the nave on

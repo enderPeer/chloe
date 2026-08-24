@@ -613,6 +613,78 @@ CHLOE.engine = CHLOE.engine || {};
     }
   }
 
+  /* ------------------------------------------------------- trophy gallery
+     §20. One framed picture per Hollow Knight squad you have put down,
+     appearing on the wall between fights. The list lives in runStats, so it
+     fills up over a run and is gone the moment you die (§15) - the wall is
+     the only record the game keeps of how far you got.
+
+     Slots run along the free wall: the east wall above the couch first, then
+     the north wall right of the mirror, then the south wall. Past that they
+     wrap and overlap slightly, which reads as a wall getting crowded. */
+  var trophyGroup = null;
+
+  var TROPHY_SLOTS = [
+    // east wall (x = +hw), facing -x
+    { x:  3.94, z: -1.85, rotY: -Math.PI / 2 },
+    { x:  3.94, z: -0.95, rotY: -Math.PI / 2 },
+    { x:  3.94, z:  1.55, rotY: -Math.PI / 2 },
+    { x:  3.94, z:  2.45, rotY: -Math.PI / 2 },
+    // north wall (z = -hd), facing +z, clear of the mirror at x -1.5
+    { x:  0.35, z: -2.94, rotY: 0 },
+    { x:  1.25, z: -2.94, rotY: 0 },
+    { x:  2.15, z: -2.94, rotY: 0 },
+    { x:  3.05, z: -2.94, rotY: 0 },
+    // south wall (z = +hd), facing -z, clear of the door at x 0.8
+    { x: -2.60, z:  2.94, rotY: Math.PI },
+    { x:  2.35, z:  2.94, rotY: Math.PI },
+    { x:  3.25, z:  2.94, rotY: Math.PI }
+  ];
+
+  function trophySlot(i) {
+    var base = TROPHY_SLOTS[i % TROPHY_SLOTS.length];
+    var lap = Math.floor(i / TROPHY_SLOTS.length);
+    // later laps tuck in beside and below, so the wall crowds instead of
+    // silently dropping rounds you actually earned
+    return { x: base.x, z: base.z, rotY: base.rotY,
+             y: 1.62 - lap * 0.52, nudge: lap * 0.11 };
+  }
+
+  function buildTrophies() {
+    if (trophyGroup) { scene.remove(trophyGroup); trophyGroup = null; }
+    var D2 = CHLOE.engine.displays;
+    var pt = CHLOE.engine.party;
+    if (!D2 || !D2.trophy || !pt || !pt.state || !pt.state.runStats) return;
+    var list = pt.state.runStats.trophies || [];
+    if (!list.length) return;
+
+    trophyGroup = new THREE.Group();
+    var PW = 0.62, PH = 0.83;   // 3:4, matching the 384x512 canvas
+    for (var i = 0; i < list.length; i++) {
+      var slot = trophySlot(i);
+      var g = new THREE.Group();
+      g.position.set(slot.x, slot.y + slot.nudge, slot.z);
+      g.rotation.y = slot.rotY;
+
+      // frame first, picture floated a hair proud of it
+      var frame = new THREE.Mesh(
+        new THREE.BoxGeometry(PW + 0.07, PH + 0.07, 0.035),
+        stdMat({ color: 0x3a2a1c, roughness: 0.85, metalness: 0.05 }));
+      frame.position.z = 0.018;
+      g.add(frame);
+
+      var tex = new THREE.CanvasTexture(D2.trophy(list[i]));
+      if (THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
+      var pic = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH),
+        new THREE.MeshBasicMaterial({ map: tex }));
+      pic.position.z = 0.038;
+      g.add(pic);
+
+      trophyGroup.add(g);
+    }
+    scene.add(trophyGroup);
+  }
+
   function buildLights() {
     var L = data.lights || {};
     var amb = L.ambient || {};
@@ -952,6 +1024,7 @@ CHLOE.engine = CHLOE.engine || {};
     texturedMats.length = 0;
     buildRoom();
     buildFurniture();
+    buildTrophies();
     buildLights();
     buildEnemy();
     buildHands();
@@ -1383,8 +1456,13 @@ CHLOE.engine = CHLOE.engine || {};
     try { renderer.render(scene, camera); return true; } catch (e) { return false; }
   };
   W._look = function (y, p) { yaw = y; if (typeof p === 'number') pitch = p; };
-  /* Repaint mirror/poster — levels and stats change between visits. */
-  W.refreshPanels = function () { if (A_refreshPanels) A_refreshPanels(); };
+  W._teleport = function (x, z) { pos.x = x; pos.z = z; vel.x = vel.z = 0; };
+  /* Repaint mirror/poster — levels and stats change between visits — and
+     rehang the gallery, since a round may have been cleared since you left. */
+  W.refreshPanels = function () {
+    if (A_refreshPanels) A_refreshPanels();
+    if (inited) buildTrophies();
+  };
   W.tvChapter = function () { return panels.tvChapter; };
 
   W.debug = function () {

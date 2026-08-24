@@ -63,7 +63,12 @@ CHLOE.engine = CHLOE.engine || {};
 
   var churchLoaded = false, knightLoaded = false;
 
-  var knight = {
+  /* §20: a SQUAD. Round N puts N knights on the floor. `knights[i]` all share
+     this shape; `knight` stays pointing at the first so single-target code
+     (lights, fallback totem) keeps working. */
+  var knights = [];
+  var knightProto = null;      // loaded gltf scene, cloned per knight
+  function makeKnightState() { return {
     group: null,     // outer group at spawn (bob/lunge applied here)
     model: null,     // loaded model or fallback totem (windup tilts applied here)
     mats: [],
@@ -78,8 +83,13 @@ CHLOE.engine = CHLOE.engine || {};
       stride: 0,
       swing: 0, swingDur: 1, swingKind: 'overhead', wound: false,
       dash: 0, dashCd: 0, dashDir: { x: 0, z: 1 }
-    }
-  };
+    },
+    // §20 per-knight attack window (battle3d schedules these staggered)
+    atk: { mode: 'idle', pattern: null, cb: null, t0: 0, strikeTimer: null,
+           lockDir: { x: 0, z: 1 }, lunge: 0 }
+  }; }
+  var knight = makeKnightState();
+  knights.push(knight);
 
   /* §17 first-person arms: the punch rig is parented to the camera with its
      head bone collapsed, so you see your own arms swing. */
@@ -90,16 +100,9 @@ CHLOE.engine = CHLOE.engine || {};
   var evadeMove = null;   // {dx, dz, t, dur} active dash
   var castingId = null;   // ability currently animating
 
-  // attack playback
-  var atk = {
-    mode: 'idle',    // idle | telegraph | strike | recover
-    pattern: null,
-    cb: null,
-    t0: 0,
-    strikeTimer: null,
-    lockDir: { x: 0, z: 1 },  // aim captured at windup start
-    lunge: 0                  // charge lunge offset 0..1
-  };
+  /* Attack playback lives per knight now (§20) - see makeKnightState().
+     A squad that shared one attack window would telegraph in unison and land
+     every strike on the same frame. */
 
   function D() { return (CHLOE.data && CHLOE.data.arena3d) || {}; }
   /* Append the asset version so a rebuilt .glb is never served from cache. */
@@ -156,6 +159,13 @@ CHLOE.engine = CHLOE.engine || {};
         scene.add(g);
         churchLoaded = true;
         if (churchFallback) { scene.remove(churchFallback); churchFallback = null; }
+        /* The walkable floor is PRECOMPUTED (data/arena-nav.js). Baking it
+           live costs ~50s of frozen main thread — three r128 has no BVH, so
+           every probe ray walks all 37 church meshes triangle by triangle.
+           Re-bake with A._bakeExport() after moving or replacing the model. */
+        nav = loadShippedNav();
+        if (!nav) console.warn('[arena3d] no baked navgrid for this church — ' +
+                               'falling back to the bounds rectangle. Re-run A._bakeExport().');
       } catch (e) {
         console.warn('[arena3d] church setup failed — fallback nave', e);
         if (!churchFallback) churchFallback = buildFallbackChurch();
@@ -211,7 +221,8 @@ CHLOE.engine = CHLOE.engine || {};
     knight.light.position.set(0, 0.25, 0);
     knight.group.add(knight.light);
 
-    var attach = function (model) {
+    var attach = function (model, k) {
+      k = k || knight;
       // normalize height + ground the feet, darken to "hollow black"
       var box = new THREE.Box3().setFromObject(model);
       var h = Math.max(0.01, box.max.y - box.min.y);
@@ -237,18 +248,20 @@ CHLOE.engine = CHLOE.engine || {};
             if (m.map) m.map.anisotropy = 4;
             if (typeof m.metalness === 'number') m.metalness = Math.min(m.metalness, 0.3);
             if (typeof m.roughness === 'number') m.roughness = Math.max(m.roughness, 0.62);
-            if ('envMapIntensity' in m) m.envMapIntensity = 0.2;
+            if ('envMapIntensity' in m) { m.envMapIntensity = 0.2; m.userData.envClamp = 0.2; }
             // no self-glow at rest — flinch() flashes him on hit instead
             if (m.emissive) { m.emissive.setHex(0x000000); m.emissiveIntensity = 1.0; }
-            knight.mats.push(m);
+            k.mats.push(m);
           }
         }
       });
-      knight.model = model;
-      knight.group.add(model);
-      buildKnightRig(model);
-      faceKnightTo(cfgSpawn().x, cfgSpawn().z);
+      k.model = model;
+      k.group.add(model);
+      buildKnightRig(k, model);
+      faceKnightTo(k, cfgSpawn().x, cfgSpawn().z);
       knightLoaded = true;
+      if (!knightProto) knightProto = model;   // template for the rest of the squad
+      if (pendingSquad > 1) { spawnSquad(pendingSquad); pendingSquad = 0; }
     };
 
     if (!loader || !models.knight) { attach(buildFallbackKnight()); return; }
@@ -293,7 +306,7 @@ CHLOE.engine = CHLOE.engine || {};
      which side of the body they sit on, and re-parent each piece under a
      pivot placed at the matching joint. Rotating those pivots then animates
      real arms, legs and sword without any bones. */
-  function buildKnightRig(model) {
+  function buildKnightRig(k, model) {
     var box = new THREE.Box3().setFromObject(model);
     var h = Math.max(0.01, box.max.y - box.min.y);
     var floorY = box.min.y;
@@ -340,17 +353,97 @@ CHLOE.engine = CHLOE.engine || {};
       counts[key]++;
     });
 
-    knight.rig = rig;
-    knight.rigInfo = counts;
-    knight.height = h;
+    k.rig = rig;
+    k.rigInfo = counts;
+    k.height = h;
     console.log('[arena3d] knight rig:', JSON.stringify(counts));
   }
 
-  function faceKnightTo(x, z) {
-    if (!knight.group) return;
+  var pendingSquad = 0;
+
+  /* §20: put `n` knights on the floor. The first is the one that loaded; the
+     rest are clones of its dressed model, each with its own rig, light and
+     materials so damage flashes only the one you hit. */
+  function spawnSquad(n) {
+    if (!knightProto) { pendingSquad = n; return; }
+    // drop any extras from a previous round
+    for (var d = knights.length - 1; d >= 1; d--) {
+      if (knights[d].group) scene.remove(knights[d].group);
+      knights.splice(d, 1);
+    }
+    var kcfg = D().knight || {};
+    var spread = 1.6;
+    for (var i = 0; i < n; i++) {
+      var k = (i === 0) ? knights[0] : makeKnightState();
+      if (i > 0) {
+        k.group = new THREE.Group();
+        scene.add(k.group);
+        var clone = knightProto.clone(true);
+        // clone materials so a flinch flash is per-knight, not squad-wide
+        clone.traverse(function (o) {
+          if (o.isMesh && o.material) {
+            var mats = Array.isArray(o.material) ? o.material : [o.material];
+            var copy = mats.map(function (m) { var c = m.clone(); k.mats.push(c); return c; });
+            o.material = Array.isArray(o.material) ? copy : copy[0];
+            o.castShadow = true;
+          }
+        });
+        k.model = clone;
+        k.group.add(clone);
+        buildKnightRig(k, clone);
+        var lc = (D().lights || {}).knight || {};
+        k.light = new THREE.PointLight(lc.color != null ? lc.color : 0xff2038,
+          (lc.intensity != null ? lc.intensity : 0.55) * LIGHT_SCALE,
+          lc.distance || 4.5, lc.decay || 2);
+        k.light.position.set(0, 0.25, 0);
+        k.group.add(k.light);
+        knights.push(k);
+      }
+      k.alive = true;
+      k.anim.dashCd = i * 1.2;          // stagger their dashes
+      // fan them out across the nave in front of the altar
+      /* Fan the squad ACROSS the approach, not along a fixed axis, so the
+         line stays abreast whichever way the spawns face. */
+      var bx = (kcfg.x || 0), bz = (kcfg.z || 5.4);
+      var ax = pos.x - bx, az = pos.z - bz;
+      var al = Math.sqrt(ax * ax + az * az) || 1;
+      var px2 = -az / al, pz2 = ax / al;          // perpendicular, unit
+      var off = (i - (n - 1) / 2) * spread;
+      var sx = bx + px2 * off + (ax / al) * -Math.abs(off) * 0.35;
+      var sz = bz + pz2 * off + (az / al) * -Math.abs(off) * 0.35;
+      var spot = navNearest(sx, sz);
+      k.group.position.set(spot.x, 0, spot.z);
+      k.group.visible = true;
+      faceKnightTo(k, pos.x, pos.z);
+    }
+  }
+
+  function nearestKnight() {
+    var best = null, bd = Infinity;
+    for (var i = 0; i < knights.length; i++) {
+      var k = knights[i];
+      if (!k.alive || !k.group) continue;
+      var dx = k.group.position.x - pos.x, dz = k.group.position.z - pos.z;
+      var d = dx * dx + dz * dz;
+      if (d < bd) { bd = d; best = k; }
+    }
+    return best;
+  }
+  A.nearestKnightDist = function () {
+    var k = nearestKnight();
+    if (!k) return Infinity;
+    var dx = k.group.position.x - pos.x, dz = k.group.position.z - pos.z;
+    return Math.sqrt(dx * dx + dz * dz);
+  };
+
+  A.spawnSquad = function (n) { spawnSquad(Math.max(1, n || 1)); };
+  A.squadSize = function () { return knights.length; };
+
+  function faceKnightTo(k, x, z) {
+    if (!k || !k.group) return;
     var extra = (D().knight && D().knight.rotY) || 0;
-    knight.baseRot = Math.atan2(x - knight.group.position.x, z - knight.group.position.z) + extra;
-    knight.group.rotation.y = knight.baseRot;
+    k.baseRot = Math.atan2(x - k.group.position.x, z - k.group.position.z) + extra;
+    k.group.rotation.y = k.baseRot;
   }
 
   // HDRI -> PMREM -> scene.environment. Gives the stone and glass real
@@ -383,7 +476,11 @@ CHLOE.engine = CHLOE.engine || {};
       var mats = Array.isArray(o.material) ? o.material : [o.material];
       for (var i = 0; i < mats.length; i++) {
         if ('envMapIntensity' in mats[i]) {
-          mats[i].envMapIntensity = ENV_INTENSITY;
+          /* A material that asked to be damped keeps its own value — this
+             runs when the HDRI resolves, long after the material was made,
+             and used to flatten dark oak and leather into white plastic. */
+          var want = mats[i].userData && mats[i].userData.envClamp;
+          mats[i].envMapIntensity = (want != null) ? want : ENV_INTENSITY;
           mats[i].needsUpdate = true;
         }
       }
@@ -524,7 +621,7 @@ CHLOE.engine = CHLOE.engine || {};
                  Pin a flesh tone and damp the environment (same lesson as the
                  dressing-room hands). */
               if (mats[i].color) mats[i].color.setRGB(0.27, 0.18, 0.15);
-              if ('envMapIntensity' in mats[i]) mats[i].envMapIntensity = 0.06;
+              if ('envMapIntensity' in mats[i]) { mats[i].envMapIntensity = 0.06; mats[i].userData.envClamp = 0.06; }
               if (typeof mats[i].metalness === 'number') mats[i].metalness = 0;
               if (typeof mats[i].roughness === 'number') mats[i].roughness = 0.9;
             }
@@ -548,10 +645,59 @@ CHLOE.engine = CHLOE.engine || {};
   // ------------------------------------------------------- §19 church benches
   var benches = [];   // [{group, x, z, rotY, alive, vx, vz, hp}]
 
+  /* Dark oak with real grain. A FLAT matte colour does not survive this
+     scene: between the ambient, the hemisphere, two directionals and the
+     candle points, the combined irradiance drives any untextured diffuse
+     surface to near-white after tone mapping - dark brown benches came out
+     the colour of cream. Grain gives the eye detail to read and keeps the
+     average albedo low enough to stay wood. */
+  var woodTex = null;
+  function woodTexture() {
+    if (woodTex) return woodTex;
+    var c = document.createElement('canvas');
+    c.width = 256; c.height = 256;
+    var g = c.getContext('2d');
+    g.fillStyle = '#231810';
+    g.fillRect(0, 0, 256, 256);
+    for (var i = 0; i < 220; i++) {
+      var y = Math.random() * 256;
+      var dark = Math.random() < 0.5;
+      g.strokeStyle = dark ? 'rgba(10,6,4,0.55)' : 'rgba(64,45,30,0.35)';
+      g.lineWidth = 0.6 + Math.random() * 2.2;
+      g.beginPath();
+      g.moveTo(0, y);
+      // gently wandering grain lines rather than dead-straight stripes
+      for (var x = 0; x <= 256; x += 32) {
+        g.lineTo(x, y + Math.sin((x + i * 13) * 0.03) * 3.5);
+      }
+      g.stroke();
+    }
+    for (var k = 0; k < 9; k++) {           // knots
+      var kx = Math.random() * 256, ky = Math.random() * 256;
+      var r = 3 + Math.random() * 7;
+      var rg = g.createRadialGradient(kx, ky, 1, kx, ky, r);
+      rg.addColorStop(0, 'rgba(8,5,3,0.85)');
+      rg.addColorStop(1, 'rgba(8,5,3,0)');
+      g.fillStyle = rg;
+      g.beginPath(); g.arc(kx, ky, r, 0, Math.PI * 2); g.fill();
+    }
+    woodTex = new THREE.CanvasTexture(c);
+    if (THREE.sRGBEncoding !== undefined) woodTex.encoding = THREE.sRGBEncoding;
+    woodTex.wrapS = woodTex.wrapT = THREE.RepeatWrapping;
+    woodTex.repeat.set(2, 1);
+    return woodTex;
+  }
+
   function woodMat() {
-    var m = new THREE.MeshStandardMaterial({ color: 0x2a1d14, roughness: 0.95, metalness: 0 });
+    var m = new THREE.MeshStandardMaterial({
+      color: 0x6a6a6a,          // tints the map down; the grain carries the hue
+      map: woodTexture(),
+      roughness: 0.98,
+      metalness: 0
+    });
     // the arena keys are bright; unclamped IBL turns dark oak into white plastic
-    m.envMapIntensity = 0.12;
+    m.envMapIntensity = 0.08;
+    m.userData.envClamp = 0.08;   // survives applyEnvIntensity when the HDRI lands
     return m;
   }
 
@@ -711,7 +857,7 @@ CHLOE.engine = CHLOE.engine || {};
             for (var i = 0; i < mats.length; i++) {
               if (!mats[i]) continue;
               if (mats[i].color) mats[i].color.setRGB(0.30, 0.20, 0.16);
-              if ('envMapIntensity' in mats[i]) mats[i].envMapIntensity = 0.06;
+              if ('envMapIntensity' in mats[i]) { mats[i].envMapIntensity = 0.06; mats[i].userData.envClamp = 0.06; }
               if (typeof mats[i].roughness === 'number') mats[i].roughness = 0.9;
               if (mats[i].emissive) { mats[i].emissive.setHex(0x3a1200); mats[i].emissiveIntensity = 0.0; }
             }
@@ -797,8 +943,9 @@ CHLOE.engine = CHLOE.engine || {};
   /* Drop the funnel on the knight (or straight ahead if he is gone). */
   A.spawnTornado = function (durationMs) {
     if (!tornado.root) return false;
-    var tx = knight.group ? knight.group.position.x : pos.x;
-    var tz = knight.group ? knight.group.position.z : pos.z - 3;
+    var target = nearestKnight();
+    var tx = target ? target.group.position.x : pos.x;
+    var tz = target ? target.group.position.z : pos.z - 3;
     tornado.root.position.set(tx, 0, tz);
     tornado.root.visible = true;
     tornado.active = true;
@@ -845,9 +992,10 @@ CHLOE.engine = CHLOE.engine || {};
     }
     if (tornado.light) tornado.light.intensity = a * 9 * LIGHT_SCALE;
     // keep chasing the knight so it reads as "on him"
-    if (knight.group && knight.alive) {
-      tornado.root.position.x += (knight.group.position.x - tornado.root.position.x) * Math.min(1, 3 * dt);
-      tornado.root.position.z += (knight.group.position.z - tornado.root.position.z) * Math.min(1, 3 * dt);
+    var chase = nearestKnight();
+    if (chase) {
+      tornado.root.position.x += (chase.group.position.x - tornado.root.position.x) * Math.min(1, 3 * dt);
+      tornado.root.position.z += (chase.group.position.z - tornado.root.position.z) * Math.min(1, 3 * dt);
     }
     if (p >= tornado.dur) {
       tornado.active = false;
@@ -930,16 +1078,23 @@ CHLOE.engine = CHLOE.engine || {};
   };
 
   /* Is the knight inside this ability's reach and arc right now? */
-  A.abilityHits = function (ability) {
-    if (!knight.group || !knight.alive) return false;
-    var dx = knight.group.position.x - pos.x;
-    var dz = knight.group.position.z - pos.z;
-    var dist = Math.sqrt(dx * dx + dz * dz);
-    if (dist > (ability.range || 2.5)) return false;
+  /* §20: which knights does this swing catch? Returns their indices, so one
+     wide arc can hit several of them at once. */
+  A.abilityTargets = function (ability) {
+    var out = [];
     var fx = -Math.sin(yaw), fz = -Math.cos(yaw);   // camera forward
-    var dot = (dx * fx + dz * fz) / (dist || 1);
-    return dot >= Math.cos(((ability.arc || 60) / 2) * Math.PI / 180);
+    var halfArc = Math.cos(((ability.arc || 60) / 2) * Math.PI / 180);
+    for (var i = 0; i < knights.length; i++) {
+      var k = knights[i];
+      if (!k.alive || !k.group) continue;
+      var dx = k.group.position.x - pos.x, dz = k.group.position.z - pos.z;
+      var dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist > (ability.range || 2.5) || dist < 0.0001) continue;
+      if ((dx * fx + dz * fz) / dist >= halfArc) out.push(i);
+    }
+    return out;
   };
+  A.abilityHits = function (ability) { return A.abilityTargets(ability).length > 0; };
 
   /* Dash for the evade: along movement input, or straight back if idle. */
   A.doEvade = function (distance, durationMs) {
@@ -951,8 +1106,9 @@ CHLOE.engine = CHLOE.engine || {};
       var len = Math.sqrt(f * f + s * s); f /= len; s /= len;
       dx = (-sy * f + cy * s); dz = (-cy * f - sy * s);
     } else {
-      var kx = pos.x - (knight.group ? knight.group.position.x : 0);
-      var kz = pos.z - (knight.group ? knight.group.position.z : -1);
+      var nk = nearestKnight();
+      var kx = pos.x - (nk ? nk.group.position.x : 0);
+      var kz = pos.z - (nk ? nk.group.position.z : -1);
       var kl = Math.sqrt(kx * kx + kz * kz) || 1;
       dx = kx / kl; dz = kz / kl;
     }
@@ -1020,11 +1176,17 @@ CHLOE.engine = CHLOE.engine || {};
     crouchForced = false;
     eyeH = eyeStand();
     clearAttack();
-    knight.alive = true;
-    if (knight.group) {
-      knight.group.position.y = 0;
-      knight.group.visible = true;
-      faceKnightTo(sp.x, sp.z);
+    for (var ki = 0; ki < knights.length; ki++) {
+      var kk = knights[ki];
+      kk.alive = true;
+      if (!kk.group) continue;
+      kk.group.position.y = 0;
+      kk.group.visible = true;
+      faceKnightTo(kk, sp.x, sp.z);
+      kk.anim.state = 'idle';
+      kk.anim.swing = 0;
+      kk.anim.dash = 0;
+      kk.anim.dashCd = ki * 1.2;
     }
     if (camera) {
       camera.position.set(pos.x, eyeH, pos.z);
@@ -1073,6 +1235,144 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   // ---------------------------------------------------------------- movement
+  /* ---------------------------------------------------------------- navgrid
+     §20. The church is not a rectangle. It has an altar platform, steps,
+     columns and side chapels, and the old `arena.bounds` box let you stroll
+     straight through all of them. So at load we BAKE the real floor: sample a
+     grid, keep every cell with floor near y0 and a clear head column, then
+     flood-fill from the spawn so unreachable side rooms do not count.
+     Movement then resolves per axis against the grid, which slides you along
+     stone instead of stopping you dead. */
+  var nav = null;   // {cell,minX,minZ,nx,nz,data:Uint8Array}
+
+  /* The model's pews are baked into merged meshes and cannot be split
+     (§19), so they are scenery, not collision - the interactive benches in
+     data/arena3d.js are the gameplay stand-in. Left in the navgrid they
+     also break it: the rows are thinner than the 0.4m grid, so cell centres
+     land half on seat and half on aisle and the floor comes out speckled. */
+  function isPew(o) {
+    var m = o.material;
+    if (!m) return false;
+    var mats = Array.isArray(m) ? m : [m];
+    for (var i = 0; i < mats.length; i++) {
+      if (/banc/i.test(mats[i].name || '')) return true;
+    }
+    return false;
+  }
+
+  function buildNavGrid(cell, pad, tol) {
+    var solids = [];
+    scene.traverse(function (o) {
+      if (o.isMesh && o.userData && o.userData.isChurch && !isPew(o)) solids.push(o);
+    });
+    if (!solids.length) return null;
+
+    cell = cell || 0.4;
+    var b = (cfg.arena && cfg.arena.bounds) || { minX: -8, maxX: 8, minZ: -12, maxZ: 12 };
+    // sample past the declared box so the bake can find real floor the
+    // hand-guessed rectangle was cutting off
+    pad = pad == null ? 3.0 : pad;
+    var minX = b.minX - pad, maxX = b.maxX + pad;
+    var minZ = b.minZ - pad, maxZ = b.maxZ + pad;
+    var nx = Math.ceil((maxX - minX) / cell) + 1;
+    var nz = Math.ceil((maxZ - minZ) / cell) + 1;
+    var data = new Uint8Array(nx * nz);
+
+    var rc = new THREE.Raycaster();
+    var dnV = new THREE.Vector3(0, -1, 0), upV = new THREE.Vector3(0, 1, 0);
+    var org = new THREE.Vector3();
+    /* Tight on purpose: the church is full of pews (`banc`) whose seats sit
+       0.45-0.85m up. A loose tolerance accepts those as floor and spawns you
+       standing on the furniture. Only true nave floor qualifies. */
+    var FLOOR_TOL = tol == null ? 0.28 : tol;
+    var HEAD = 1.7;         // standing clearance
+
+    for (var i = 0; i < nx; i++) {
+      for (var j = 0; j < nz; j++) {
+        var x = minX + i * cell, z = minZ + j * cell;
+        org.set(x, 2.6, z);
+        rc.set(org, dnV); rc.far = 6;
+        var hit = rc.intersectObjects(solids, true);
+        if (!hit.length) continue;
+        var fy = 2.6 - hit[0].distance;
+        if (Math.abs(fy) > FLOOR_TOL) continue;      // altar top, stairs, void
+        org.set(x, fy + 0.15, z);
+        rc.set(org, upV); rc.far = HEAD;
+        if (rc.intersectObjects(solids, true).length) continue;  // no headroom
+        data[i * nz + j] = 1;
+      }
+    }
+
+    var g = { cell: cell, minX: minX, minZ: minZ, nx: nx, nz: nz, data: data };
+    floodFill(g, cfg.playerSpawn ? cfg.playerSpawn.x : 0,
+                 cfg.playerSpawn ? cfg.playerSpawn.z : 4.2);
+    return g;
+  }
+
+  /* Keep only the region actually connected to the spawn. */
+  function floodFill(g, sx, sz) {
+    var si = Math.round((sx - g.minX) / g.cell), sj = Math.round((sz - g.minZ) / g.cell);
+    // the spawn can sit a hair off a sample point; search outward for a seed
+    var seed = -1;
+    for (var r = 0; r < 8 && seed < 0; r++) {
+      for (var a = -r; a <= r && seed < 0; a++) {
+        for (var b2 = -r; b2 <= r && seed < 0; b2++) {
+          var i = si + a, j = sj + b2;
+          if (i >= 0 && i < g.nx && j >= 0 && j < g.nz && g.data[i * g.nz + j] === 1) seed = i * g.nz + j;
+        }
+      }
+    }
+    if (seed < 0) return;
+    var stack = [seed];
+    g.data[seed] = 2;
+    while (stack.length) {
+      var k = stack.pop(), ci = (k / g.nz) | 0, cj = k % g.nz;
+      var nb = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      for (var n = 0; n < 4; n++) {
+        var ai = ci + nb[n][0], aj = cj + nb[n][1];
+        if (ai < 0 || ai >= g.nx || aj < 0 || aj >= g.nz) continue;
+        var idx = ai * g.nz + aj;
+        if (g.data[idx] === 1) { g.data[idx] = 2; stack.push(idx); }
+      }
+    }
+    // 2 = reachable, 1 = orphaned island -> demote to blocked
+    for (var m = 0; m < g.data.length; m++) g.data[m] = (g.data[m] === 2) ? 1 : 0;
+  }
+
+  /* Can a body of RADIUS stand centred here? Samples the disc, not a point,
+     so you cannot clip a shoulder through a corner. */
+  function navFree(x, z) {
+    if (!nav) return true;
+    var g = nav, r = RADIUS * 0.8;
+    var pts = [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r]];
+    for (var p = 0; p < pts.length; p++) {
+      var i = Math.round((x + pts[p][0] - g.minX) / g.cell);
+      var j = Math.round((z + pts[p][1] - g.minZ) / g.cell);
+      if (i < 0 || i >= g.nx || j < 0 || j >= g.nz) return false;
+      if (!g.data[i * g.nz + j]) return false;
+    }
+    return true;
+  }
+
+  /* Nearest cell a body can actually stand in, searched outward in rings.
+     Spawn points in data/ were authored against the old rectangle, so some
+     of them sit inside the rood screen; this walks them out to real floor. */
+  function navNearest(x, z) {
+    if (!nav || navFree(x, z)) return { x: x, z: z };
+    var step = nav.cell;
+    for (var r = 1; r <= 30; r++) {
+      for (var a = -r; a <= r; a++) {
+        for (var b = -r; b <= r; b++) {
+          if (Math.abs(a) !== r && Math.abs(b) !== r) continue;   // ring only
+          var nx2 = x + a * step, nz2 = z + b * step;
+          if (navFree(nx2, nz2)) return { x: nx2, z: nz2 };
+        }
+      }
+    }
+    return { x: x, z: z };
+  }
+
+
   var benchSlow = 1;   // §19: set by benchPush each frame
   function updatePlayer(dt) {
     var f = ((keys.KeyW || keys.ArrowUp) ? 1 : 0) - ((keys.KeyS || keys.ArrowDown) ? 1 : 0);
@@ -1115,6 +1415,7 @@ CHLOE.engine = CHLOE.engine || {};
     // axis-separated AABB resolve vs config colliders (pew banks)
     var cols = (cfg.arena && cfg.arena.colliders) || [];
     var i, c;
+    var prevX = pos.x, prevZ = pos.z;
     var nx = pos.x + vel.x * dt;
     for (i = 0; i < cols.length; i++) {
       c = cols[i];
@@ -1139,7 +1440,13 @@ CHLOE.engine = CHLOE.engine || {};
     /* §19: the nave WALLS are the arena. Rectangular bounds matching the
        stone; the old circle is only a fallback for configs without them. */
     var ar = cfg.arena || { cx: 0, cz: 0, radius: 6 };
-    if (ar.bounds) {
+    if (nav) {
+      /* §20: the baked stone is the arena. Resolving one axis at a time
+         lets you slide along a wall or the altar instead of sticking. */
+      if (!navFree(pos.x, prevZ)) pos.x = prevX;
+      if (!navFree(pos.x, pos.z)) pos.z = prevZ;
+      if (!navFree(pos.x, pos.z)) { pos.x = prevX; pos.z = prevZ; }
+    } else if (ar.bounds) {
       pos.x = Math.max(ar.bounds.minX + RADIUS, Math.min(ar.bounds.maxX - RADIUS, pos.x));
       pos.z = Math.max(ar.bounds.minZ + RADIUS, Math.min(ar.bounds.maxZ - RADIUS, pos.z));
     } else {
@@ -1153,14 +1460,17 @@ CHLOE.engine = CHLOE.engine || {};
     }
     // benches are soft: pushing through one slows you and shoves it aside
     benchSlow = benchPush(pos.x, pos.z, dt);
-    // keep out of the knight's personal space
-    if (knight.group) {
-      var kx = pos.x - knight.group.position.x, kz = pos.z - knight.group.position.z;
+    /* §20: every living knight has personal space, so a squad cannot be
+       walked through and cannot all stack on the same tile. */
+    var minD = (ar.knightMinDist || 1.3);
+    for (var pi = 0; pi < knights.length; pi++) {
+      var pk = knights[pi];
+      if (!pk.alive || !pk.group) continue;
+      var kx = pos.x - pk.group.position.x, kz = pos.z - pk.group.position.z;
       var kd = Math.sqrt(kx * kx + kz * kz);
-      var minD = (ar.knightMinDist || 1.3);
       if (kd < minD && kd > 0) {
-        pos.x = knight.group.position.x + kx / kd * minD;
-        pos.z = knight.group.position.z + kz / kd * minD;
+        pos.x = pk.group.position.x + kx / kd * minD;
+        pos.z = pk.group.position.z + kz / kd * minD;
       }
     }
 
@@ -1178,51 +1488,54 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   // ---------------------------------------------------------------- attacks
-  function clearAttack() {
+  function clearAttack(k) {
+    if (!k) { for (var i = 0; i < knights.length; i++) clearAttack(knights[i]); return; }
+    var atk = k.atk;
     if (atk.strikeTimer) { window.clearTimeout(atk.strikeTimer); atk.strikeTimer = null; }
     atk.mode = 'idle'; atk.pattern = null; atk.cb = null; atk.lunge = 0;
-    if (knight.model) {
-      knight.model.rotation.x = 0;
-      knight.model.rotation.z = 0;
-    }
-    if (knight.group) knight.group.position.y = 0;
+    if (k.model) { k.model.rotation.x = 0; k.model.rotation.z = 0; }
+    if (k.group) k.group.position.y = 0;
   }
 
   /* Play one telegraphed attack. cb({hit, pattern}) fires at the strike
      moment (setTimeout — deterministic even when rAF is throttled). */
-  A.telegraph = function (pattern, cb) {
+  A.telegraph = function (pattern, cb, index) {
     if (disabled || !inited || !pattern) { if (cb) cb({ hit: false, pattern: pattern }); return; }
-    clearAttack();
+    var k = knights[index || 0];
+    if (!k || !k.alive) { if (cb) cb({ hit: false, pattern: pattern }); return; }
+    var atk = k.atk;
+    clearAttack(k);
     atk.mode = 'telegraph';
     atk.pattern = pattern;
     atk.cb = cb || null;
     atk.t0 = performance.now();
     // aim locked at windup start: dodge by MOVING after the windup begins
-    var kx = knight.group ? knight.group.position.x : 0;
-    var kz = knight.group ? knight.group.position.z : 0;
+    var kx = k.group ? k.group.position.x : 0;
+    var kz = k.group ? k.group.position.z : 0;
     var dx = pos.x - kx, dz = pos.z - kz;
     var d = Math.sqrt(dx * dx + dz * dz) || 1;
     atk.lockDir = { x: dx / d, z: dz / d };
-    faceKnightTo(pos.x, pos.z);
+    faceKnightTo(k, pos.x, pos.z);
 
     atk.strikeTimer = window.setTimeout(function () {
       atk.strikeTimer = null;
-      strikeNow();
+      strikeNow(k);
     }, pattern.telegraphMs || 1500);
   };
 
-  function strikeNow() {
+  function strikeNow(k) {
+    var atk = k.atk;
     if (atk.mode !== 'telegraph') return;
     atk.mode = 'strike';
     var pattern = atk.pattern;
     // hidden tab: the player physically cannot dodge (rAF frozen) — mercy miss
-    var hit = document.hidden ? false : hitTest(pattern);
+    var hit = document.hidden ? false : hitTest(k, pattern);
     var cb = atk.cb;
     atk.cb = null;
     // brief recover, then idle
     window.setTimeout(function () {
       if (atk.mode === 'strike') { atk.mode = 'recover'; }
-      window.setTimeout(function () { if (atk.mode === 'recover') clearAttack(); },
+      window.setTimeout(function () { if (atk.mode === 'recover') clearAttack(k); },
         (pattern && pattern.recoverMs) || 800);
     }, 220);
     if (cb) {
@@ -1230,9 +1543,10 @@ CHLOE.engine = CHLOE.engine || {};
     }
   }
 
-  function hitTest(pattern) {
-    if (!pattern || !knight.group) return false;
-    var kx = knight.group.position.x, kz = knight.group.position.z;
+  function hitTest(k, pattern) {
+    if (!pattern || !k.group) return false;
+    var atk = k.atk;
+    var kx = k.group.position.x, kz = k.group.position.z;
     var dx = pos.x - kx, dz = pos.z - kz;
     var dist = Math.sqrt(dx * dx + dz * dz);
     if (pattern.evade === 'crouch') {
@@ -1246,11 +1560,12 @@ CHLOE.engine = CHLOE.engine || {};
            Math.abs(lat) <= (pattern.width || 1.7) / 2;
   }
 
-  A.flinch = function (dmg, killed) {
-    if (!knight.group) return;
+  A.flinch = function (dmg, killed, index) {
+    var knight = knights[index || 0];
+    if (!knight || !knight.group) return;
     if (killed) {
       knight.alive = false;
-      clearAttack();
+      clearAttack(knight);
     }
     // quick emissive flash
     for (var i = 0; i < knight.mats.length; i++) {
@@ -1258,26 +1573,28 @@ CHLOE.engine = CHLOE.engine || {};
       if (m.emissive) { m.emissive.setHex(killed ? 0xe5173f : 0x881122); m.emissiveIntensity = 1.6; }
     }
     window.setTimeout(function () {
-      for (var i = 0; i < knight.mats.length; i++) {
-        var m = knight.mats[i];
-        if (m.emissive) { m.emissive.setHex(0x000000); m.emissiveIntensity = 1.0; }
+      for (var j = 0; j < knight.mats.length; j++) {
+        var mm = knight.mats[j];
+        if (mm.emissive) { mm.emissive.setHex(0x000000); mm.emissiveIntensity = 1.0; }
       }
     }, killed ? 900 : 180);
   };
 
-  A.setKnightAlive = function (alive) {
-    knight.alive = !!alive;
-    if (knight.group) knight.group.visible = !!alive || knight.sinking;
+  A.setKnightAlive = function (alive, index) {
+    var k = knights[index || 0];
+    if (!k) return;
+    k.alive = !!alive;
+    if (k.group) k.group.visible = !!alive;
   };
 
   // ---------------------------------------------------------------- animate
   /* §18: pose the limb pivots. `w` blends a pose in (0..1) so states can
      cross-fade instead of snapping. */
-  function poseKnight(dt) {
-    var r = knight.rig;
+  function poseKnight(k, dt) {
+    var r = k.rig;
     if (!r) return;
     var t = elapsed;
-    var st = knight.anim;
+    var st = k.anim;
 
     // ---- targets, rebuilt each frame from the current state ----
     var armLx = 0, armRx = 0, armRz = 0, legLx = 0, legRx = 0;
@@ -1324,8 +1641,10 @@ CHLOE.engine = CHLOE.engine || {};
     }
 
     // ---- ease everything toward the target so poses never snap ----
-    var k = Math.min(1, 14 * dt);
-    function ease(o, prop, target) { o[prop] += (target - o[prop]) * k; }
+    /* Rename guard: the parameter is also `k`, and `var` would reuse
+       that binding rather than shadow it. */
+    var lerpK = Math.min(1, 14 * dt);
+    function ease(o, prop, target) { o[prop] += (target - o[prop]) * lerpK; }
     ease(r.armL.rotation, 'x', armLx);
     ease(r.armR.rotation, 'x', armRx);
     ease(r.armR.rotation, 'z', armRz);
@@ -1334,33 +1653,42 @@ CHLOE.engine = CHLOE.engine || {};
     ease(r.torso.rotation, 'x', torsoX);
     ease(r.torso.rotation, 'y', torsoY);
     ease(r.head.rotation, 'x', headX);
-    knight.bob = bob;
+    k.bob = bob;
   }
 
   /* §18 knight brain: always face the player, close the distance on foot,
      dash when it is off cooldown and the player is far, and swing when in
      reach. The telegraph/strike windows still come from ui/battle3d.js so
      the dodge rules of §16 are untouched. */
-  function updateKnight(dt) {
-    if (!knight.group) return;
-    if (!knight.alive) {
-      knight.group.position.y = Math.max(-2.6, knight.group.position.y - dt * 0.9);
-      if (knight.light) knight.light.intensity = Math.max(0, knight.light.intensity - dt * 0.8);
-      if (knight.group.position.y <= -2.55) knight.group.visible = false;
+  function updateOneKnight(k, dt) {
+    var atk = k.atk;
+    if (!k.group) return;
+    /* Rescue: a knight that somehow starts off the navgrid can never move,
+       because every candidate step reverts to an illegal position. Snap it
+       back onto real floor before anything else runs. */
+    if (k.alive && nav && !navFree(k.group.position.x, k.group.position.z)) {
+      var fix = navNearest(k.group.position.x, k.group.position.z);
+      k.group.position.x = fix.x;
+      k.group.position.z = fix.z;
+    }
+    if (!k.alive) {
+      k.group.position.y = Math.max(-2.6, k.group.position.y - dt * 0.9);
+      if (k.light) k.light.intensity = Math.max(0, k.light.intensity - dt * 0.8);
+      if (k.group.position.y <= -2.55) k.group.visible = false;
       return;
     }
 
-    var st = knight.anim;
-    var kx = knight.group.position.x, kz = knight.group.position.z;
+    var st = k.anim;
+    var kx = k.group.position.x, kz = k.group.position.z;
     var dx = pos.x - kx, dz = pos.z - kz;
     var dist = Math.sqrt(dx * dx + dz * dz) || 0.001;
     var ux = dx / dist, uz = dz / dist;
 
     // ---- always focus the player (except mid-swing, when the lane is locked) ----
     if (atk.mode === 'telegraph' || atk.mode === 'strike') {
-      faceKnightTo(kx + atk.lockDir.x, kz + atk.lockDir.z);
+      faceKnightTo(k, kx + atk.lockDir.x, kz + atk.lockDir.z);
     } else {
-      faceKnightTo(pos.x, pos.z);
+      faceKnightTo(k, pos.x, pos.z);
     }
 
     st.dashCd = Math.max(0, st.dashCd - dt);
@@ -1399,6 +1727,19 @@ CHLOE.engine = CHLOE.engine || {};
       st.state = 'idle';
     }
 
+    // §20 keep the squad from stacking into one silhouette
+    for (var oi = 0; oi < knights.length; oi++) {
+      var other = knights[oi];
+      if (other === k || !other.alive || !other.group) continue;
+      var sx = kx - other.group.position.x, sz = kz - other.group.position.z;
+      var sd = Math.sqrt(sx * sx + sz * sz);
+      var want = 1.5;
+      if (sd < want && sd > 0.001) {
+        kx += (sx / sd) * (want - sd) * 0.5;
+        kz += (sz / sd) * (want - sd) * 0.5;
+      }
+    }
+
     // never walk into the player, never leave the arena
     var ar = cfg.arena || {};
     var minD = (ar.knightMinDist || 1.3);
@@ -1408,7 +1749,14 @@ CHLOE.engine = CHLOE.engine || {};
       kx = pos.x - (ndx / nd) * minD;
       kz = pos.z - (ndz / nd) * minD;
     }
-    if (ar.bounds) {
+    if (nav) {
+      /* §20: the knight obeys the same baked stone the player does, so it
+         cannot walk through the rood screen to reach you. */
+      var okx = k.group.position.x, okz = k.group.position.z;
+      if (!navFree(kx, okz)) kx = okx;
+      if (!navFree(kx, kz)) kz = okz;
+      if (!navFree(kx, kz)) { kx = okx; kz = okz; }
+    } else if (ar.bounds) {
       kx = Math.max(ar.bounds.minX + 0.5, Math.min(ar.bounds.maxX - 0.5, kx));
       kz = Math.max(ar.bounds.minZ + 0.5, Math.min(ar.bounds.maxZ - 0.5, kz));
     } else {
@@ -1427,8 +1775,8 @@ CHLOE.engine = CHLOE.engine || {};
       atk.lunge = Math.max(0, atk.lunge - dt * 3);
     }
 
-    knight.group.position.x = kx;
-    knight.group.position.z = kz;
+    k.group.position.x = kx;
+    k.group.position.z = kz;
 
     // ---- swing + glow driven by the telegraph state ----
     if (atk.mode === 'telegraph' && atk.pattern) {
@@ -1438,19 +1786,24 @@ CHLOE.engine = CHLOE.engine || {};
         st.swingKind = (atk.pattern.evade === 'crouch') ? 'sweep' : 'overhead';
         st.swing = 1; st.swingDur = ((atk.pattern.telegraphMs || 1500) / 1000) * 1.25;
       }
-      if (knight.light) knight.light.intensity = (0.9 + p * 2.6) * LIGHT_SCALE;
+      if (k.light) k.light.intensity = (0.9 + p * 2.6) * LIGHT_SCALE;
     } else if (atk.mode === 'strike') {
-      if (knight.light) knight.light.intensity = 3.2 * LIGHT_SCALE;
+      if (k.light) k.light.intensity = 3.2 * LIGHT_SCALE;
     } else {
       st.wound = false;
-      if (knight.light) {
-        knight.light.intensity = (0.55 + Math.sin(elapsed * 5.3) * 0.1) * LIGHT_SCALE;
+      if (k.light) {
+        k.light.intensity = (0.55 + Math.sin(elapsed * 5.3) * 0.1) * LIGHT_SCALE;
       }
     }
 
-    poseKnight(dt);
+    poseKnight(k, dt);
     var breathe = Math.sin(elapsed * 1.1) * 0.012;
-    knight.group.position.y = (knight.bob || 0) + breathe;
+    k.group.position.y = (k.bob || 0) + breathe;
+  }
+
+  /* Drive every knight on the floor. */
+  function updateKnight(dt) {
+    for (var i = 0; i < knights.length; i++) updateOneKnight(knights[i], dt);
   }
 
   function updateFx(dt) {
@@ -1512,18 +1865,18 @@ CHLOE.engine = CHLOE.engine || {};
 
   A.debug = function () {
     if (!inited) return deadDebug();
-    var kx = knight.group ? knight.group.position.x : 0;
-    var kz = knight.group ? knight.group.position.z : 0;
-    var dx = pos.x - kx, dz = pos.z - kz;
+    var nd = A.nearestKnightDist();
     return {
       x: pos.x, z: pos.z, yaw: yaw, pitch: pitch,
       crouch: isCrouching(), eye: eyeH,
-      knightDist: Math.sqrt(dx * dx + dz * dz),
-      mode: atk.mode,
+      knightDist: isFinite(nd) ? nd : 0,
+      mode: knight.atk.mode,
       knightAlive: knight.alive,
       churchLoaded: churchLoaded, knightLoaded: knightLoaded,
       envMap: envMapOk,
       knightRig: knight.rigInfo || null,
+      squad: knights.length,
+      squadAlive: knights.filter(function (k) { return k.alive; }).length,
       knightState: knight.anim ? knight.anim.state : null,
       knightDashCd: knight.anim ? +knight.anim.dashCd.toFixed(2) : null,
       knightPos: knight.group ? [+knight.group.position.x.toFixed(2), +knight.group.position.z.toFixed(2)] : null,
@@ -1550,6 +1903,126 @@ CHLOE.engine = CHLOE.engine || {};
   };
   /* Geometry probe: world bounds of the loaded church and what is directly
      under/ahead of the camera. Used to verify placement without eyeballing. */
+  /* Walk-probe: raycast the real church interior so `arena.bounds` can be
+     checked against geometry instead of guessed. Returns, per z-slice, the
+     nearest wall east/west and whether there is floor under that point. */
+  A._wallScan = function (step) {
+    if (!inited) return null;
+    step = step || 1.0;
+    var rc = new THREE.Raycaster();
+    var solids = [];
+    scene.traverse(function (o) { if (o.isMesh && o.userData && o.userData.isChurch) solids.push(o); });
+    function cast(x, z, dx, dz) {
+      rc.set(new THREE.Vector3(x, 1.1, z), new THREE.Vector3(dx, 0, dz).normalize());
+      rc.far = 40;
+      var h = rc.intersectObjects(solids, true);
+      return h.length ? +h[0].distance.toFixed(2) : null;
+    }
+    function floorAt(x, z) {
+      rc.set(new THREE.Vector3(x, 3.0, z), new THREE.Vector3(0, -1, 0));
+      rc.far = 12;
+      var h = rc.intersectObjects(solids, true);
+      return h.length ? +(3.0 - h[0].distance).toFixed(2) : null;
+    }
+    /* Grid probe over the declared bounds: a cell is walkable when there is
+       floor at ~y0 under it and nothing solid at chest height. */
+    function probe(x, z) {
+      rc.set(new THREE.Vector3(x, 3.0, z), new THREE.Vector3(0, -1, 0));
+      rc.far = 12;
+      var down = rc.intersectObjects(solids, true);
+      var fy = down.length ? +(3.0 - down[0].distance).toFixed(2) : null;
+      var fname = down.length ? (down[0].object.name || '?') : null;
+      rc.set(new THREE.Vector3(x, 1.15, z), new THREE.Vector3(0, 1, 0));
+      rc.far = 0.6;
+      var up = rc.intersectObjects(solids, true);
+      return { fy: fy, fname: fname, headroom: up.length ? +up[0].distance.toFixed(2) : null };
+    }
+    var b = (CHLOE.data.arena3d.arena && CHLOE.data.arena3d.arena.bounds) || {};
+    var out = [], bad = [], good = 0;
+    for (var z = b.minZ; z <= b.maxZ; z += step) {
+      for (var x = b.minX; x <= b.maxX; x += step) {
+        var pr = probe(x, z);
+        var walk = pr.fy !== null && Math.abs(pr.fy) < 0.45 && pr.headroom === null;
+        if (walk) good++;
+        else bad.push(x.toFixed(1) + ',' + z.toFixed(1) + ' fy=' + pr.fy +
+                      ' hit=' + pr.fname + (pr.headroom !== null ? ' HEAD' : ''));
+      }
+    }
+    return { bounds: b, walkable: good, blocked: bad.length, blockedSample: bad.slice(0, 40) };
+  };
+
+  /* Grid is shipped as a packed bitfield so the 2.4k cells cost ~400 bytes.
+     Keyed to the church placement: if the model moves, the key stops matching
+     and we refuse the stale grid rather than block open floor. */
+  function navKey() {
+    var pl = D().church || {};
+    return [D().assetVersion || 0, pl.x || 0, pl.y || 0, pl.z || 0,
+            pl.rotY != null ? +pl.rotY.toFixed(4) : +(Math.PI / 2).toFixed(4)].join('|');
+  }
+
+  function loadShippedNav() {
+    var d = CHLOE.data.arenaNav;
+    if (!d || !d.b64) return null;
+    if (d.key !== navKey()) {
+      console.warn('[arena3d] baked navgrid key mismatch (' + d.key + ' vs ' + navKey() + ')');
+      return null;
+    }
+    var bin = atob(d.b64), n = d.nx * d.nz, out = new Uint8Array(n);
+    for (var i = 0; i < n; i++) {
+      out[i] = (bin.charCodeAt(i >> 3) >> (i & 7)) & 1;
+    }
+    return { cell: d.cell, minX: d.minX, minZ: d.minZ, nx: d.nx, nz: d.nz, data: out };
+  }
+
+  /* Dev tool. Freezes the tab for ~a minute, then prints the contents of
+     game/js/data/arena-nav.js. */
+  A._bakeExport = function (cell, pad, tol) {
+    var g = buildNavGrid(cell || 0.4, pad == null ? 5.0 : pad, tol);
+    if (!g) return null;
+    var bytes = new Uint8Array(Math.ceil(g.data.length / 8));
+    for (var i = 0; i < g.data.length; i++) {
+      if (g.data[i]) bytes[i >> 3] |= (1 << (i & 7));
+    }
+    var bin = '';
+    for (var b = 0; b < bytes.length; b++) bin += String.fromCharCode(bytes[b]);
+    var open = 0;
+    for (var q = 0; q < g.data.length; q++) open += g.data[q];
+    return { key: navKey(), cell: g.cell, minX: +g.minX.toFixed(3), minZ: +g.minZ.toFixed(3),
+             nx: g.nx, nz: g.nz, walkable: open, b64: btoa(bin) };
+  };
+
+  /* What is at this cell, and why the bake accepted or rejected it. */
+
+
+  A._probeAt = function (x, z) {
+    var solids = [];
+    scene.traverse(function (o) { if (o.isMesh && o.userData && o.userData.isChurch) solids.push(o); });
+    var rc = new THREE.Raycaster();
+    function describe(h) {
+      var m = h.object.material;
+      if (Array.isArray(m)) m = m[0];
+      return { name: h.object.name || '?', dist: +h.distance.toFixed(2),
+               visible: h.object.visible, transparent: !!(m && m.transparent),
+               opacity: m ? m.opacity : null, side: m ? m.side : null,
+               matName: m ? (m.name || '?') : null };
+    }
+    rc.set(new THREE.Vector3(x, 2.6, z), new THREE.Vector3(0, -1, 0)); rc.far = 6;
+    var down = rc.intersectObjects(solids, true).slice(0, 4).map(describe);
+    var fy = down.length ? +(2.6 - down[0].dist).toFixed(2) : null;
+    rc.set(new THREE.Vector3(x, (fy || 0) + 0.15, z), new THREE.Vector3(0, 1, 0)); rc.far = 1.7;
+    var up = rc.intersectObjects(solids, true).slice(0, 4).map(describe);
+    return { x: x, z: z, floorY: fy, down: down, up: up, navFree: navFree(x, z) };
+  };
+
+  A._nav = function () {
+    if (!nav) return null;
+    var open = 0;
+    for (var q = 0; q < nav.data.length; q++) open += nav.data[q];
+    return { cell: nav.cell, nx: nav.nx, nz: nav.nz, minX: nav.minX, minZ: nav.minZ,
+             walkable: open, total: nav.data.length,
+             free: function (x, z) { return navFree(x, z); } };
+  };
+
   A._diag = function () {
     if (!inited) return null;
     var out = { eye: eyeH, pos: { x: pos.x, z: pos.z }, meshes: 0 };

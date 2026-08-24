@@ -236,14 +236,23 @@ CHLOE.ui.battle3d = (function () {
 
   /* ---------- enemy AI loop ---------- */
   function scheduleSwing(now) {
-    // the knight paces its attacks; distance gates whether it commits
-    nextSwingAt = now + 1600 + Math.random() * 1400;
+    /* §20: with a squad, swings are staggered — more knights means a faster
+       drumbeat, but never all of them winding up on the same frame. */
+    var alive = Math.max(1, C3.aliveCount ? C3.aliveCount() : 1);
+    var base = 1700 + Math.random() * 1300;
+    nextSwingAt = now + Math.max(650, base / Math.sqrt(alive));
   }
 
   function enemySwing() {
     if (!active || C3.isOver()) return;
     var pattern = pickPattern();
     if (!pattern) return;
+    // pick a living knight to make the attack
+    var snap = C3.snapshot();
+    var living = [];
+    snap.enemy.each.forEach(function (e, i) { if (e.alive) living.push(i); });
+    if (!living.length) return;
+    var who = living[Math.floor(Math.random() * living.length)];
     prompt(pattern.name + ' — ' + pattern.hint, 'telegraph');
     a3d.telegraph(pattern, function (res) {
       if (!active || C3.isOver()) { hidePrompt(); return; }
@@ -266,7 +275,7 @@ CHLOE.ui.battle3d = (function () {
       }
       refresh();
       if (C3.isOver()) { finish(); return; }
-    });
+    }, who);
   }
 
   function pickPattern() {
@@ -302,12 +311,20 @@ CHLOE.ui.battle3d = (function () {
         if (ab && a3d.abilityHitsBench && a3d.abilityHitsBench(ab)) {
           splash('CRASH', 'miss');
         }
-        if (ab && a3d.abilityHits(ab)) {
-          var res = C3.hitEnemy(e.abilityId, 1);
-          if (res) {
-            a3d.flinch(res.dmg, res.killed);
-            splash('-' + res.dmg + (res.mult >= 2 ? ' SUPER' : ''), res.mult >= 2 ? 'super' : 'dmg');
-          }
+        var targets = (ab && a3d.abilityTargets) ? a3d.abilityTargets(ab) : [];
+        if (targets.length) {
+          var shown = 0;
+          targets.forEach(function (ti) {
+            var res = C3.hitEnemy(e.abilityId, 1, ti);
+            if (!res) return;
+            a3d.flinch(res.dmg, res.killed, ti);
+            if (!shown++) {
+              splash('-' + res.dmg + (res.mult >= 2 ? ' SUPER' : '') +
+                     (targets.length > 1 ? ' x' + targets.length : ''),
+                     res.mult >= 2 ? 'super' : 'dmg');
+            }
+            if (res.killed) log('A Hollow Knight falls. ' + C3.aliveCount() + ' left.');
+          });
         } else {
           splash('miss', 'miss');
         }
@@ -330,20 +347,27 @@ CHLOE.ui.battle3d = (function () {
     ui = CHLOE.ui; party = CHLOE.engine.party;
     C3 = CHLOE.engine.combat3; a3d = CHLOE.engine.arena3d;
 
-    var s = C3.start(enemyId);
+    // §20: round N puts N knights on the floor
+    var round = (party.state.runStats && party.state.runStats.round) || 1;
+    var s = C3.start(enemyId, round);
     if (!s) { console.warn('[battle3d] cannot start ' + enemyId); return; }
     if (!built) build();
     active = true;
 
     ui.show('battle3d');
     if (!inited3d) { a3d.init(els.canvas); inited3d = true; }
-    a3d.reset(); a3d.resize(); a3d.start();
+    a3d.reset();
+    if (a3d.spawnSquad) a3d.spawnSquad(round);
+    a3d.resize(); a3d.start();
     a3d.stopAbility();
 
     buildHotbar(C3.snapshot());
     refresh();
     log('The doors seal. Keys 1-9 to strike, SPACE to evade.');
-    prompt(C3.snapshot().enemy.name.toUpperCase() + ' RISES', 'banner', 1800);
+    var snap0 = C3.snapshot();
+    prompt(round > 1
+      ? ('ROUND ' + round + ' — ' + snap0.enemy.count + ' HOLLOW KNIGHTS')
+      : (snap0.enemy.name.toUpperCase() + ' RISES'), 'banner', 2200);
 
     wireKeys();
     lastT = performance.now();

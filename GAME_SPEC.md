@@ -384,3 +384,33 @@ Arena bounds are now a **rectangle matching the church walls** (`arena.bounds`),
 
 ### Lighting note
 Anything new in the arena must clamp `envMapIntensity` (~0.1). The keys are bright enough that unclamped IBL renders dark oak, dark leather and skin as white plastic — this has now bitten the room hands, the first-person arms and the benches.
+
+## 20. The squad grows, the wall remembers, and the stone is real (extends §19)
+
+### Rounds and squad size
+A run is a ladder of **rounds**. `party.state.runStats.round` starts at 1 and goes up by one every time you clear a floor. **Round N spawns N Hollow Black Knights.** `combat3.start(enemyId, count)` builds `st.enemies[]` (one `{index, life, max, alive}` per knight); `arena3d.spawnSquad(n)` puts that many on the floor. Rewards scale with the squad: `xp * squad`, `shards * squad`, `runStats.kills += squad`.
+
+Each knight is fully independent — its own attack window (`k.atk`), animation state (`k.anim`), rig, **cloned materials** (so a flinch flashes only the one you hit) and dash cooldown (staggered `i * 1.2s`). There is no module-level attack state any more; a shared one made the whole squad telegraph in unison.
+
+`ui/battle3d.js` drives them: swing cadence tightens with squad size (`base / sqrt(aliveCount)`, floored at 650ms), each swing is performed by a randomly chosen living knight via `arena3d.telegraph(pattern, cb, index)`, and a player ability damages **every knight its arc catches** — `arena3d.abilityTargets(ability)` returns the indices, each resolved through `combat3.hitEnemy(id, mult, index)`.
+
+### The wall remembers
+Clearing a round pushes a trophy onto `runStats.trophies`: `{round, knights, by, hpLeft, hpMax}`. `engine/displays.js` `trophy(entry)` paints it (round number, one hollow-helm mark per knight felled, who landed the kill, life remaining) and `world3d.buildTrophies()` hangs it in a wooden frame on the dressing-room wall. Slots run the east wall, then the north wall right of the mirror, then the south wall; past that they tuck in below so a long run **crowds** the wall instead of silently dropping rounds. `world3d.refreshPanels()` rebuilds the gallery, and the room router calls that on every entry, so the new picture is up before you have finished walking in. It is run-scoped like everything else (§15) — dying clears the wall.
+
+### The arena is baked from the actual stone
+`arena.bounds` was a hand-guessed rectangle, and it was wrong in both directions: it cut off ~2.6m of walkable side aisle on each side **and** let you stroll straight through the rood screen, the altar and the columns.
+
+The arena now uses a **precomputed navgrid**, `data/arena-nav.js`: a 0.4m grid over the nave, one bit per cell, flood-filled from the player spawn so unreachable side chapels do not count. A cell is walkable only if there is floor within `FLOOR_TOL` (**0.28m** — deliberately tight, because the church is full of pews whose seats sit 0.45-0.85m up and a loose tolerance spawns you standing on the furniture) and a clear 1.7m head column. Player **and** knights resolve movement against it one axis at a time, which slides along stone instead of stopping dead; a knight that somehow starts off-mesh is snapped back on, or it could never move at all.
+
+**This is a data file, not a load-time computation.** three r128 has no BVH, so probing the grid against the church's 37 meshes costs ~50 seconds of frozen main thread. `key` pins the grid to the church placement (`assetVersion|x|y|z|rotY`); on mismatch the engine refuses the stale grid and warns rather than silently opening walls. **Re-bake after moving or replacing the church**: enter the arena, then run `JSON.stringify(CHLOE.engine.arena3d._bakeExport())` and paste the result into `data/arena-nav.js`.
+
+The bake also settled where the fight belongs. The nave centre is a solid rood screen, and both spawns were inside it — the arena is really a **ring** around that block. The fight now happens in the open south band (~16m wide, fully walkable end to end): player at `(-6.0, 5.4)` facing +X, knights across the band at `(4.0, 5.4)`, fanned **perpendicular to the approach** so the line stays abreast whichever way the spawns face.
+
+### Level 2 gives you the spell and the key for it
+Skill-tree row 2 grants `ability: 'fire_tornado'` **and** `slot: 1`, so from level 2 you can hold punch and Fire Tornado at the same time. Later keybind rows shifted accordingly (4 -> key 3, 7 -> key 4, 10 -> key 5).
+
+### Lighting note (amended)
+Clamping `envMapIntensity` at material-creation time is not enough. `applyEnvIntensity()` runs when the HDRI resolves and used to overwrite every material in the scene, flattening dark oak and leather back to white plastic. A material that wants damping must set **`userData.envClamp`**, which `applyEnvIntensity` now respects.
+
+### Test hooks added
+`arena3d._nav()` (grid summary + `free(x,z)`), `arena3d._probeAt(x,z)` (what is under and over a cell, with mesh and material names — French names in this model: `banc` pew, `autel` altar, `mur-haut` high wall, `sol` floor), `arena3d._bakeExport(cell, pad, tol)`, and `world3d._teleport(x, z)`.

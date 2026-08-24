@@ -24,7 +24,7 @@ CHLOE.engine.party = (function(){
     loadouts: {},  // charId -> { phaseId: [<=5 moveIds] }  (Combat v2)
     skillPoints: {}, // charId -> unspent skill points        (Progression v3)
     tree: {},        // charId -> [owned nodeIds]             (Progression v3)
-    runStats: { kills: 0 } // this run only — shown on the death panel (§15)
+    runStats: { kills: 0, round: 1, trophies: [] } // this run only — shown on the death panel (§15)
   };
 
   // scene.js assigns `party.state.scene = id` directly — intercept it so Ash
@@ -77,7 +77,7 @@ CHLOE.engine.party = (function(){
     state.loadouts = {};
     state.skillPoints = {};
     state.tree = {};
-    state.runStats = { kills: 0 };
+    state.runStats = { kills: 0, round: 1, trophies: [] };
     // §11: new game starts solo Chloe; Ash joins once the Room is cleared.
     var m = makeMember('chloe');
     if (m) { state.members.push(m); ensureLoadout(m); ensureProgress(m); }
