@@ -21,7 +21,8 @@ CHLOE.ui.title = (function(){
 
     var start = ui.el('button', 'title-start', 'Press Start');
     start.addEventListener('click', function(){
-      CHLOE.ui.account.open();
+      // roguelike (spec sec 14): no accounts — straight into a fresh run
+      CHLOE.game.startNew();
     });
     inner.appendChild(start);
     root.appendChild(inner);

@@ -212,3 +212,53 @@ Save: scene field becomes 'room3d' (migration: any old scene value -> 'room3d' o
 
 ### Verification hooks
 world3d.debug() is mandatory (used by automated tests to assert movement/collision/turning). Keyboard fallback must be enough to reach and engage the enemy without pointer lock.
+
+## 14. Roguelike mode — no accounts, no saves (supersedes accounts/saves in sec 6, the account screen in sec 7, save v2 in sec 10, save v3/migration in sec 12, sec 13's account/PIN flow and its save/scene-migration line, and cloud sync everywhere)
+
+CHLOE is a roguelike: **one run per page load, permadeath on defeat.** Nothing is ever persisted — no localStorage, no PIN, no cloud.
+
+- **Flow**: title -> Press Start -> fresh run in the 3D room (sec 13). The account screen is GONE: `game/js/ui/account.js` and `game/js/engine/save.js` are deleted, `#screen-account` removed from `game/index.html`, account/PIN CSS removed. `worker/` is dead infrastructure (never deployed; kept in the repo for reference only).
+- **A run** = `party.newGame()`: solo level-1 Chloe, default loadouts, empty tree, 0 skill points, 0 shards, starter items, fresh flags. All progression (XP, levels, tree, loadouts, shards, inventory, Ash joining) lives in memory only and dies with the run. Closing or reloading the page kills the run — intended.
+- **Ash joins in-run**: the first room-battle victory sets the `roomCleared` flag from `room3d.onBattleEnd` (the 3D equivalent of §11's mirror fight), which fires `party.ensureAsh` — Ash joins with a toast and battle Switch unlocks. Flags reset with the run, so she is re-earned every night.
+- **Death** (all members down): the defeat panel becomes a **run summary** — highest member level, shards ◆ held, fights won — with one button, **Begin again**, which starts a fresh run and re-enters the room (world3d: `setEnemyAlive(true)` + new export `resetPlayer()` puts the player back at spawn). The legacy 2D defeat path (scene.js, unrouted) also restarts the run. The old shard-loss respawn is gone (`defeatShardLossPct` removed from config).
+- **Run stats**: `party.state.runStats = { kills }` — reset by `newGame()`, incremented in `battle.victory()`, read by the defeat panel. Extend here for future summary lines (rooms cleared, damage dealt...).
+- **Removed API surface** (do not reintroduce): `CHLOE.engine.save.*` (whole module), `party.applyBlob`, `party.respawn`, `party.loseShardsPct`, `tree.sanitizeState`, `CHLOE.game.continueFrom`, all `autosave()` call sites. `config.js` lost `apiUrl` + `defeatShardLossPct`; `version` bumped to 2; `levelCap` now states the real v3 cap (100).
+- **Menu**: Save tab removed (Party / Inventory / Moves / Skill Tree / How to play). How-to-play explains the roguelike rule in plain words.
+- **Balance intent**: shards/tree/respec now price against a single run's economy; future content (P6 shop) must assume run-scoped wallets, not banked savings.
+
+## 15. Arena battles — the church, the Hollow Black Knight, hands & crouch (supersedes the routed battle presentation of sec 10; the 2D battle screen stays for the unrouted legacy flow)
+
+Battles now happen IN 3D: engaging the room's enemy pulls the run into an **old church** (real Sketchfab asset) where the **Hollow Black Knight** (real asset, static model driven procedurally like a haunted statue) waits before the altar. Turn-based attack selection + REAL-TIME dodging.
+
+### Assets (game/assets/3d/, built by tools — never hand-edit)
+- `church.glb` (~13MB, Draco-compressed, textures embedded ≤1024 JPEG) from `old-church-modeling-interior-scene.zip` (source .blend; textures must sit NEXT to the .blend when converting). Blender-measured placement: nave floor z=-34.04, walkable strip ±5, altar toward +X, center aisle |y|<1.2, pews from x≤-9 — mapped into world space by `data/arena3d.js` `church:{rotY:π/2, x:0, y:34.04, z:-7.5}` so the crossing sits on the origin.
+- `knight.glb` (~6.6MB) from `dark-knight.zip` (`Knight_All.fbx`, NO animations/armature — procedural animation is intended). Diffuse-only 1024 textures; bbox-normalized to `knight.targetHeight` at load; materials darkened (color ×0.38 + faint red emissive) for the hollow look.
+- Vendored loaders (classic scripts, load order: three.min.js → GLTFLoader.js → DRACOLoader.js): draco decoders in `vendor/draco/`. Loading MUST degrade gracefully (file://, missing files): fallback nave (floor disc + columns) and fallback knight (black totem) keep every fight playable.
+- The two source .zip files stay in the repo root but are gitignored (165MB + 120MB).
+
+### The round (engine/arena.js owns rules; arena3d.js answers ONLY "did the strike land?"; battle3d.js renders)
+1. **Choose**: every living member picks ONE attack (learnset+tree attack-cat moves + free Struggle; costs sta/mp/faith per §12, ▲/▼ effectiveness shown) — or an item (their pick), or Give Up (70% flee, sealed vs bosses; failure = free enemy swing).
+2. **Resolve**: choices fire in pick order (body first), v1 damage formula × 11-type chart vs the enemy def. Knight flinches/flashes per hit.
+3. **Enemy turn**: arena.pickPattern() (weighted, no long repeats) → HUD prompt (`name — hint`) → arena3d.telegraph(): windup (~1.5-1.9s, knight glows red, aim LOCKED at windup start) → strike → hit test vs player position+crouch:
+   - `slash` (reach 3.4m arc): evade by **Ctrl-crouch** or leaving reach.
+   - `overhead` (1.7×4.4m lane): **sidestep** the locked lane.
+   - `charge` (1.9×7.5m lunge lane): sidestep; knight physically lunges.
+   Hit → pattern.power% × knight atk vs the **body** (= active member; type chart + tree resists apply). Full dodge → zero. Body KO → next living member becomes the body; all down → §14 defeat (run summary → fresh run).
+4. **Round tick**: stamina +20% max, faith +1 (per §12); back to Choose.
+- §12 statuses/buildup do NOT run in arena battles (v1 — revisit with P6).
+- Victory awards exactly like battle.js (prog.enemyXp, grantXp/levelUps/learned, shards, drops, runStats.kills) and returns to the room; the §14 Ash hook (roomCleared) still fires in room3d.onBattleEnd.
+
+### First-person hands & interaction (engine/world3d.js — the dressing room)
+- **Ctrl (or C) = crouch** everywhere in first person: eye 1.6→0.85 lerp, speed ×0.55, half bob. (Browser reserves some Ctrl combos — C is the fallback.)
+- **Left click closes the LEFT hand, right click the RIGHT** (simple blocky first-person hands, camera-attached; fingers curl on mousedown, reopen on mouseup). Context menu suppressed on the canvas.
+- **Pickups**: `data/room3d.js` `pickups:[{itemId,label,x,y,z}]` render as small glinting items. Crosshair on one within 2.2m → HUD hint "take the X"; click → that hand reaches out, the item flies into it mid-motion → inventory.add + toast. One grab at a time; taken items respawn only with a new run (world3d.resetPlayer). Enemy engage wins the left-click when both are under the crosshair.
+- room3d enemy config: `enemy:{id:'hollow_black_knight'}` — the ghost billboard in the room is the lure; the knight is what answers.
+
+### Contracts
+- `CHLOE.engine.arena`: start/get/isOver/attackOptions/playerAttack/useItem/pickPattern/enemyStrike/startRound/flee (pure rules, no DOM).
+- `CHLOE.engine.arena3d`: init/start/stop/resize/reset/telegraph(pattern,cb)/flinch/setKnightAlive/debug + test hooks `_teleport(x,z)`, `_setCrouch(b)` (strike timing is setTimeout-based so automated tests work without rAF).
+- `CHLOE.ui.battle3d.begin(enemyId)`; every end funnels through `CHLOE.ui.scene.onBattleEnd(result)` exactly like battleui, so room3d's wrapper owns the roguelike outcomes.
+- world3d additions: `onPickup(cb)`, `resetPlayer()` also respawns pickups; debug() gains crouch/eye/pickupHover/pickupsLeft/hands.
+
+### Balance targets
+A first-run solo Chloe beats the knight in 4-5 rounds IF she dodges most swings; face-tanking every pattern loses. slash is the common swing (weight 3), charge the rare heavy (weight 1, 170% power). The chart makes occult take 2x physical, so the knight carries `resists:{physical:1.0}` — the plate blunts that back to NEUTRAL (a chart override, not a reduction). Fire stays chart-halved; divine (Voice tree) burns it 2x later. Tree resist nodes are PERCENT cuts applied after the chart (arena.js mirrors battle.js), never chart multipliers.

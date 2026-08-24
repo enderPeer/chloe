@@ -3,7 +3,7 @@
    phase. Tap a move to equip/unequip, live x/5 count, cap enforced, invalid
    picks disabled. Reachable from the menu overlay (embedded as a tab) and from
    the battle screen "Moves" button (read-only overlay).
-   Loadouts live in the engine/save (loadouts:{charId:{phaseId:[<=5 ids]}}).
+   Loadouts live in party.state (loadouts:{charId:{phaseId:[<=5 ids]}}).
    This module prefers engine getLoadout/setLoadout accessors and falls back to
    party state + character defaultLoadouts, so it never computes battle rules. */
 window.CHLOE = window.CHLOE || {};
@@ -131,7 +131,7 @@ CHLOE.ui.loadout = (function(){
     if (fn) {
       try {
         var r = fn(charId, phaseId, ids);
-        if (r !== false) { autosave(); return true; }
+        if (r !== false) return true;
       } catch (e) {}
     }
     var p = party();
@@ -140,13 +140,7 @@ CHLOE.ui.loadout = (function(){
     st.loadouts = st.loadouts || {};
     st.loadouts[charId] = st.loadouts[charId] || {};
     st.loadouts[charId][phaseId] = ids;
-    autosave();
     return true;
-  }
-
-  function autosave(){
-    var save = CHLOE.engine.save;
-    if (save && save.getCurrent && save.getCurrent()) save.autosave();
   }
 
   /* Learned move ids for a character: learnset union + tree-granted moves
@@ -335,7 +329,7 @@ CHLOE.ui.loadout = (function(){
     var shown = 0;
     learned.forEach(function(id){
       var def = moves()[id];
-      if (!def) return; // unknown id (data not loaded / stale save) — skip quietly
+      if (!def) return; // unknown id (data not loaded) — skip quietly
       shown++;
       var usable = Array.isArray(def.usableIn) && def.usableIn.indexOf(selPhase) !== -1;
       var equipped = list.indexOf(id) !== -1;

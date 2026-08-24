@@ -1,10 +1,12 @@
 /* CHLOE — engine/party.js
    Runtime party state: members, active member, shards, story flags, current
    scene, per-character move loadouts (Combat v2, spec §10.3).
+   Roguelike (spec §14): this state IS the run — nothing is persisted, and
+   newGame() is the only way it gets (re)built.
    §11: a new game starts SOLO Chloe. Ash joins when the 'roomCleared' flag is
    set (hooked in setFlag — the battle-end path sets that flag) and, defensively,
    when the party enters scene 'stage' with the flag set (scene assignment is
-   intercepted via a property setter) or when a cleared save loads without her. */
+   intercepted via a property setter). */
 window.CHLOE = window.CHLOE || {};
 CHLOE.engine = CHLOE.engine || {};
 
@@ -12,17 +14,17 @@ CHLOE.engine.party = (function(){
   'use strict';
 
   var _scene = null;
-  var _loading = false; // suppress join toasts while applying a save blob
 
   var state = {
     members: [],   // [{id, level, xp, hp, mp, stamina, faith, weaponId}]  (v3
-                   //  pools: hp=life, mp=magic; saved as 'sta' in the blob)
+                   //  pools: hp=life, mp=magic)
     activeId: null,
     shards: 0,
     flags: {},
     loadouts: {},  // charId -> { phaseId: [<=5 moveIds] }  (Combat v2)
     skillPoints: {}, // charId -> unspent skill points        (Progression v3)
-    tree: {}         // charId -> [owned nodeIds]             (Progression v3)
+    tree: {},        // charId -> [owned nodeIds]             (Progression v3)
+    runStats: { kills: 0 } // this run only — shown on the death panel (§14)
   };
 
   // scene.js assigns `party.state.scene = id` directly — intercept it so Ash
@@ -33,7 +35,7 @@ CHLOE.engine.party = (function(){
       get: function(){ return _scene; },
       set: function(v){
         _scene = v;
-        if (v === 'stage') ensureAsh(_loading);
+        if (v === 'stage') ensureAsh(false);
       }
     });
   } catch(e){ state.scene = null; }
@@ -75,6 +77,7 @@ CHLOE.engine.party = (function(){
     state.loadouts = {};
     state.skillPoints = {};
     state.tree = {};
+    state.runStats = { kills: 0 };
     // §11: new game starts solo Chloe; Ash joins once the Room is cleared.
     var m = makeMember('chloe');
     if (m) { state.members.push(m); ensureLoadout(m); ensureProgress(m); }
@@ -143,7 +146,7 @@ CHLOE.engine.party = (function(){
     return (CHLOE.data.weapons || {})[member.weaponId] || null;
   }
   /* Effective combat stats — delegates to CHLOE.engine.tree.effectiveStats
-     (spec §12: base + growth + weapon + tree; battle, sheet and save all
+     (spec §12: base + growth + weapon + tree; battle and sheet
      consume this, never raw base). NOTE: atk INCLUDES weaponAtk now;
      weaponAtk stays as a separate field for display breakdowns only. */
   function effStats(member){
@@ -184,7 +187,7 @@ CHLOE.engine.party = (function(){
 
   /* Replace one phase's equipped list. ids: array of <=5 move ids; unknown,
      unlearned, failsafe, wrong-phase or duplicate ids are dropped (reported in
-     `rejected`). Returns {ok, loadout?, rejected?, error?}. Autosaves. */
+     `rejected`). Returns {ok, loadout?, rejected?, error?}. */
   function setLoadout(charId, phase, ids){
     var m = get(charId);
     if (!m) return { ok: false, error: 'No such party member.' };
@@ -207,10 +210,6 @@ CHLOE.engine.party = (function(){
 
     ensureLoadout(m);
     state.loadouts[charId][phase] = clean;
-    try {
-      var sv = CHLOE.engine.save;
-      if (sv && sv.getCurrent && sv.getCurrent()) sv.autosave();
-    } catch(e){}
     return { ok: true, loadout: getLoadout(charId), rejected: rejected };
   }
 
@@ -242,11 +241,6 @@ CHLOE.engine.party = (function(){
   function addShards(n){
     state.shards = Math.max(0, Math.round(state.shards + (n || 0)));
   }
-  function loseShardsPct(pct){
-    var lost = Math.floor(state.shards * (pct / 100));
-    state.shards -= lost;
-    return lost;
-  }
 
   function setFlag(name, val){
     if (!name) return;
@@ -256,101 +250,6 @@ CHLOE.engine.party = (function(){
     if (name === 'roomCleared' && state.flags[name]) ensureAsh(false);
   }
   function getFlag(name){ return !!state.flags[name]; }
-
-  // Defeat: respawn at start scene with full HP, lose 30% shards.
-  function respawn(){
-    var pct = (CHLOE.data.config && CHLOE.data.config.defeatShardLossPct) || 30;
-    var lost = loseShardsPct(pct);
-    fullHeal();
-    if (!active() || active().hp <= 0) {
-      state.activeId = state.members.length ? state.members[0].id : null;
-    }
-    var story = CHLOE.data.story;
-    if (story && story.startScene) state.scene = story.startScene;
-    return lost;
-  }
-
-  /* ---------- save blob <-> state ---------- */
-  function applyBlob(blob){
-    if (!blob) return false;
-    _loading = true;
-    try {
-      state.members = [];
-      var arr = blob.party || [];
-      for (var i = 0; i < arr.length; i++) {
-        var p = arr[i];
-        if (!charDef(p.id)) { console.warn('[CHLOE] save references unknown character: ' + p.id); continue; }
-        state.members.push({
-          id: p.id,
-          level: Math.max(1, p.level || 1),
-          xp: Math.max(0, p.xp || 0),
-          hp: Math.max(0, p.hp || 0),
-          mp: Math.max(0, p.mp || 0),
-          // blob field is 'sta' (v3 snapshot); runtime field is 'stamina'
-          stamina: (typeof p.sta === 'number') ? Math.max(0, p.sta)
-                 : ((typeof p.stamina === 'number') ? Math.max(0, p.stamina) : null), // null -> fill below
-          faith: (typeof p.faith === 'number') ? Math.max(0, p.faith) : null,
-          weaponId: p.weaponId || (charDef(p.id).weaponId || null)
-        });
-      }
-      if (!state.members.length) { newGame(); return false; }
-
-      /* Skill tree state FIRST (v3) — tree moves must count as learned before
-         loadouts are validated. v1/v2 migration: save.migrate seeded
-         skillPoints = level-1 per member and an empty tree; here node ids are
-         validated per character (unknown ids dropped, points refunded). */
-      state.skillPoints = {};
-      state.tree = {};
-      var rawPts = (blob.skillPoints && typeof blob.skillPoints === 'object') ? blob.skillPoints : {};
-      var rawTree = (blob.tree && typeof blob.tree === 'object') ? blob.tree : {};
-      var treeEng = CHLOE.engine.tree;
-      for (var t = 0; t < state.members.length; t++) {
-        var tm = state.members[t];
-        if (treeEng && typeof treeEng.sanitizeState === 'function') {
-          var clean = treeEng.sanitizeState(tm.id, tm.level, rawTree[tm.id], rawPts[tm.id]);
-          state.tree[tm.id] = clean.owned;
-          state.skillPoints[tm.id] = clean.points;
-        } else {
-          state.tree[tm.id] = Array.isArray(rawTree[tm.id]) ? rawTree[tm.id].slice() : [];
-          state.skillPoints[tm.id] = Math.max(0, Math.floor(rawPts[tm.id] || 0));
-        }
-      }
-
-      // v1/v2 members carried no sta/faith — fill from (tree-aware) maxima,
-      // then clamp everything to the current caps.
-      for (var r = 0; r < state.members.length; r++) {
-        var rm = state.members[r], mx = maxStats(rm);
-        if (rm.stamina === null || rm.stamina === undefined) rm.stamina = mx.sta || 0;
-        if (rm.faith === null || rm.faith === undefined) rm.faith = mx.faith || 0;
-        if (rm.stamina > (mx.sta || 0)) rm.stamina = mx.sta || 0;
-        if (rm.faith > (mx.faith || 0)) rm.faith = mx.faith || 0;
-      }
-
-      // Loadouts: silently validate/rebuild per character (save v2 migration —
-      // v1 blobs arrive with loadouts:{} and get pure defaults + learned level).
-      state.loadouts = {};
-      var rawLo = (blob.loadouts && typeof blob.loadouts === 'object') ? blob.loadouts : {};
-      for (var j = 0; j < state.members.length; j++) {
-        var m = state.members[j];
-        state.loadouts[m.id] = prog().sanitizeLoadouts(m.id, m.level, rawLo[m.id]);
-      }
-
-      state.activeId = blob.activeId && get(blob.activeId) ? blob.activeId : state.members[0].id;
-      if (!active() || active().hp <= 0) {
-        var alive = aliveMembers();
-        state.activeId = alive.length ? alive[0].id : state.members[0].id;
-      }
-      state.shards = Math.max(0, blob.shards || 0);
-      state.flags = blob.flags || {};
-      state.scene = blob.scene || ((CHLOE.data.story && CHLOE.data.story.startScene) || null);
-      if (CHLOE.engine.inventory) CHLOE.engine.inventory.load(blob.inventory || {});
-      // Defensive §11: a solo save with the Room already cleared gets Ash back.
-      ensureAsh(true);
-      return true;
-    } finally {
-      _loading = false;
-    }
-  }
 
   return {
     state: state,
@@ -372,10 +271,7 @@ CHLOE.engine.party = (function(){
     allDown: allDown,
     fullHeal: fullHeal,
     addShards: addShards,
-    loseShardsPct: loseShardsPct,
     setFlag: setFlag,
-    getFlag: getFlag,
-    respawn: respawn,
-    applyBlob: applyBlob
+    getFlag: getFlag
   };
 })();

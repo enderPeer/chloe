@@ -1,5 +1,5 @@
 /* CHLOE — ui/menu.js
-   Menu overlay: Party / Inventory / Moves (loadout editor) / Save / How to play. */
+   Menu overlay: Party / Inventory / Moves (loadout editor) / Skill Tree / How to play. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -31,7 +31,7 @@ CHLOE.ui.menu = (function(){
     var card = ui.el('div', 'menu-card');
 
     var tabs = ui.el('div', 'menu-tabs');
-    [['party','Party'], ['inventory','Inventory'], ['moves','Moves'], ['tree','Skill Tree'], ['save','Save'], ['help','How to play'], ['close','✕']]
+    [['party','Party'], ['inventory','Inventory'], ['moves','Moves'], ['tree','Skill Tree'], ['help','How to play'], ['close','✕']]
       .forEach(function(t){
         var b = ui.el('button', tab === t[0] ? 'on' : '', t[1]);
         b.addEventListener('click', function(){
@@ -54,7 +54,6 @@ CHLOE.ui.menu = (function(){
     if (tab === 'party') renderPartyOrSheet(body);
     else if (tab === 'inventory') renderInventory(body);
     else if (tab === 'moves') renderMoves(body);
-    else if (tab === 'save') renderSave(body);
     else renderHelp(body);
     card.appendChild(body);
 
@@ -200,7 +199,6 @@ CHLOE.ui.menu = (function(){
             var res = inv.use(def.id, m);
             ui.toast(res.text);
             pickingItem = null;
-            if (res.ok) CHLOE.engine.save.autosave();
             render();
           });
           picker.appendChild(b);
@@ -219,44 +217,6 @@ CHLOE.ui.menu = (function(){
     }
   }
 
-  /* ---------- Save ---------- */
-  function renderSave(body){
-    var save = CHLOE.engine.save;
-    var acc = save.getCurrent();
-    var note = ui.el('div', 'menu-note');
-    if (acc) {
-      var blob = save.readLocal(acc.name);
-      note.textContent = 'Signed in as ' + acc.name + '. ' +
-        (blob ? 'Last save: ' + new Date(blob.savedAt).toLocaleString() : 'No save yet.');
-    } else {
-      note.textContent = 'Not signed in.';
-    }
-    body.appendChild(note);
-    body.appendChild(ui.el('div', 'menu-note',
-      'Autosaves on every scene change and after every battle.' +
-      ((CHLOE.data.config && CHLOE.data.config.apiUrl) ? ' Cloud sync: on.' : ' Cloud sync: off (local only).')));
-
-    var row = ui.el('div', 'account-actions');
-    var saveBtn = ui.el('button', null, 'Save now');
-    saveBtn.disabled = !acc;
-    saveBtn.addEventListener('click', function(){
-      var b = save.saveNow();
-      ui.toast(b ? 'Saved.' : 'Could not save.');
-      render();
-    });
-    row.appendChild(saveBtn);
-
-    var out = ui.el('button', null, 'Log out');
-    out.addEventListener('click', function(){
-      save.saveNow();
-      save.logout();
-      CHLOE.ui.menu.close(); // public export — see note in render()
-      CHLOE.ui.show('title');
-    });
-    row.appendChild(out);
-    body.appendChild(row);
-  }
-
   /* ---------- Help ---------- */
   function renderHelp(body){
     var h = ui.el('div', 'howto');
@@ -265,14 +225,14 @@ CHLOE.ui.menu = (function(){
       d.innerHTML = html; // static help copy only — no user input
       h.appendChild(d);
     };
-    add('<b>Explore.</b> Look for the small <span class="k">red glints</span> in each scene — anything that glints can be touched. Tap or hover to see what it is, click to move, talk, search, and fight what waits in the dark.');
-    add('<b>Phases.</b> In battle, you and the enemy are always in one of five phases: <span class="k">Neutral</span> (normal), <span class="k">Aggressive</span> (hit harder, get hit harder), <span class="k">Guarded</span> (take much less damage), <span class="k">Staggered</span> (weak and wobbly for a turn), and <span class="k">Charged</span> (your next attack hits 1.5x). The badge next to each HP bar shows the current phase.');
-    add('<b>The loop.</b> Stance moves shift your phase — step Aggressive to press, Guard when a big hit is coming, or Charge up and unload. Defense moves block certain attacks: a blocked attacker staggers, and staggered fighters hit soft and bruise easy. Hit an elemental weakness and THEY stagger while you surge Aggressive. Punish staggers, that\'s the whole dance.');
-    add('<b>Moves.</b> Each phase has its own set of up to <span class="k">5 equipped moves</span> — you only see the moves of the phase you\'re in. Missing an attack staggers you; <span class="k">Struggle</span> (free hit) is always there, and <span class="k">Recover</span> appears while staggered. Edit sets any time in <span class="k">Menu → Moves</span>.');
-    add('<b>Turns.</b> Order goes by <span class="k">SPD</span>. Moves cost MP; <span class="k">Items</span>, <span class="k">Switch</span> and fleeing each use your turn. You can\'t run from bosses.');
-    add('<b>Elements.</b> Ember &gt; Frost &gt; Volt &gt; Ember (2x with the arrow, 0.5x against it). Shadow and Light burn each other for 2x.');
-    add('<b>Falling.</b> If a bandmate drops, the other steps in. If everyone falls, you wake at the start and lose 30% of your <span class="k">◆ shards</span>.');
-    add('<b>Shards ◆.</b> Splinters of the club\'s broken mirror wall — the only currency the Between respects.');
+    add('<b>Explore.</b> You\'re in the room in first person: <span class="k">WASD</span> to move, mouse to look (click the room to lock the view, ESC to release), <span class="k">Ctrl or C</span> to crouch, <span class="k">Shift</span> to sprint. No mouse? Arrows move, <span class="k">Q/E</span> turn.');
+    add('<b>Your hands.</b> <span class="k">Left click</span> closes your left hand, <span class="k">right click</span> your right. See something glinting red? Look at it, click, and your hand reaches out and takes it in the motion. Walk up to what haunts the room — when the crosshair lights up, click to engage.');
+    add('<b>Battle.</b> The fight drags you into an <span class="k">old church</span>. It\'s turn-based: every bandmate picks one attack, they land, and then the <span class="k">Hollow Black Knight</span> takes its swing — at YOU, in the room, for real.');
+    add('<b>Evade.</b> When the knight winds up, the prompt tells you what\'s coming. <span class="k">Wide Slash — CROUCH</span> under it (Ctrl or C) or back out of reach. <span class="k">Overhead Ruin</span> and <span class="k">Hollow Charge</span> smash a lane aimed where you STOOD — <span class="k">sidestep</span>. Dodge clean and you take nothing.');
+    add('<b>Attacks.</b> Each attack shows its damage type (colored dot), its cost — <span class="k">stamina</span> for physical moves, <span class="k">magic</span> for spells, <span class="k">faith</span> for the holy and the unholy — and an arrow if it hits a weakness (▲ 2x) or a resistance (▼ half). Stamina comes back a little every round. <span class="k">Struggle</span> is always free.');
+    add('<b>Falling.</b> If the bandmate the knight is hunting drops, the other steps in as the body. If everyone falls, the run is over — for good.');
+    add('<b>One night, one run.</b> CHLOE is a roguelike: nothing is saved, ever. Death starts a fresh run at level 1 with empty pockets, and so does closing or reloading the page. Make the night count.');
+    add('<b>Shards ◆.</b> Splinters of the club\'s broken mirror wall — the only currency the Between respects. Yours until the run ends.');
     body.appendChild(h);
   }
 

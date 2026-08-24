@@ -354,10 +354,6 @@ CHLOE.ui.tree = (function(){
     var ok = (r === true) || (r && typeof r === 'object' && r.ok !== false && !r.error);
     if (ok) {
       ui.toast((r && r.text) || ('Bought: ' + (node.name || node.id)));
-      try {
-        var sv = CHLOE.engine.save;
-        if (sv && sv.getCurrent && sv.getCurrent()) sv.autosave();
-      } catch (e2) {}
     } else {
       ui.toast((r && (r.error || r.reason)) || 'The tree refuses. Not yet.');
     }
@@ -422,10 +418,6 @@ CHLOE.ui.tree = (function(){
     var ok = (r === true) || (r && typeof r === 'object' && r.ok !== false && !r.error);
     if (ok) {
       ui.toast((r && r.text) || 'The tree lets go. Points refunded.');
-      try {
-        var sv = CHLOE.engine.save;
-        if (sv && sv.getCurrent && sv.getCurrent()) sv.autosave();
-      } catch (e2) {}
     } else {
       ui.toast((r && (r.error || r.reason)) || 'Not enough shards.');
     }

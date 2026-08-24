@@ -10,7 +10,7 @@
    hp/mp aliases so v2 callers keep working.
    Also owns the shared Combat v2 vocabulary: PHASES, PHASE_MODS, move lookup
    (moves.js -> engine failsafes -> legacy skills.js adapter) and loadout
-   validation/defaults used by party.js, save.js migration and battle.js. */
+   validation/defaults used by party.js and battle.js. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.engine = CHLOE.engine || {};
 
@@ -206,10 +206,11 @@ CHLOE.engine.progression = (function(){
     return out;
   }
 
-  /* Silent validation/rebuild (spec §10 save v2): per phase, a stored list is
-     kept only if it is a valid array (<=5, learned, non-failsafe, usable in
-     that phase, no dupes); anything invalid is rebuilt from defaults. Pass
-     raw = null to build pure defaults. Always returns all 5 phase keys. */
+  /* Silent validation/rebuild of an in-memory loadout store: per phase, the
+     list is kept only if it is a valid array (<=5, learned, non-failsafe,
+     usable in that phase, no dupes); anything invalid is rebuilt from
+     defaults. Pass raw = null to build pure defaults. Always returns all 5
+     phase keys. */
   function sanitizeLoadouts(charId, level, raw){
     var charDef = (CHLOE.data && CHLOE.data.characters || {})[charId];
     var defaults = defaultLoadoutsFor(charDef, level);

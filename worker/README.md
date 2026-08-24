@@ -1,9 +1,13 @@
 # CHLOE Cloud-Save Worker (chloe-api)
 
+> **DEPRECATED — never deployed.** CHLOE is a roguelike now (GAME_SPEC.md §14):
+> no accounts, no saves, no cloud sync. The game-side client code and the
+> `apiUrl` config field were removed. This folder is kept for reference only
+> and is safe to delete.
+
 A zero-dependency Cloudflare Worker that stores CHLOE game accounts and saves in
 Workers KV. Runs entirely on the **free** Cloudflare plan (workers.dev subdomain,
-free KV namespace). The game works without it — cloud sync only activates when
-`game/js/data/config.js` has a non-empty `apiUrl`.
+free KV namespace).
 
 ## API
 

@@ -63,8 +63,8 @@
        attacker aggressive; <=0.5: defender aggressive + attacker aggr->neutral)
      6 staggered auto-recovery at the start of the turn after a turn spent staggered
      7 failsafes Struggle (always) / Recover (only while staggered) always appended.
-   Unchanged from v1: items/switch/flee rules, boss no-flee, victory rewards,
-   defeat/respawn, autosave on battle end. */
+   Unchanged from v1: items/switch/flee rules, boss no-flee, victory rewards.
+   Roguelike (spec §14): defeat ends the run — the UI starts a fresh one. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.engine = CHLOE.engine || {};
 
@@ -890,17 +890,12 @@ CHLOE.engine.battle = (function(){
     endTurn(ev, 'e');
   }
 
-  /* ---------- outcome (unchanged v1 rewards/defeat rules) ---------- */
-  function tryAutosave(){
-    try {
-      var sv = CHLOE.engine.save;
-      if (sv && sv.getCurrent && sv.getCurrent()) sv.autosave();
-    } catch(e){}
-  }
-
+  /* ---------- outcome (v1 rewards; defeat ends the run — spec §14) ---------- */
   function victory(ev){
     state.over = true;
     state.result = 'victory';
+    var st = party().state;
+    if (st.runStats) st.runStats.kills = (st.runStats.kills || 0) + 1;
     var def = state.enemyDef;
     var rw = def.rewards || {};
     // §12 enemy xp scaling: round(baseXp * level^1.35 / 2 + 10)
@@ -942,7 +937,6 @@ CHLOE.engine.battle = (function(){
 
     state.rewards = rewards;
     ev.push({ t: 'end', result: 'victory', rewards: rewards });
-    tryAutosave();
   }
 
   function defeat(ev){
@@ -950,7 +944,6 @@ CHLOE.engine.battle = (function(){
     state.result = 'defeat';
     log(ev, 'The dark closes in...', 'sys');
     ev.push({ t: 'end', result: 'defeat' });
-    tryAutosave();
   }
 
   function checkOutcome(ev){
@@ -974,7 +967,6 @@ CHLOE.engine.battle = (function(){
       state.result = 'fled';
       log(ev, 'You slip back into the dark between songs.', 'hot');
       ev.push({ t: 'end', result: 'fled' });
-      tryAutosave();
     } else {
       log(ev, 'The corridor loops you straight back!', 'sys');
       enemyTurn(ev);
@@ -1052,7 +1044,7 @@ CHLOE.engine.battle = (function(){
   }
   function canFlee(){ return !!state && !state.over && !state.boss; }
 
-  /* Loadout editor I/O (validated: <=5, learned, phase-legal; autosaves). */
+  /* Loadout editor I/O (validated: <=5, learned, phase-legal). */
   function getLoadout(charId){ return party().getLoadout(charId); }
   function setLoadout(charId, phase, ids){ return party().setLoadout(charId, phase, ids); }
 

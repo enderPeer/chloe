@@ -21,7 +21,7 @@ CHLOE.engine = CHLOE.engine || {};
   function disableAPI(reason) {
     if (reason) console.warn('[world3d] disabled: ' + reason);
     W.init = noop; W.start = noop; W.stop = noop;
-    W.setEnemyAlive = noop; W.onEngage = noop; W.onHover = noop;
+    W.setEnemyAlive = noop; W.resetPlayer = noop; W.onEngage = noop; W.onHover = noop;
     W.resize = noop; W.debug = deadDebug;
   }
 
@@ -29,8 +29,11 @@ CHLOE.engine = CHLOE.engine || {};
 
   // ---------------------------------------------------------------- constants
   var EYE_HEIGHT = 1.6;
+  var CROUCH_EYE = 0.85;      // Ctrl/C held (spec §15 controls)
+  var CROUCH_MULT = 0.55;     // crouch speed factor
   var RADIUS = 0.35;
   var WALK = 3.0, SPRINT = 5.0;
+  var GRAB_RANGE = 2.2;       // how far a hand can reach for a pickup
   var ACCEL_LERP = 10;                 // approach rate per second
   var TURN_RATE = 100 * Math.PI / 180; // keyboard yaw, rad/s
   var SENS = 0.0022;
@@ -53,8 +56,17 @@ CHLOE.engine = CHLOE.engine || {};
   var texturedMats = [];    // materials that got a map (for strip-on-failure)
   var data = null;
 
-  var engageCb = null, hoverCb = null, engageCooldown = 0;
+  var engageCb = null, hoverCb = null, onPickupCb = null, engageCooldown = 0;
   var hovered = false, hoverGlow = 0, enemyDist = Infinity;
+  var eyeH = EYE_HEIGHT;
+
+  // first-person hands (spec §15: LMB closes the left hand, RMB the right;
+  // a click near a glinting item reaches out and takes it in the motion)
+  var hands = { built: false, l: null, r: null, closeL: 0, closeR: 0,
+                targetL: 0, targetR: 0 };
+  var pickups = [];          // [{id,itemId,label,mesh,glow,x,y,z,taken}]
+  var pickupHover = null;    // {itemId,label,dist} under the crosshair
+  var grab = null;           // {hand:'l'|'r', pk, t}  active grab animation
 
   var enemy = {
     mesh: null, mat: null, glow: null, light: null,
@@ -372,6 +384,177 @@ CHLOE.engine = CHLOE.engine || {};
     scene.add(enemy.light);
   }
 
+  // ------------------------------------------------------------- hands
+  function makeHand(side){
+    var g = new THREE.Group();
+    var skin = new THREE.MeshStandardMaterial({ color: 0xc9a08a, roughness: 0.85 });
+    var sleeve = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.09, 0.16),
+      new THREE.MeshStandardMaterial({ color: 0x1d1216, roughness: 0.9 }));
+    sleeve.position.set(0, -0.015, 0.1);
+    g.add(sleeve);
+    var palm = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.03, 0.1), skin);
+    g.add(palm);
+    var fingers = new THREE.Group();
+    fingers.position.set(0, 0, -0.05);
+    for (var i = 0; i < 4; i++) {
+      var f = new THREE.Mesh(new THREE.BoxGeometry(0.016, 0.02, 0.065), skin);
+      f.position.set(-0.031 + i * 0.021, 0, -0.032);
+      fingers.add(f);
+    }
+    fingers.rotation.x = -0.15;
+    g.add(fingers);
+    var thumb = new THREE.Mesh(new THREE.BoxGeometry(0.017, 0.02, 0.05), skin);
+    thumb.position.set(side === 'l' ? 0.05 : -0.05, 0, -0.01);
+    thumb.rotation.y = side === 'l' ? -0.7 : 0.7;
+    g.add(thumb);
+    g.userData.fingers = fingers;
+    g.userData.thumb = thumb;
+    return g;
+  }
+
+  function buildHands(){
+    if (hands.built) return;
+    scene.add(camera); // camera children only render when the camera is in the scene
+    hands.l = makeHand('l');
+    hands.l.position.set(-0.28, -0.26, -0.52);
+    hands.l.rotation.set(-0.5, 0.22, 0.08);
+    camera.add(hands.l);
+    hands.r = makeHand('r');
+    hands.r.position.set(0.28, -0.26, -0.52);
+    hands.r.rotation.set(-0.5, -0.22, -0.08);
+    camera.add(hands.r);
+    hands.built = true;
+  }
+
+  function updateHands(dt){
+    if (!hands.built) return;
+    var k = Math.min(1, 14 * dt);
+    hands.closeL += (hands.targetL - hands.closeL) * k;
+    hands.closeR += (hands.targetR - hands.closeR) * k;
+    var apply = function (hand, t, side) {
+      hand.userData.fingers.rotation.x = -0.15 - t * 1.25;
+      hand.userData.thumb.rotation.x = -t * 0.9;
+      // grabbing hand reaches forward + inward
+      var g = (grab && grab.hand === side) ? Math.min(1, grab.t * 2.2) : 0;
+      var baseX = side === 'l' ? -0.28 : 0.28;
+      hand.position.x = baseX + (side === 'l' ? 1 : -1) * 0.14 * g;
+      hand.position.z = -0.52 - 0.26 * g;
+      hand.position.y = -0.26 + 0.08 * g;
+    };
+    apply(hands.l, hands.closeL, 'l');
+    apply(hands.r, hands.closeR, 'r');
+  }
+
+  // ------------------------------------------------------------- pickups
+  function disposePickup(p){
+    if (p.mesh) {
+      if (p.mesh.parent) p.mesh.parent.remove(p.mesh);
+      if (p.mesh.geometry) p.mesh.geometry.dispose();
+      if (p.mesh.material) p.mesh.material.dispose();
+    }
+    if (p.glow) {
+      if (p.glow.parent) p.glow.parent.remove(p.glow);
+      if (p.glow.material) {
+        if (p.glow.material.map) p.glow.material.map.dispose();
+        p.glow.material.dispose();
+      }
+    }
+  }
+
+  function clearPickups(){
+    for (var i = 0; i < pickups.length; i++) disposePickup(pickups[i]);
+    pickups.length = 0;
+    pickupHover = null;
+    grab = null;
+  }
+
+  function buildPickups(){
+    clearPickups();
+    var list = (data && data.pickups) || [];
+    for (var i = 0; i < list.length; i++) {
+      var d = list[i];
+      var mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(0.16, 0.1, 0.12),
+        new THREE.MeshStandardMaterial({ color: 0x7a1020, roughness: 0.6,
+          emissive: 0xe5173f, emissiveIntensity: 0.5 }));
+      mesh.position.set(d.x, d.y, d.z);
+      scene.add(mesh);
+      var glow = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: makeGlowTexture(), transparent: true, opacity: 0.45,
+        depthWrite: false, blending: THREE.AdditiveBlending }));
+      glow.scale.set(0.55, 0.55, 1);
+      glow.position.set(d.x, d.y, d.z);
+      scene.add(glow);
+      pickups.push({ id: d.id || d.itemId, itemId: d.itemId, label: d.label || d.itemId,
+        mesh: mesh, glow: glow, x: d.x, y: d.y, z: d.z, taken: false });
+    }
+  }
+
+  function pickupUnderCrosshair(){
+    if (!raycaster) return null;
+    camera.updateMatrixWorld();
+    raycaster.setFromCamera(ZERO2, camera);
+    var best = null;
+    for (var i = 0; i < pickups.length; i++) {
+      var p = pickups[i];
+      if (p.taken) continue;
+      var hit = raycaster.intersectObject(p.mesh, false);
+      if (hit.length && hit[0].distance <= GRAB_RANGE) {
+        if (!best || hit[0].distance < best.dist) best = { pk: p, dist: hit[0].distance };
+      }
+    }
+    return best;
+  }
+
+  function tryGrab(side){
+    if (grab) return false;
+    var found = pickupUnderCrosshair();
+    if (!found) return false;
+    grab = { hand: side, pk: found.pk, t: 0 };
+    found.pk.taken = true; // reserved — no double grabs
+    return true;
+  }
+
+  function updatePickups(dt){
+    // idle pulse
+    for (var i = 0; i < pickups.length; i++) {
+      var p = pickups[i];
+      if (p.taken) continue;
+      var s = 0.5 + 0.18 * Math.sin(elapsed * 3 + i * 1.7);
+      p.glow.material.opacity = 0.3 + 0.25 * Math.abs(Math.sin(elapsed * 2.2 + i));
+      p.glow.scale.set(s, s, 1);
+      p.mesh.rotation.y += dt * 0.8;
+    }
+    if (grab) {
+      grab.t = Math.min(1, grab.t + dt / 0.45);
+      var pk = grab.pk;
+      // after the hand extends, the item flies into it
+      var f = Math.max(0, (grab.t - 0.35) / 0.65);
+      if (f > 0 && pk.mesh) {
+        var target = new THREE.Vector3(0, -0.2, -0.6).applyMatrix4(camera.matrixWorld);
+        pk.mesh.position.lerpVectors(new THREE.Vector3(pk.x, pk.y, pk.z), target, f);
+        var sc = 1 - f * 0.7;
+        pk.mesh.scale.set(sc, sc, sc);
+        if (pk.glow) pk.glow.material.opacity = 0.45 * (1 - f);
+      }
+      if (grab.t >= 1) finishGrab();
+    }
+  }
+
+  // Deliver the grabbed item (also called from stop(): a battle starting
+  // mid-grab must not eat the item).
+  function finishGrab(){
+    if (!grab) return;
+    var pk = grab.pk;
+    var done = grab;
+    grab = null;
+    disposePickup(pk);
+    if (done.hand === 'l') hands.targetL = 0; else hands.targetR = 0;
+    if (onPickupCb) {
+      try { onPickupCb(pk.itemId, pk.label); } catch (e) {}
+    }
+  }
+
   // ---------------------------------------------------------------- init
   W.init = function (canvasEl) {
     if (disabled) return;
@@ -408,6 +591,8 @@ CHLOE.engine = CHLOE.engine || {};
     buildFurniture();
     buildLights();
     buildEnemy();
+    buildHands();
+    buildPickups();
 
     resetPlayer();
     inited = true;
@@ -420,7 +605,9 @@ CHLOE.engine = CHLOE.engine || {};
     pos.x = sp.x; pos.z = sp.z;
     vel.x = 0; vel.z = 0;
     yaw = sp.yaw || 0; pitch = 0; bobPhase = 0;
-    camera.position.set(pos.x, EYE_HEIGHT, pos.z);
+    eyeH = EYE_HEIGHT;
+    hands.targetL = 0; hands.targetR = 0;
+    camera.position.set(pos.x, eyeH, pos.z);
     camera.rotation.set(pitch, yaw, 0);
   }
 
@@ -473,9 +660,32 @@ CHLOE.engine = CHLOE.engine || {};
     if (engageCb) engageCb();
   }
 
+  /* LMB closes the left hand, RMB the right (spec §15). A grab starts when
+     the crosshair rests on a glinting item in reach — the item is taken in
+     the motion. The enemy keeps priority on plain left clicks (engage). */
+  function onMouseDown(e) {
+    if (!running) return;
+    var side = e.button === 2 ? 'r' : (e.button === 0 ? 'l' : null);
+    if (!side) return;
+    if (side === 'l') hands.targetL = 1; else hands.targetR = 1;
+    // grabs only while pointer-locked: unlocked clicks are aim-lock requests,
+    // and the crosshair ray would not match where the user actually clicked
+    if (isLocked() && !(hovered && side === 'l')) tryGrab(side); // engage wins the left hand
+  }
+  function onMouseUp(e) {
+    var side = e.button === 2 ? 'r' : (e.button === 0 ? 'l' : null);
+    if (!side) return;
+    if (grab && grab.hand === side) return; // stays closed until the item lands
+    if (side === 'l') hands.targetL = 0; else hands.targetR = 0;
+  }
+  function onContextMenu(e) { e.preventDefault(); }
+
   function addListeners() {
     function on(t, type, fn, opts) { t.addEventListener(type, fn, opts); listeners.push([t, type, fn, opts]); }
     on(canvas, 'click', onClick);
+    on(canvas, 'mousedown', onMouseDown);
+    on(canvas, 'contextmenu', onContextMenu);
+    on(document, 'mouseup', onMouseUp);
     on(document, 'mousemove', onMouseMove);
     on(window, 'keydown', onKeyDown);
     on(window, 'keyup', onKeyUp);
@@ -496,7 +706,9 @@ CHLOE.engine = CHLOE.engine || {};
     var turn = ((keys.ArrowLeft || keys.KeyQ) ? 1 : 0) - ((keys.ArrowRight || keys.KeyE) ? 1 : 0);
     yaw += turn * TURN_RATE * dt;
 
+    var crouch = !!(keys.ControlLeft || keys.ControlRight || keys.KeyC);
     var spd = (keys.ShiftLeft || keys.ShiftRight) ? SPRINT : WALK;
+    if (crouch) spd *= CROUCH_MULT;
     var tx = 0, tz = 0;
     if (f || s) {
       var len = Math.sqrt(f * f + s * s); f /= len; s /= len;
@@ -533,14 +745,16 @@ CHLOE.engine = CHLOE.engine || {};
     }
     pos.z = nz;
 
-    // head bob (eye 1.6, amp scales with speed)
+    // eye height (crouch lerp, spec §15) + head bob scaled by speed
+    var targetEye = crouch ? CROUCH_EYE : EYE_HEIGHT;
+    eyeH += (targetEye - eyeH) * Math.min(1, 10 * dt);
     var speed = Math.sqrt(vel.x * vel.x + vel.z * vel.z);
     var bob = 0;
     if (speed > 0.15) {
       bobPhase += dt * (6 + speed * 1.7);
-      bob = Math.sin(bobPhase) * BOB_AMP * Math.min(1, speed / WALK);
+      bob = Math.sin(bobPhase) * BOB_AMP * (crouch ? 0.5 : 1) * Math.min(1, speed / WALK);
     }
-    camera.position.set(pos.x, EYE_HEIGHT + bob, pos.z);
+    camera.position.set(pos.x, eyeH + bob, pos.z);
     camera.rotation.set(pitch, yaw, 0);
   }
 
@@ -618,6 +832,13 @@ CHLOE.engine = CHLOE.engine || {};
     if (hoverCb && (hovered !== was || (hovered && Math.abs(enemyDist - wasDist) > 0.05))) {
       try { hoverCb(hovered, enemyDist); } catch (e) {}
     }
+    // pickup hover (for the HUD "grab" hint) — enemy hover wins
+    if (!hovered && !grab) {
+      var found = pickupUnderCrosshair();
+      pickupHover = found ? { itemId: found.pk.itemId, label: found.pk.label, dist: found.dist } : null;
+    } else {
+      pickupHover = null;
+    }
   }
   var ZERO2 = new THREE.Vector2(0, 0);
 
@@ -651,6 +872,8 @@ CHLOE.engine = CHLOE.engine || {};
     updatePlayer(dt);
     updateEnemy(dt);
     updateHover();
+    updateHands(dt);
+    updatePickups(dt);
     updateFx(dt);
     try {
       renderer.render(scene, camera);
@@ -680,6 +903,8 @@ CHLOE.engine = CHLOE.engine || {};
     removeListeners();
     keys = {};
     vel.x = 0; vel.z = 0;
+    finishGrab();                       // an in-flight grab still delivers
+    hands.targetL = 0; hands.targetR = 0; // no fists frozen shut across battles
     if (isLocked()) { try { document.exitPointerLock(); } catch (e) {} }
   };
 
@@ -695,7 +920,18 @@ CHLOE.engine = CHLOE.engine || {};
     }
   };
 
+  // Put the player back at the spawn point (used on new-run resets, spec §14).
+  // Pickups respawn with the run.
+  W.resetPlayer = function () {
+    if (disabled || !inited) return;
+    resetPlayer();
+    buildPickups();
+  };
+
   W.onEngage = function (cb) { engageCb = typeof cb === 'function' ? cb : null; };
+
+  // Fired when a hand finishes taking an item: cb(itemId, label).
+  W.onPickup = function (cb) { onPickupCb = typeof cb === 'function' ? cb : null; };
 
   // Optional hint hook for the UI ("click to engage" line): cb(hovering, dist)
   W.onHover = function (cb) { hoverCb = typeof cb === 'function' ? cb : null; };
@@ -722,6 +958,12 @@ CHLOE.engine = CHLOE.engine || {};
       locked: isLocked(),
       enemyDist: currentEnemyDist(),
       enemyAlive: enemy.alive,
+      enemyHovered: hovered,
+      crouch: !!(keys.ControlLeft || keys.ControlRight || keys.KeyC),
+      eye: eyeH,
+      pickupHover: pickupHover,
+      pickupsLeft: pickups.filter(function (p) { return !p.taken; }).length,
+      hands: { l: hands.closeL, r: hands.closeR, grabbing: grab ? grab.hand : null },
       colliders: out
     };
   };

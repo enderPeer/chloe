@@ -14,9 +14,9 @@
 <body>
 <div id="app">
   <div id="screen-title" class="screen"></div>
-  <div id="screen-account" class="screen"></div>
   <div id="screen-scene" class="screen"></div>
   <div id="screen-room3d" class="screen"></div>
+  <div id="screen-battle3d" class="screen"></div>
   <div id="screen-battle" class="screen"></div>
   <div id="dialog-layer" class="hidden" aria-live="polite"></div>
   <div id="overlay-menu" class="hidden"></div>
@@ -24,6 +24,8 @@
   <div id="fx-grain" aria-hidden="true"></div>
 </div>
 <script src="vendor/three.min.js"></script>
+<script src="vendor/GLTFLoader.js"></script>
+<script src="vendor/DRACOLoader.js"></script>
 <script src="js/data/config.js"></script>
 <script src="js/data/elements.js"></script>
 <script src="js/data/portraits.js"></script>
@@ -34,21 +36,23 @@
 <script src="js/data/enemies.js"></script>
 <script src="js/data/tree.js"></script>
 <script src="js/data/room3d.js"></script>
+<script src="js/data/arena3d.js"></script>
 <script src="js/data/story.js"></script>
 <script src="js/data/scenes.js"></script>
-<script src="js/engine/save.js"></script>
 <script src="js/engine/progression.js"></script>
 <script src="js/engine/tree.js"></script>
 <script src="js/engine/party.js"></script>
 <script src="js/engine/inventory.js"></script>
 <script src="js/engine/battle.js"></script>
+<script src="js/engine/arena.js"></script>
 <script src="js/engine/world3d.js"></script>
+<script src="js/engine/arena3d.js"></script>
 <script src="js/ui/ui.js"></script>
 <script src="js/ui/title.js"></script>
-<script src="js/ui/account.js"></script>
 <script src="js/ui/dialog.js"></script>
 <script src="js/ui/scene.js"></script>
 <script src="js/ui/battleui.js"></script>
+<script src="js/ui/battle3d.js"></script>
 <script src="js/ui/loadout.js"></script>
 <script src="js/ui/sheet.js"></script>
 <script src="js/ui/tree.js"></script>

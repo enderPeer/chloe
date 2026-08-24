@@ -160,69 +160,6 @@ h1,h2,h3,.head{
   text-align:center; color:#565059; font-size:.75rem; z-index:2;
 }
 
-/* ---------- Account screen ---------- */
-#screen-account{
-  background:radial-gradient(1200px 700px at 50% -10%, #241019 0%, var(--bg) 60%);
-  display:none; align-items:center; justify-content:center;
-}
-#screen-account.active{ display:flex; }
-.account-card{
-  width:min(430px, 92vw);
-  max-height:88vh;
-  overflow-y:auto;
-  background:var(--panel);
-  border:1px solid #2a2630;
-  border-top:2px solid var(--red);
-  border-radius:12px;
-  padding:1.6rem 1.5rem 1.5rem;
-  box-shadow:0 18px 60px rgba(0,0,0,.6);
-}
-.account-card h2{ font-size:1.9rem; color:var(--text); margin-bottom:.2rem; }
-.account-card .sub{ color:var(--dim); font-size:.85rem; margin-bottom:1.1rem; }
-.account-list{ display:flex; flex-direction:column; gap:.5rem; margin-bottom:1rem; }
-.account-row{
-  display:flex; align-items:center; justify-content:space-between;
-  text-align:left; padding:.7em .9em;
-}
-.account-row .nm{ font-family:var(--font-head); font-size:1.15rem; letter-spacing:.08em; }
-.account-row .meta{ color:var(--dim); font-size:.78rem; }
-.account-row:hover .meta{ color:#ffd7de; }
-.account-empty{ color:var(--dim); font-size:.9rem; text-align:center; padding:.8rem 0 1.1rem; }
-.account-actions{ display:flex; gap:.6rem; }
-.account-actions button{ flex:1; }
-.form-row{ margin:.7rem 0; }
-.form-row label{ display:block; color:var(--dim); font-size:.8rem; margin-bottom:.3rem; letter-spacing:.05em; }
-.form-err{
-  color:#ff8fa3; font-size:.85rem; min-height:1.3em; margin-top:.4rem;
-}
-/* PIN pad */
-.pin-dots{ display:flex; gap:.7rem; justify-content:center; margin:1rem 0 1.2rem; }
-.pin-dot{
-  width:16px; height:16px; border-radius:50%;
-  border:2px solid var(--deep-red); background:transparent;
-  transition:background .12s, box-shadow .12s;
-}
-.pin-dot.on{ background:var(--red); box-shadow:var(--glow-red); }
-.pin-pad{
-  display:grid; grid-template-columns:repeat(3,1fr); gap:.55rem;
-  max-width:270px; margin:0 auto;
-}
-.pin-pad button{
-  font-family:var(--font-head);
-  font-size:1.5rem; padding:.35em 0; letter-spacing:.05em;
-}
-.pinpad-shake{ animation:padShake .4s ease; }
-@keyframes padShake{
-  0%,100%{ transform:translateX(0); }
-  20%{ transform:translateX(-9px); } 40%{ transform:translateX(8px); }
-  60%{ transform:translateX(-6px); } 80%{ transform:translateX(4px); }
-}
-.link-btn{
-  background:none; border:none; color:var(--dim);
-  text-decoration:underline; padding:.4em .2em; font-size:.85rem;
-}
-.link-btn:hover:not(:disabled){ background:none; color:var(--red); box-shadow:none; }
-
 /* ---------- Scene screen ---------- */
 #screen-scene{ background:#000; }
 .scene-stage{
@@ -753,7 +690,6 @@ h1,h2,h3,.head{
   .member-info{ gap:.15rem; }
   .dialog-portrait{ flex-basis:58px; height:58px; }
   .stat-grid{ grid-template-columns:repeat(2,1fr); }
-  .account-card{ padding:1.2rem 1rem 1rem; }
 }
 
 /* ============================================================
@@ -1569,4 +1505,134 @@ button:disabled .cost-chip{ opacity:.7; }
 @media (max-width:560px){
   .r3d-level{ font-size:.72rem; }
   .r3d-controls{ font-size:.66rem; }
+}
+
+/* ============================================================
+   Arena battles — 3D church, spec §15
+   (screen, HUD plates, move panel, telegraph prompt, splashes)
+   ============================================================ */
+#screen-battle3d{ background:#05050a; }
+#battle3d-canvas{
+  position:absolute; inset:0; width:100%; height:100%;
+  display:block; cursor:crosshair;
+}
+.b3d-enemy-plate{
+  position:absolute; top:calc(.8rem + env(safe-area-inset-top)); left:50%;
+  transform:translateX(-50%);
+  width:min(420px, 72vw);
+  padding:.45rem .8rem .55rem;
+  background:rgba(10,10,12,.72);
+  border:1px solid #2a2630; border-top:2px solid var(--red);
+  border-radius:9px; z-index:4;
+}
+.b3d-enemy-name{
+  font-family:var(--font-head); letter-spacing:.14em;
+  color:var(--text); font-size:1.05rem; margin-bottom:.3rem;
+  text-align:center;
+}
+.b3d-party{
+  position:absolute; left:.8rem; bottom:calc(.8rem + env(safe-area-inset-bottom));
+  display:flex; flex-direction:column; gap:.5rem; z-index:4;
+  width:min(230px, 38vw);
+}
+.b3d-member{
+  padding:.4rem .6rem .5rem;
+  background:rgba(10,10,12,.72);
+  border:1px solid #2a2630; border-left:3px solid #4a4550;
+  border-radius:8px;
+}
+.b3d-member.body{ border-left-color:var(--red); box-shadow:0 0 14px rgba(229,23,63,.22); }
+.b3d-member.down{ opacity:.45; filter:grayscale(.8); }
+.b3d-member-head{
+  display:flex; justify-content:space-between; align-items:baseline;
+  margin-bottom:.25rem;
+}
+.b3d-member-head .nm{ font-family:var(--font-head); letter-spacing:.1em; font-size:.92rem; }
+.b3d-member-head .hp{ color:var(--dim); font-size:.75rem; }
+.b3d-member-res{
+  display:flex; gap:.6rem; margin-top:.25rem; font-size:.68rem; letter-spacing:.04em;
+}
+.b3d-member-res .sta{ color:#7fd08a; }
+.b3d-member-res .mp{ color:#7fb3e8; }
+.b3d-member-res .faith{ color:#e8cd7f; }
+.b3d-prompt{
+  position:absolute; top:26%; left:50%; transform:translateX(-50%);
+  font-family:var(--font-head); text-align:center;
+  font-size:clamp(1.5rem, 4.5vw, 2.6rem); letter-spacing:.18em;
+  color:var(--text); text-shadow:0 0 18px rgba(229,23,63,.8);
+  z-index:5; pointer-events:none; white-space:nowrap;
+}
+.b3d-prompt.hidden{ display:none; }
+.b3d-prompt.telegraph{ color:#ffd7de; animation:b3dTelegraph .5s ease-in-out infinite; }
+.b3d-prompt.banner{ color:var(--red); }
+@keyframes b3dTelegraph{
+  0%,100%{ transform:translateX(-50%) scale(1); opacity:1; }
+  50%{ transform:translateX(-50%) scale(1.07); opacity:.75; }
+}
+.b3d-log{
+  position:absolute; bottom:calc(9.3rem + env(safe-area-inset-bottom)); left:50%;
+  transform:translateX(-50%);
+  max-width:min(560px, 86vw);
+  color:var(--dim); font-size:.85rem; letter-spacing:.03em;
+  text-align:center; text-shadow:0 1px 3px #000;
+  z-index:4; pointer-events:none;
+}
+.b3d-panel{
+  position:absolute; bottom:calc(1.6rem + env(safe-area-inset-bottom)); left:50%;
+  transform:translateX(-50%);
+  width:min(560px, 92vw);
+  padding:.6rem .7rem .7rem;
+  background:rgba(10,10,12,.82);
+  border:1px solid #2a2630; border-top:2px solid var(--red);
+  border-radius:10px; z-index:6;
+}
+.b3d-panel.hidden{ display:none; }
+.b3d-panel-title{
+  font-family:var(--font-head); letter-spacing:.12em;
+  color:var(--text); font-size:.95rem; margin-bottom:.45rem; text-align:center;
+}
+.b3d-moves{
+  display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));
+  gap:.4rem; margin-bottom:.5rem;
+}
+.b3d-move{
+  display:flex; align-items:center; gap:.4rem;
+  text-align:left; padding:.42em .55em; font-size:.82rem;
+}
+.b3d-move .dot{ width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
+.b3d-move .nm{ flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.b3d-move .cost{ color:var(--dim); font-size:.68rem; flex:0 0 auto; }
+.b3d-move .eff.up{ color:#7fd08a; }
+.b3d-move .eff.down{ color:#e8a97f; }
+.b3d-panel-row{ display:flex; gap:.5rem; }
+.b3d-panel-row button{ flex:1; }
+.b3d-empty{ color:var(--dim); text-align:center; padding:.6rem; }
+.b3d-splash{
+  position:absolute; top:38%; left:50%;
+  transform:translate(-50%,-50%);
+  font-family:var(--font-head);
+  font-size:clamp(2rem, 6vw, 3.4rem); letter-spacing:.1em;
+  z-index:5; pointer-events:none;
+  animation:b3dSplash 1.15s ease-out forwards;
+}
+.b3d-splash.dmg{ color:#fff; text-shadow:0 0 16px rgba(229,23,63,.9); }
+.b3d-splash.super{ color:#ffd23e; text-shadow:0 0 18px rgba(255,180,40,.9); }
+.b3d-splash.hurt{ color:var(--red); text-shadow:0 0 18px rgba(229,23,63,1); }
+.b3d-splash.evade{ color:#7fd08a; text-shadow:0 0 16px rgba(90,220,120,.8); }
+.b3d-splash.miss{ color:var(--dim); }
+@keyframes b3dSplash{
+  0%{ opacity:0; transform:translate(-50%,-30%) scale(.7); }
+  18%{ opacity:1; transform:translate(-50%,-50%) scale(1.06); }
+  70%{ opacity:1; }
+  100%{ opacity:0; transform:translate(-50%,-90%) scale(1); }
+}
+.b3d-controls{
+  position:absolute; right:.9rem; bottom:calc(.55rem + env(safe-area-inset-bottom));
+  color:#565059; font-size:.68rem; letter-spacing:.05em;
+  z-index:3; pointer-events:none;
+}
+@media (max-width:560px){
+  .b3d-party{ width:44vw; }
+  .b3d-controls{ display:none; }
+  .b3d-log{ bottom:calc(10.2rem + env(safe-area-inset-bottom)); font-size:.75rem; }
 }
