@@ -29,6 +29,21 @@ CHLOE.data.trees = {
     },
     nodes: [
 
+      /* ---- Combat v3 fists (§17) ----
+         The real-time hotbar starts with ONE key and one ability (punch).
+         These nodes are the only source of extra abilities and extra number
+         keys, so every level-up spent here literally widens the hotbar. */
+      { id:'c_v3_slot1', branch:'trunk', name:'Second Nature', desc:'Muscle memory for one more trick. +1 ability keybind (key 2).',
+        cost:1, requires:[], pos:{x:38,y:2}, kind:'passive', grant:{abilitySlot:1} },
+      { id:'c_v3_hammer', branch:'steel', name:'Hammer Fist', desc:'Unlocks the Hammer Fist ability — one slow, heavy overhand.',
+        cost:2, requires:['c_v3_slot1'], pos:{x:26,y:2}, kind:'move', grant:{ability:'hammer_fist'} },
+      { id:'c_v3_slot2', branch:'trunk', name:'Quick Hands', desc:'+1 ability keybind (key 3).',
+        cost:1, requires:['c_v3_slot1'], pos:{x:62,y:2}, kind:'passive', grant:{abilitySlot:1} },
+      { id:'c_v3_ember', branch:'pyre', name:'Ember Jab', desc:'Unlocks Ember Jab — a jab that lights on contact.',
+        cost:2, requires:['c_v3_slot2'], pos:{x:74,y:2}, kind:'move', grant:{ability:'ember_jab'} },
+      { id:'c_v3_breaker', branch:'voice', name:'Hollow Breaker', desc:'Unlocks Hollow Breaker — divine damage that ignores plate.',
+        cost:3, requires:['c_v3_ember'], pos:{x:86,y:2}, kind:'move', grant:{ability:'hollow_breaker'} },
+
       /* ---- trunk (5) ---- */
       { id:'c_t1', branch:'trunk', name:'First Chord', desc:'The night it all started. +8 life.',
         cost:1, requires:[], pos:{x:50,y:6}, kind:'stat', grant:{stat:{life:8}} },
@@ -310,7 +325,7 @@ CHLOE.data.trees = {
       var tree = CHLOE.data.trees[cid], ids = {};
       tree.nodes.forEach(function(n){ ids[n.id] = true; });
       tree.nodes.forEach(function(n){
-        if(n.kind==='move' && moves && !moves[n.grant.move])
+        if(n.kind==='move' && moves && n.grant.move && !moves[n.grant.move])
           console.warn('[CHLOE tree] '+cid+' node '+n.id+' grants unknown move id: '+n.grant.move);
         (n.requires||[]).forEach(function(r){
           if(!ids[r]) console.warn('[CHLOE tree] '+cid+' node '+n.id+' requires unknown node: '+r);

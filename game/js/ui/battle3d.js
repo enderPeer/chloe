@@ -1,61 +1,56 @@
-/* CHLOE — ui/battle3d.js  (Arena battles, spec §16 — HUD + round flow)
+/* CHLOE — ui/battle3d.js  (Combat v3, spec §17 — real-time HUD + input)
    Owns #screen-battle3d: the arena canvas (engine/arena3d.js renders into it)
-   plus the HUD — enemy plate, party plates, move picker, telegraph prompt,
-   damage splashes, round log. Orchestrates the round loop against
-   engine/arena.js (rules) and engine/arena3d.js (3D + dodge resolution).
-   Ends funnel through CHLOE.ui.scene.onBattleEnd(result) exactly like the 2D
-   battle screen, so ui/room3d.js's wrapper handles the roguelike outcomes
-   (victory -> back to the room + Ash hook; defeat -> fresh run, §15). */
+   plus the live HUD — enemy bar, life/magic/stamina bars, the 1-9 hotbar with
+   cooldown sweeps, evade readiness, cast bar and floating damage.
+   Rules live in engine/combat3.js; the 3D layer answers hit tests. Ends funnel
+   through CHLOE.ui.scene.onBattleEnd(result) exactly like the 2D battle screen,
+   so ui/room3d.js's wrapper handles the roguelike outcomes (§15). */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
-CHLOE.ui.battle3d = (function(){
+CHLOE.ui.battle3d = (function () {
   'use strict';
 
-  var ui, party, arena, a3d;
+  var ui, party, C3, a3d;
   var els = {};
   var built = false, inited3d = false, active = false;
-  var choices = [];          // [{memberId, moveId} | {memberId, itemId}]
-  var chooseQueue = [];      // member ids still to pick this round
+  var rafId = 0, lastT = 0;
+  var enemyTimer = null, nextSwingAt = 0;
+  var slotEls = [];
   var timers = [];
 
-  function later(fn, ms){ var t = window.setTimeout(fn, ms); timers.push(t); return t; }
-  function clearTimers(){
+  function later(fn, ms) { var t = window.setTimeout(fn, ms); timers.push(t); return t; }
+  function clearTimers() {
     for (var i = 0; i < timers.length; i++) window.clearTimeout(timers[i]);
     timers.length = 0;
   }
-
-  function charName(id){
-    var c = (CHLOE.data.characters || {})[id];
-    return (c && c.name) || id;
-  }
-  function typeColor(t){
-    var colors = (CHLOE.data.types && CHLOE.data.types.colors) || {};
-    return colors[t] || '#9a939c';
+  function typeColor(t) {
+    var c = (CHLOE.data.types && CHLOE.data.types.colors) || {};
+    return c[t] || '#9a939c';
   }
 
   /* ---------- screen ---------- */
-  function root(){
+  function root() {
     var r = ui.byId('screen-battle3d');
     if (!r) {
       r = ui.el('div', 'screen');
       r.id = 'screen-battle3d';
       var app = ui.byId('app');
-      var dlg = ui.byId('dialog-layer');
-      if (app) app.insertBefore(r, dlg || null);
-      else document.body.appendChild(r);
+      app ? app.insertBefore(r, ui.byId('dialog-layer') || null) : document.body.appendChild(r);
     }
     return r;
   }
 
-  function build(){
+  function build() {
     var r = ui.clear(root());
     els.canvas = document.createElement('canvas');
     els.canvas.id = 'battle3d-canvas';
     r.appendChild(els.canvas);
     r.appendChild(ui.el('div', 'r3d-vignette'));
+    els.hurt = ui.el('div', 'b3d-hurt');
+    r.appendChild(els.hurt);
 
-    // enemy plate (top center)
+    // enemy plate
     els.enemyPlate = ui.el('div', 'b3d-enemy-plate');
     els.enemyName = ui.el('div', 'b3d-enemy-name', '');
     els.enemyBar = ui.makeBar('');
@@ -63,357 +58,357 @@ CHLOE.ui.battle3d = (function(){
     els.enemyPlate.appendChild(els.enemyBar);
     r.appendChild(els.enemyPlate);
 
-    // party plates (bottom left)
-    els.party = ui.el('div', 'b3d-party');
-    r.appendChild(els.party);
+    // crosshair + in-reach ring
+    els.cross = ui.el('div', 'b3d-cross');
+    r.appendChild(els.cross);
 
-    // center prompt (telegraph hints, EVADED, round banners)
+    // centre prompt (telegraph warnings)
     els.prompt = ui.el('div', 'b3d-prompt hidden', '');
     r.appendChild(els.prompt);
 
-    // one-line log (above the move panel)
+    // cast bar
+    els.castWrap = ui.el('div', 'b3d-cast hidden');
+    els.castFill = ui.el('div', 'fill');
+    els.castWrap.appendChild(els.castFill);
+    r.appendChild(els.castWrap);
+
+    // player resource bars
+    var res = ui.el('div', 'b3d-res');
+    els.hpBar = resBar(res, 'hp', 'LIFE');
+    els.manaBar = resBar(res, 'mana', 'MAGIC');
+    els.staBar = resBar(res, 'sta', 'STAMINA');
+    r.appendChild(res);
+
+    // hotbar
+    els.hotbar = ui.el('div', 'b3d-hotbar');
+    r.appendChild(els.hotbar);
+
+    // evade pip
+    els.evade = ui.el('div', 'b3d-evade');
+    els.evade.innerHTML = '<b>SPACE</b><span>EVADE</span>';
+    r.appendChild(els.evade);
+
     els.log = ui.el('div', 'b3d-log', '');
     r.appendChild(els.log);
 
-    // move panel (bottom center)
-    els.panel = ui.el('div', 'b3d-panel hidden');
-    r.appendChild(els.panel);
-
-    // controls hint
     r.appendChild(ui.el('div', 'b3d-controls',
-      'WASD move · click the room to aim · Ctrl or C crouch · Shift sprint · arrows/Q/E turn'));
+      'WASD move · mouse look · Shift sprint · Ctrl/C crouch · SPACE evade · 1-9 abilities'));
 
     built = true;
   }
 
-  /* ---------- HUD ---------- */
-  function refreshEnemy(){
-    var st = arena.get();
-    if (!st) return;
-    els.enemyName.textContent = (CHLOE.data.arena3d && CHLOE.data.arena3d.knight &&
-      CHLOE.data.arena3d.knight.name) || st.enemyDef.name;
-    ui.setBar(els.enemyBar, st.enemy.life, st.enemy.max);
+  function resBar(parent, cls, label) {
+    var row = ui.el('div', 'b3d-res-row ' + cls);
+    row.appendChild(ui.el('span', 'lbl', label));
+    var bar = ui.el('div', 'b3d-res-bar');
+    var fill = ui.el('div', 'fill');
+    bar.appendChild(fill);
+    row.appendChild(bar);
+    var num = ui.el('span', 'num', '');
+    row.appendChild(num);
+    parent.appendChild(row);
+    return { fill: fill, num: num };
   }
 
-  function refreshParty(){
-    ui.clear(els.party);
-    var members = party.state.members;
-    for (var i = 0; i < members.length; i++) {
-      var m = members[i];
-      var mx = party.maxStats(m);
-      var plate = ui.el('div', 'b3d-member' + (party.state.activeId === m.id ? ' body' : '') +
-        (m.hp <= 0 ? ' down' : ''));
-      var head = ui.el('div', 'b3d-member-head');
-      head.appendChild(ui.el('span', 'nm', charName(m.id) + ' · Lv ' + m.level));
-      head.appendChild(ui.el('span', 'hp', m.hp + '/' + mx.hp));
-      plate.appendChild(head);
-      var lifeBar = ui.makeBar('');
-      ui.setBar(lifeBar, m.hp, mx.hp);
-      plate.appendChild(lifeBar);
-      var res = ui.el('div', 'b3d-member-res');
-      res.appendChild(ui.el('span', 'sta', 'STA ' + (m.stamina || 0)));
-      res.appendChild(ui.el('span', 'mp', 'MP ' + (m.mp || 0)));
-      res.appendChild(ui.el('span', 'faith', 'FTH ' + (m.faith || 0)));
-      plate.appendChild(res);
-      els.party.appendChild(plate);
+  function setRes(b, val, max) {
+    var pct = max > 0 ? Math.max(0, Math.min(100, (val / max) * 100)) : 0;
+    b.fill.style.width = pct + '%';
+    b.num.textContent = Math.round(val) + '/' + Math.round(max);
+  }
+
+  /* ---------- hotbar ---------- */
+  function buildHotbar(snap) {
+    ui.clear(els.hotbar);
+    slotEls = [];
+    snap.slots.forEach(function (s, i) {
+      var d = ui.el('div', 'b3d-slot' + (s.id ? '' : ' empty'));
+      d.appendChild(ui.el('span', 'key', String(s.key)));
+      if (s.id) {
+        var ic = ui.el('span', 'icon', s.icon || '•');
+        ic.style.color = typeColor(s.type);
+        d.appendChild(ic);
+        d.appendChild(ui.el('span', 'nm', s.name));
+        var sweep = ui.el('div', 'sweep');
+        d.appendChild(sweep);
+        var ch = ui.el('span', 'ch', '');
+        d.appendChild(ch);
+        d._sweep = sweep; d._ch = ch;
+        d.title = s.name;
+      } else {
+        d.appendChild(ui.el('span', 'nm', '—'));
+      }
+      d.addEventListener('click', function () { fire(i); });
+      els.hotbar.appendChild(d);
+      slotEls.push(d);
+    });
+  }
+
+  function refreshHotbar(snap) {
+    for (var i = 0; i < slotEls.length && i < snap.slots.length; i++) {
+      var s = snap.slots[i], d = slotEls[i];
+      if (!s.id) continue;
+      d.classList.toggle('ready', !!s.ready);
+      d.classList.toggle('cooling', s.cdPct > 0);
+      if (d._sweep) d._sweep.style.height = Math.round(s.cdPct * 100) + '%';
+      if (d._ch) d._ch.textContent = s.maxCharges > 1 ? String(s.charges) : '';
     }
   }
 
-  function log(text){
-    els.log.textContent = text || '';
+  /* ---------- HUD refresh ---------- */
+  function refresh() {
+    var snap = C3.snapshot();
+    if (!snap) return;
+    setRes(els.hpBar, snap.hp, snap.max.hp);
+    setRes(els.manaBar, snap.mana, snap.max.mana);
+    setRes(els.staBar, snap.sta, snap.max.sta);
+    ui.setBar(els.enemyBar, snap.enemy.life, snap.enemy.max);
+    els.enemyName.textContent = snap.enemy.name;
+    refreshHotbar(snap);
+
+    els.evade.classList.toggle('ready', snap.evade.ready);
+    els.evade.classList.toggle('iframe', snap.iframe);
+
+    if (snap.casting) {
+      els.castWrap.classList.remove('hidden');
+      els.castFill.style.width = Math.round(snap.casting.pct * 100) + '%';
+    } else {
+      els.castWrap.classList.add('hidden');
+    }
+
+    // crosshair turns hot when the knight is in reach of slot 1
+    var d = a3d.debug ? a3d.debug() : null;
+    els.cross.classList.toggle('in-reach', !!(d && d.knightDist <= 2.8));
   }
 
-  function prompt(text, cls, ms){
+  function log(t) { els.log.textContent = t || ''; }
+
+  function prompt(text, cls, ms) {
     els.prompt.className = 'b3d-prompt ' + (cls || '');
     els.prompt.textContent = text;
-    if (ms) later(function(){ els.prompt.classList.add('hidden'); }, ms);
+    if (ms) later(function () { els.prompt.classList.add('hidden'); }, ms);
   }
-  function hidePrompt(){ els.prompt.classList.add('hidden'); }
+  function hidePrompt() { els.prompt.classList.add('hidden'); }
 
-  function splash(text, cls){
+  function splash(text, cls) {
     var s = ui.el('div', 'b3d-splash ' + (cls || ''), text);
     root().appendChild(s);
-    later(function(){ if (s.parentNode) s.parentNode.removeChild(s); }, 1200);
+    later(function () { if (s.parentNode) s.parentNode.removeChild(s); }, 1100);
   }
 
-  /* ---------- round flow ---------- */
-  function begin(enemyId){
-    ui = CHLOE.ui; party = CHLOE.engine.party;
-    arena = CHLOE.engine.arena; a3d = CHLOE.engine.arena3d;
+  function flashHurt() {
+    els.hurt.classList.remove('on');
+    void els.hurt.offsetWidth;
+    els.hurt.classList.add('on');
+  }
 
-    var st = arena.start(enemyId);
-    if (!st) { console.warn('[battle3d] unknown enemy ' + enemyId); return; }
+  /* ---------- actions ---------- */
+  function fire(slotIndex) {
+    if (!active || C3.isOver()) return;
+    var r = C3.press(slotIndex);
+    if (!r.ok) { log(r.reason || 'Not ready.'); return; }
+    var a = r.ability;
+    var total = (a.hitAtMs && a.hitAtMs.length) ? a.hitAtMs[a.hitAtMs.length - 1] : a.castMs;
+    a3d.playAbility(a.id, a.anim, a.animSpeed, total + (a.recoverMs || 0));
+    log(a.name);
+  }
+
+  function doEvade() {
+    if (!active || C3.isOver()) return;
+    var r = C3.evade();
+    if (!r.ok) { log(r.reason || 'Cannot evade.'); return; }
+    a3d.doEvade(r.distance, r.durationMs);
+    splash('EVADE', 'evade');
+  }
+
+  /* ---------- enemy AI loop ---------- */
+  function scheduleSwing(now) {
+    // the knight paces its attacks; distance gates whether it commits
+    nextSwingAt = now + 1600 + Math.random() * 1400;
+  }
+
+  function enemySwing() {
+    if (!active || C3.isOver()) return;
+    var pattern = pickPattern();
+    if (!pattern) return;
+    prompt(pattern.name + ' — ' + pattern.hint, 'telegraph');
+    a3d.telegraph(pattern, function (res) {
+      if (!active || C3.isOver()) { hidePrompt(); return; }
+      hidePrompt();
+      var out = C3.takeHit(res.hit ? pattern : null);
+      if (!res.hit || (out && out.evaded)) {
+        splash(out && out.evaded ? 'DODGED!' : 'EVADED!', 'evade');
+        log('The blade splits empty air.');
+      } else if (out) {
+        splash('-' + out.dmg, 'hurt');
+        flashHurt();
+        log(pattern.name + ' lands: ' + out.dmg + '.');
+      }
+      refresh();
+      if (C3.isOver()) { finish(); return; }
+    });
+  }
+
+  function pickPattern() {
+    var pats = (CHLOE.data.arena3d && CHLOE.data.arena3d.patterns) || {};
+    var pool = [];
+    for (var id in pats) {
+      var w = pats[id].weight || 1;
+      for (var i = 0; i < w; i++) pool.push(id);
+    }
+    return pool.length ? pats[pool[Math.floor(Math.random() * pool.length)]] : null;
+  }
+
+  /* ---------- main loop ---------- */
+  function frame(now) {
+    if (!active) return;
+    rafId = requestAnimationFrame(frame);
+    var dt = Math.min(0.05, Math.max(0, (now - lastT) / 1000)) || 0.016;
+    lastT = now;
+
+    var events = C3.tick(dt);
+    for (var i = 0; i < events.length; i++) {
+      var e = events[i];
+      if (e.t === 'strike') {
+        var ab = (CHLOE.data.abilities || {})[e.abilityId];
+        if (ab && a3d.abilityHits(ab)) {
+          var res = C3.hitEnemy(e.abilityId, 1);
+          if (res) {
+            a3d.flinch(res.dmg, res.killed);
+            splash('-' + res.dmg + (res.mult >= 2 ? ' SUPER' : ''), res.mult >= 2 ? 'super' : 'dmg');
+          }
+        } else {
+          splash('miss', 'miss');
+        }
+      } else if (e.t === 'castEnd') {
+        a3d.stopAbility();
+      }
+    }
+
+    if (!C3.isOver() && now >= nextSwingAt) {
+      scheduleSwing(now);
+      enemySwing();
+    }
+
+    refresh();
+    if (C3.isOver()) { finish(); return; }
+  }
+
+  /* ---------- lifecycle ---------- */
+  function begin(enemyId) {
+    ui = CHLOE.ui; party = CHLOE.engine.party;
+    C3 = CHLOE.engine.combat3; a3d = CHLOE.engine.arena3d;
+
+    var s = C3.start(enemyId);
+    if (!s) { console.warn('[battle3d] cannot start ' + enemyId); return; }
     if (!built) build();
     active = true;
-    choices = [];
 
     ui.show('battle3d');
     if (!inited3d) { a3d.init(els.canvas); inited3d = true; }
-    a3d.reset();
-    a3d.resize();
-    a3d.start();
+    a3d.reset(); a3d.resize(); a3d.start();
+    a3d.stopAbility();
 
-    refreshEnemy();
-    refreshParty();
-    log('The church doors seal behind you.');
-    prompt('THE ' + ((CHLOE.data.arena3d && CHLOE.data.arena3d.knight &&
-      CHLOE.data.arena3d.knight.name) || st.enemyDef.name).toUpperCase() + ' RISES', 'banner', 2000);
-    later(startChoose, 1400);
+    buildHotbar(C3.snapshot());
+    refresh();
+    log('The doors seal. Keys 1-9 to strike, SPACE to evade.');
+    prompt(C3.snapshot().enemy.name.toUpperCase() + ' RISES', 'banner', 1800);
+
+    wireKeys();
+    lastT = performance.now();
+    scheduleSwing(lastT + 1200);
+    rafId = requestAnimationFrame(frame);
   }
 
-  function startChoose(){
-    if (!active || arena.isOver()) return;
-    choices = [];
-    var alive = party.aliveMembers();
-    // body first, then the rest (spd order among the rest)
-    alive.sort(function(a, b){
-      if (a.id === party.state.activeId) return -1;
-      if (b.id === party.state.activeId) return 1;
-      return party.effStats(b).spd - party.effStats(a).spd;
-    });
-    chooseQueue = alive.map(function(m){ return m.id; });
-    nextChooser();
-  }
-
-  function nextChooser(){
-    if (!active || arena.isOver()) return;
-    if (!chooseQueue.length) { hidePanel(); resolveRound(); return; }
-    var memberId = chooseQueue.shift();
-    var m = party.get(memberId);
-    if (!m || m.hp <= 0) { nextChooser(); return; }
-    renderMovePanel(m);
-  }
-
-  function hidePanel(){ els.panel.classList.add('hidden'); }
-
-  // While pointer lock is held every mouse event goes to the canvas — the
-  // panel buttons would be unclickable. Release it whenever a panel opens;
-  // the player re-locks by clicking the room when the dodge phase comes.
-  function releaseLock(){
-    try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) {}
-  }
-
-  function renderMovePanel(member){
-    releaseLock();
-    var p = ui.clear(els.panel);
-    p.classList.remove('hidden');
-    p.appendChild(ui.el('div', 'b3d-panel-title',
-      charName(member.id) + ' — choose an attack'));
-
-    var grid = ui.el('div', 'b3d-moves');
-    var opts = arena.attackOptions(member);
-    opts.forEach(function(opt){
-      var mv = opt.move;
-      var b = ui.el('button', 'b3d-move');
-      var dot = ui.el('span', 'dot');
-      dot.style.background = typeColor(mv.type || mv.element);
-      b.appendChild(dot);
-      b.appendChild(ui.el('span', 'nm', mv.name));
-      var costs = [];
-      if (opt.cost.sta) costs.push(opt.cost.sta + ' STA');
-      if (opt.cost.mp) costs.push(opt.cost.mp + ' MP');
-      if (opt.cost.faith) costs.push(opt.cost.faith + ' FTH');
-      b.appendChild(ui.el('span', 'cost', costs.join(' ') || '—'));
-      if (opt.mult >= 2) b.appendChild(ui.el('span', 'eff up', '▲'));
-      else if (opt.mult <= 0.5) b.appendChild(ui.el('span', 'eff down', '▼'));
-      b.disabled = !!opt.disabled;
-      if (opt.disabled) b.title = opt.reason || '';
-      b.addEventListener('click', function(){
-        choices.push({ memberId: member.id, moveId: mv.id });
-        nextChooser();
-      });
-      grid.appendChild(b);
-    });
-    p.appendChild(grid);
-
-    var rowB = ui.el('div', 'b3d-panel-row');
-    var itemsB = ui.el('button', null, 'Items');
-    itemsB.addEventListener('click', function(){ renderItemPanel(member); });
-    rowB.appendChild(itemsB);
-    // Give Up only before anyone has committed a pick — a failed flee costs
-    // the knight's free swing, never attacks already chosen this round
-    if (!choices.length) {
-      var fleeB = ui.el('button', null, 'Give Up');
-      fleeB.addEventListener('click', doFlee);
-      rowB.appendChild(fleeB);
-    }
-    p.appendChild(rowB);
-  }
-
-  function renderItemPanel(member){
-    releaseLock();
-    var p = ui.clear(els.panel);
-    p.appendChild(ui.el('div', 'b3d-panel-title',
-      charName(member.id) + ' — use an item (this is their turn)'));
-    var inv = CHLOE.engine.inventory;
-    // counts minus what earlier choosers already committed this round
-    var committed = {};
-    choices.forEach(function(c){ if (c.itemId) committed[c.itemId] = (committed[c.itemId] || 0) + 1; });
-    var items = inv.list().map(function(entry){
-      return { def: entry.def, count: entry.count - (committed[entry.def.id] || 0) };
-    }).filter(function(entry){ return entry.count > 0; });
-    var grid = ui.el('div', 'b3d-moves');
-    if (!items.length) grid.appendChild(ui.el('div', 'b3d-empty', 'The bag is empty.'));
-    items.forEach(function(entry){
-      var b = ui.el('button', 'b3d-move');
-      b.appendChild(ui.el('span', 'nm', (entry.def.icon || '▪') + ' ' + entry.def.name + ' ×' + entry.count));
-      b.addEventListener('click', function(){
-        choices.push({ memberId: member.id, itemId: entry.def.id });
-        nextChooser();
-      });
-      grid.appendChild(b);
-    });
-    p.appendChild(grid);
-    var back = ui.el('button', null, '‹ Attacks');
-    back.addEventListener('click', function(){ renderMovePanel(member); });
-    p.appendChild(back);
-  }
-
-  function doFlee(){
-    hidePanel();
-    var r = arena.flee();
-    if (r.boss) { log('The doors are sealed. There is no leaving this one.'); later(startChoose, 900); return; }
-    if (r.fled) { log('You slip out through the vestry.'); later(function(){ end('fled'); }, 800); return; }
-    log('The doors hold fast — and the knight is already moving!');
-    later(enemyTurn, 700);
-  }
-
-  /* Player choices resolve in the order they were made (body first). */
-  function resolveRound(){
-    if (!active || arena.isOver()) return;
-    var queue = choices.slice();
-    choices = [];
-    var step = function(){
-      if (!active) return;
-      if (arena.isOver()) { checkOver(); return; }
-      var c = queue.shift();
-      if (!c) { later(enemyTurn, 650); return; }
-      if (c.itemId) {
-        var r = arena.useItem(c.memberId, c.itemId);
-        log(r.text || 'Nothing happens.');
-        refreshParty();
-        later(step, 750);
-        return;
-      }
-      var ev = arena.playerAttack(c.memberId, c.moveId);
-      if (ev) {
-        log(ev.log);
-        if (!ev.missed) {
-          a3d.flinch(ev.dmg, ev.killed);
-          splash('-' + ev.dmg + (ev.mult >= 2 ? ' SUPER' : ''), ev.mult >= 2 ? 'super' : 'dmg');
-        } else {
-          splash('MISS', 'miss');
-        }
-        refreshEnemy();
-        refreshParty();
-      }
-      if (arena.isOver()) { checkOver(); return; }
-      later(step, 800);
+  var keyHandler = null;
+  function wireKeys() {
+    if (keyHandler) return;
+    keyHandler = function (e) {
+      if (!active || ui.current() !== 'battle3d') return;
+      if (e.code === 'Space') { e.preventDefault(); doEvade(); return; }
+      var m = /^Digit([1-9])$/.exec(e.code);
+      if (m) { e.preventDefault(); fire(parseInt(m[1], 10) - 1); }
     };
-    step();
+    window.addEventListener('keydown', keyHandler);
+  }
+  function unwireKeys() {
+    if (keyHandler) { window.removeEventListener('keydown', keyHandler); keyHandler = null; }
   }
 
-  function enemyTurn(){
-    if (!active || arena.isOver()) { checkOver(); return; }
-    var pattern = arena.pickPattern();
-    if (!pattern) { later(nextRound, 400); return; }
-    prompt(pattern.name + ' — ' + pattern.hint, 'telegraph');
-    a3d.telegraph(pattern, function(res){
-      if (!active) return;
-      hidePrompt();
-      var ev = arena.enemyStrike(pattern, res.hit);
-      if (!ev) { checkOver(); return; }
-      log(ev.log);
-      if (!ev.hit) {
-        splash('EVADED!', 'evade');
-      } else {
-        splash('-' + ev.dmg, 'hurt');
-        if (ev.bodySwitch) prompt(charName(ev.bodySwitch.id).toUpperCase() + ' STEPS IN', 'banner', 1600);
-      }
-      refreshParty();
-      if (arena.isOver()) { checkOver(); return; }
-      later(nextRound, 900);
-    });
+  function finish() {
+    if (!active) return;
+    var snap = C3.snapshot();
+    active = false;
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    a3d.stopAbility();
+    if (snap && snap.result === 'victory') showVictory();
+    else if (snap && snap.result === 'defeat') showDefeat();
+    else end(snap ? snap.result : 'fled');
   }
 
-  function nextRound(){
-    if (!active || arena.isOver()) { checkOver(); return; }
-    arena.startRound();
-    refreshParty();
-    startChoose();
-  }
-
-  /* ---------- outcomes ---------- */
-  function checkOver(){
-    var st = arena.get();
-    if (!st || !st.over) return;
-    if (st.result === 'victory') showVictory(st);
-    else if (st.result === 'defeat') showDefeat();
-    else end(st.result || 'fled');
-  }
-
-  function showVictory(st){
+  function showVictory() {
+    var stt = C3.get();
     var veil = ui.el('div', 'battle-panel-veil');
     var card = ui.el('div', 'result-card');
     card.appendChild(ui.el('h2', null, 'Encore!'));
     var lines = ui.el('div', 'result-lines');
-    var rw = st.rewards || {};
+    var rw = (stt && stt.rewards) || {};
     lines.appendChild(ui.el('div', 'big', '+' + (rw.xp || 0) + ' XP · +' + (rw.shards || 0) + ' ◆'));
-    (rw.levelUps || []).forEach(function(l){
-      lines.appendChild(ui.el('div', 'lvl', charName(l.memberId) + ' reached Lv ' + l.level + '!'));
+    (rw.levelUps || []).forEach(function (l) {
+      var def = (CHLOE.data.characters || {})[l.memberId] || {};
+      lines.appendChild(ui.el('div', 'lvl', (def.name || l.memberId) + ' reached Lv ' + l.level + '!'));
     });
-    (rw.learned || []).forEach(function(l){
-      lines.appendChild(ui.el('div', 'lvl', charName(l.memberId) + ' learned ' + l.name + '!' +
-        (l.unequipped ? ' (loadout full)' : '')));
-    });
-    (rw.drops || []).forEach(function(d){ lines.appendChild(ui.el('div', null, 'Found: ' + d)); });
+    if ((rw.levelUps || []).length) {
+      lines.appendChild(ui.el('div', null, 'Spend the point in Menu → Skill Tree to unlock a new ability or keybind.'));
+    }
+    (rw.drops || []).forEach(function (d) { lines.appendChild(ui.el('div', null, 'Found: ' + d)); });
     card.appendChild(lines);
-    var cont = ui.el('button', null, 'Continue');
-    cont.addEventListener('click', function(){
+    var b = ui.el('button', null, 'Continue');
+    b.addEventListener('click', function () {
       if (veil.parentNode) veil.parentNode.removeChild(veil);
       end('victory');
     });
-    card.appendChild(cont);
+    card.appendChild(b);
     veil.appendChild(card);
     root().appendChild(veil);
   }
 
-  function showDefeat(){
-    // roguelike §15: the run summary, same as the 2D battle screen
+  function showDefeat() {
     var veil = ui.el('div', 'battle-panel-veil');
     var card = ui.el('div', 'result-card defeat');
     card.appendChild(ui.el('h2', null, 'The Night Wins'));
     var dl = ui.el('div', 'result-lines');
     dl.appendChild(ui.el('div', null, 'The church keeps what it takes...'));
-    var st = party.state, topLv = 1;
-    (st.members || []).forEach(function(m){ if (m.level > topLv) topLv = m.level; });
-    var kills = (st.runStats && st.runStats.kills) || 0;
-    dl.appendChild(ui.el('div', 'big', 'Run over — Lv ' + topLv + ' · ◆ ' + (st.shards || 0) +
+    var s = party.state, topLv = 1;
+    (s.members || []).forEach(function (m) { if (m.level > topLv) topLv = m.level; });
+    var kills = (s.runStats && s.runStats.kills) || 0;
+    dl.appendChild(ui.el('div', 'big', 'Run over — Lv ' + topLv + ' · ◆ ' + (s.shards || 0) +
       ' · ' + kills + (kills === 1 ? ' fight won' : ' fights won')));
     dl.appendChild(ui.el('div', null, 'Every night starts from nothing.'));
     card.appendChild(dl);
-    var re = ui.el('button', null, 'Begin again');
-    re.addEventListener('click', function(){
+    var b = ui.el('button', null, 'Begin again');
+    b.addEventListener('click', function () {
       if (veil.parentNode) veil.parentNode.removeChild(veil);
       end('defeat');
     });
-    card.appendChild(re);
+    card.appendChild(b);
     veil.appendChild(card);
     root().appendChild(veil);
   }
 
-  function end(result){
+  function end(result) {
     active = false;
     clearTimers();
-    hidePrompt(); hidePanel();
+    unwireKeys();
+    hidePrompt();
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     a3d.stop();
-    // same funnel as the 2D battle: room3d's wrapper picks this up
     CHLOE.ui.scene.onBattleEnd(result);
   }
 
   return {
     begin: begin,
     /* test hooks */
-    _active: function(){ return active; }
+    _fire: fire, _evade: doEvade, _active: function () { return active; },
+    _swing: enemySwing
   };
 })();

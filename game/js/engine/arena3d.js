@@ -50,7 +50,7 @@ CHLOE.engine = CHLOE.engine || {};
   var canvas = null, renderer = null, scene = null, camera = null;
   var rafId = 0, lastTime = 0, elapsed = 0, renderFailed = false;
   var LIGHT_SCALE = 1;       // becomes PI under physicallyCorrectLights (§14)
-  var ENV_INTENSITY = 0.75;
+  var ENV_INTENSITY = 1.05;
   var envMapOk = false;
 
   var cfg = null;
@@ -72,6 +72,15 @@ CHLOE.engine = CHLOE.engine || {};
     baseRot: 0
   };
 
+  /* §17 first-person arms: the punch rig is parented to the camera with its
+     head bone collapsed, so you see your own arms swing. */
+  var fp = {
+    root: null, mixer: null, clips: {}, action: null,
+    loaded: false, headBone: null
+  };
+  var evadeMove = null;   // {dx, dz, t, dur} active dash
+  var castingId = null;   // ability currently animating
+
   // attack playback
   var atk = {
     mode: 'idle',    // idle | telegraph | strike | recover
@@ -84,6 +93,12 @@ CHLOE.engine = CHLOE.engine || {};
   };
 
   function D() { return (CHLOE.data && CHLOE.data.arena3d) || {}; }
+  /* Append the asset version so a rebuilt .glb is never served from cache. */
+  function versioned(path) {
+    if (!path) return path;
+    var v = D().assetVersion;
+    return v ? path + (path.indexOf('?') === -1 ? '?v=' : '&v=') + v : path;
+  }
 
   // ---------------------------------------------------------------- loaders
   function makeLoader() {
@@ -111,7 +126,7 @@ CHLOE.engine = CHLOE.engine || {};
     var fallbackTimer = window.setTimeout(function () {
       if (!churchLoaded && !churchFallback) churchFallback = buildFallbackChurch();
     }, 12000);
-    loader.load(models.church, function (gltf) {
+    loader.load(versioned(models.church), function (gltf) {
       window.clearTimeout(fallbackTimer);
       try {
         var g = gltf.scene;
@@ -231,7 +246,7 @@ CHLOE.engine = CHLOE.engine || {};
     var fallbackTimer = window.setTimeout(function () {
       if (!knight.model) attach(buildFallbackKnight());
     }, 12000);
-    loader.load(models.knight, function (gltf) {
+    loader.load(versioned(models.knight), function (gltf) {
       window.clearTimeout(fallbackTimer);
       try {
         if (knight.model) { knight.group.remove(knight.model); knight.model = null; knight.mats.length = 0; }
@@ -281,7 +296,7 @@ CHLOE.engine = CHLOE.engine || {};
     try {
       pmrem = new THREE.PMREMGenerator(renderer);
       pmrem.compileEquirectangularShader();
-      new THREE.RGBELoader().load(path, function (hdrTex) {
+      new THREE.RGBELoader().load(versioned(path), function (hdrTex) {
         try {
           if (!pmrem || renderFailed) { bail(); return; }
           scene.environment = pmrem.fromEquirectangular(hdrTex).texture;
@@ -344,13 +359,15 @@ CHLOE.engine = CHLOE.engine || {};
     altar.position.set(al.x || 0, al.y || 2.6, al.z || -5.5);
     scene.add(altar);
 
-    // neutral key above the arena so the knight and the aisle stay readable
-    var k = L.key || {};
-    var key = new THREE.PointLight(k.color != null ? k.color : 0xc8d4ea,
-      (k.intensity != null ? k.intensity : 1.5) * LIGHT_SCALE,
-      k.distance || 22, k.decay || 1.5);
-    key.position.set(k.x || 0, k.y || 5.2, k.z || 1.5);
-    scene.add(key);
+    // neutral keys above the arena so the knight and the aisle stay readable
+    [L.key, L.key2].forEach(function (k) {
+      if (!k) return;
+      var kl = new THREE.PointLight(k.color != null ? k.color : 0xd8e2f2,
+        (k.intensity != null ? k.intensity : 3.0) * LIGHT_SCALE,
+        k.distance || 24, k.decay || 1.4);
+      kl.position.set(k.x || 0, k.y || 5, k.z || 0);
+      scene.add(kl);
+    });
 
     var cands = L.candles || [];
     for (var i = 0; i < cands.length; i++) {
@@ -366,6 +383,204 @@ CHLOE.engine = CHLOE.engine || {};
   var candleLights = [];
 
   function cfgSpawn() { return D().playerSpawn || { x: 0, z: 4.6, yaw: 0 }; }
+
+  // ------------------------------------------------- first-person arms (§17)
+  /* The punch rig is parented to the camera with its head bone collapsed, so
+     the player sees their own arms swing. Missing asset = no arms, never a
+     crash: the fight still resolves through engine/combat3.js. */
+  function loadFirstPerson() {
+    var loader = makeLoader();
+    var models = D().models || {};
+    if (!loader || !models.punch) return;
+    loader.load(versioned(models.punch), function (gltf) {
+      try {
+        var place = D().firstPerson || {};
+        var model = gltf.scene;
+
+        /* Auto-fit instead of hand-tuned offsets: the source rig arrives
+           lying along its longest axis and at an arbitrary scale, so measure
+           it, stand that axis up, scale to a real body height, and drop it so
+           the camera sits at eye level. Wrapped in a group so the animation
+           keeps driving the model's own transform. */
+        /* Fit from the SKELETON, not Box3: setFromObject on a SkinnedMesh
+           reports un-posed bind bounds, which gave a wrong up-axis and scale.
+           Measure inside a detached group (identity transform) so bone world
+           positions ARE rig-local, then anchor the head bone to the camera so
+           the player looks out of the character's own eyes. */
+        fp.root = new THREE.Group();
+        fp.root.add(model);
+        fp.root.updateMatrixWorld(true);
+
+        var bones = {};
+        model.traverse(function (o) { if (o.isBone) bones[o.name] = o; });
+        var head = bones.Head_M, foot = bones.Ankle_L || bones.Ankle_R || bones.Root_M;
+        var targetH = place.height || 1.75;
+        var hv = new THREE.Vector3(), fv = new THREE.Vector3();
+
+        if (head && foot) {
+          head.getWorldPosition(hv); foot.getWorldPosition(fv);
+          var d = hv.clone().sub(fv);
+          var ax = Math.abs(d.x), ay = Math.abs(d.y), az = Math.abs(d.z);
+          if (az >= ay && az >= ax) model.rotation.x = (d.z > 0) ? -Math.PI / 2 : Math.PI / 2;
+          else if (ax >= ay) model.rotation.z = (d.x > 0) ? Math.PI / 2 : -Math.PI / 2;
+          /* Face the same way as the camera (-Z) so punches travel forward.
+             This spin goes on the WRAPPER, not the model: composing it into
+             the same Euler as the stand-up rotation flips the rig upside down. */
+          fp.root.rotation.y = (place.rotY != null ? place.rotY : Math.PI);
+          fp.root.updateMatrixWorld(true);
+
+          head.getWorldPosition(hv); foot.getWorldPosition(fv);
+          var span = Math.abs(hv.y - fv.y);
+          // the head BONE sits at roughly 0.9 of standing height
+          if (span > 0.001) model.scale.multiplyScalar((targetH * 0.9) / span);
+          fp.root.updateMatrixWorld(true);
+
+          // put the head bone exactly where the camera is, then nudge to taste
+          head.getWorldPosition(hv);
+          fp.root.position.set(
+            (place.x || 0) - hv.x,
+            (place.y || 0) - hv.y,
+            (place.z || 0) - hv.z
+          );
+        }
+        fp.model = model;
+        model.traverse(function (o) {
+          if (o.isMesh) {
+            o.frustumCulled = false;    // it hugs the near plane
+            o.renderOrder = 900;
+            var mats = Array.isArray(o.material) ? o.material : [o.material];
+            for (var i = 0; i < mats.length; i++) {
+              if (!mats[i]) continue;
+              /* Sitting right at the lens with nothing occluding them, the
+                 arms take the full arena key + IBL and blow out to white.
+                 Pin a flesh tone and damp the environment (same lesson as the
+                 dressing-room hands). */
+              if (mats[i].color) mats[i].color.setRGB(0.27, 0.18, 0.15);
+              if ('envMapIntensity' in mats[i]) mats[i].envMapIntensity = 0.06;
+              if (typeof mats[i].metalness === 'number') mats[i].metalness = 0;
+              if (typeof mats[i].roughness === 'number') mats[i].roughness = 0.9;
+            }
+          }
+          if (o.isBone && /^Head_M$/i.test(o.name)) fp.headBone = o;
+        });
+        if (fp.headBone) fp.headBone.scale.setScalar(0.001);
+
+        fp.mixer = new THREE.AnimationMixer(model);
+        (gltf.animations || []).forEach(function (clip) { fp.clips[clip.name] = clip; });
+        camera.add(fp.root);
+        if (scene.children.indexOf(camera) === -1) scene.add(camera);
+        fp.root.visible = false;        // only while swinging
+        fp.loaded = true;
+      } catch (e) { console.warn('[arena3d] first-person rig failed', e); }
+    }, undefined, function () {
+      console.warn('[arena3d] punch.glb failed to load — no first-person arms');
+    });
+  }
+
+  /* Play an ability's clip once, fitted to its cast length so one clip can
+     serve several abilities (§17). */
+  A.playAbility = function (abilityId, clipName, speed, durationMs) {
+    castingId = abilityId;
+    if (!fp.loaded || !fp.mixer) return false;
+    var clip = fp.clips[clipName] || fp.clips.Punch;
+    if (!clip) return false;
+    if (fp.action) fp.action.stop();
+    fp.action = fp.mixer.clipAction(clip);
+    fp.action.reset();
+    fp.action.setLoop(THREE.LoopOnce, 1);
+    fp.action.clampWhenFinished = true;
+    fp.action.timeScale = (durationMs && clip.duration)
+      ? (clip.duration * 1000) / durationMs
+      : (speed || 1);
+    fp.root.visible = true;
+    fp.action.play();
+    return true;
+  };
+
+  /* Live placement tuning for the first-person rig (test hook): the correct
+     offset/rotation is easier to find by looking than by arithmetic. */
+  A._fpPlace = function (x, y, z, rotY, scale) {
+    if (!fp.root) return null;
+    fp.root.position.set(x, y, z);
+    fp.root.rotation.y = rotY;
+    fp.root.scale.setScalar(scale || 1);
+    fp.root.visible = true;
+    var box = new THREE.Box3().setFromObject(fp.root);
+    return { min: box.min.toArray().map(function (v) { return +v.toFixed(2); }),
+             max: box.max.toArray().map(function (v) { return +v.toFixed(2); }) };
+  };
+
+  /* Scrub the current clip to an absolute time (test hook): lets automated
+     checks sample the whole swing without waiting on real time. */
+  A._animSeek = function (seconds) {
+    if (!fp.mixer || !fp.action) return null;
+    fp.action.paused = false;
+    fp.action.time = Math.max(0, seconds);
+    fp.mixer.setTime(Math.max(0, seconds));
+    fp.mixer.update(0);
+    return { time: fp.action.time, duration: fp.action.getClip().duration };
+  };
+
+  /* Bone probe (test hook): Box3 on a SkinnedMesh returns un-posed bind
+     bounds, so rig fitting has to be measured from the skeleton instead. */
+  A._fpBones = function (names) {
+    if (!fp.model) return null;
+    var want = names || ['Head_M', 'Root_M', 'Ankle_L', 'Wrist_L', 'Wrist_R', 'Chest_M'];
+    var out = {};
+    fp.model.updateMatrixWorld(true);
+    fp.model.traverse(function (o) {
+      if (!o.isBone) return;
+      for (var i = 0; i < want.length; i++) {
+        if (o.name === want[i]) {
+          var v = new THREE.Vector3();
+          o.getWorldPosition(v);
+          out[o.name] = [+v.x.toFixed(3), +v.y.toFixed(3), +v.z.toFixed(3)];
+        }
+      }
+    });
+    out._modelScale = fp.model.scale.x;
+    out._modelRotX = +fp.model.rotation.x.toFixed(3);
+    out._camera = camera ? [+camera.position.x.toFixed(2), +camera.position.y.toFixed(2), +camera.position.z.toFixed(2)] : null;
+    return out;
+  };
+
+  A.stopAbility = function () {
+    castingId = null;
+    if (fp.action) { fp.action.stop(); fp.action = null; }
+    if (fp.root) fp.root.visible = false;
+  };
+
+  /* Is the knight inside this ability's reach and arc right now? */
+  A.abilityHits = function (ability) {
+    if (!knight.group || !knight.alive) return false;
+    var dx = knight.group.position.x - pos.x;
+    var dz = knight.group.position.z - pos.z;
+    var dist = Math.sqrt(dx * dx + dz * dz);
+    if (dist > (ability.range || 2.5)) return false;
+    var fx = -Math.sin(yaw), fz = -Math.cos(yaw);   // camera forward
+    var dot = (dx * fx + dz * fz) / (dist || 1);
+    return dot >= Math.cos(((ability.arc || 60) / 2) * Math.PI / 180);
+  };
+
+  /* Dash for the evade: along movement input, or straight back if idle. */
+  A.doEvade = function (distance, durationMs) {
+    var f = ((keys.KeyW || keys.ArrowUp) ? 1 : 0) - ((keys.KeyS || keys.ArrowDown) ? 1 : 0);
+    var s = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+    var sy = Math.sin(yaw), cy = Math.cos(yaw);
+    var dx, dz;
+    if (f || s) {
+      var len = Math.sqrt(f * f + s * s); f /= len; s /= len;
+      dx = (-sy * f + cy * s); dz = (-cy * f - sy * s);
+    } else {
+      var kx = pos.x - (knight.group ? knight.group.position.x : 0);
+      var kz = pos.z - (knight.group ? knight.group.position.z : -1);
+      var kl = Math.sqrt(kx * kx + kz * kz) || 1;
+      dx = kx / kl; dz = kz / kl;
+    }
+    evadeMove = { dx: dx, dz: dz, t: 0, dur: (durationMs || 260) / 1000,
+                  dist: distance || 3.4 };
+    return true;
+  };
 
   // ---------------------------------------------------------------- init/API
   A.init = function (canvasEl) {
@@ -383,7 +598,7 @@ CHLOE.engine = CHLOE.engine || {};
     if (THREE.sRGBEncoding !== undefined) renderer.outputEncoding = THREE.sRGBEncoding;
     if (THREE.ACESFilmicToneMapping !== undefined) {
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.15;
+      renderer.toneMappingExposure = 1.4;
     }
     if ('physicallyCorrectLights' in renderer) {
       renderer.physicallyCorrectLights = true;
@@ -406,6 +621,7 @@ CHLOE.engine = CHLOE.engine || {};
     loadEnvironment();
     loadChurch();
     loadKnight();
+    loadFirstPerson();
     A.reset();
 
     inited = true;
@@ -482,7 +698,14 @@ CHLOE.engine = CHLOE.engine || {};
     yaw += turn * TURN_RATE * dt;
 
     var crouch = isCrouching();
-    var spd = (keys.ShiftLeft || keys.ShiftRight) ? SPRINT : WALK;
+    // §17: sprinting burns stamina — the combat engine vetoes it when dry
+    var wantSprint = !!(keys.ShiftLeft || keys.ShiftRight) && !crouch && (f || s);
+    var sprinting = false;
+    if (wantSprint) {
+      var c3 = CHLOE.engine.combat3;
+      sprinting = (c3 && typeof c3.spendSprint === 'function') ? c3.spendSprint(dt) : true;
+    }
+    var spd = sprinting ? SPRINT : WALK;
     if (crouch) spd *= CROUCH_SPEED;
     var tx = 0, tz = 0;
     if (f || s) {
@@ -494,6 +717,16 @@ CHLOE.engine = CHLOE.engine || {};
     var k = Math.min(1, ACCEL_LERP * dt);
     vel.x += (tx - vel.x) * k;
     vel.z += (tz - vel.z) * k;
+
+    // §17 evade dash: overrides normal velocity for its short duration
+    if (evadeMove) {
+      evadeMove.t += dt;
+      var p = Math.min(1, evadeMove.t / evadeMove.dur);
+      var speedNow = (evadeMove.dist / evadeMove.dur) * (1 - p * 0.65); // ease out
+      vel.x = evadeMove.dx * speedNow;
+      vel.z = evadeMove.dz * speedNow;
+      if (p >= 1) evadeMove = null;
+    }
 
     // axis-separated AABB resolve vs config colliders (pew banks)
     var cols = (cfg.arena && cfg.arena.colliders) || [];
@@ -717,6 +950,7 @@ CHLOE.engine = CHLOE.engine || {};
     elapsed += dt;
     updatePlayer(dt);
     updateKnight(dt);
+    if (fp.mixer) fp.mixer.update(dt);
     updateFx(dt);
     try { renderer.render(scene, camera); }
     catch (e) {

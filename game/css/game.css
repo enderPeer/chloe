@@ -1622,3 +1622,129 @@ button:disabled .cost-chip{ opacity:.7; }
   .b3d-controls{ display:none; }
   .b3d-log{ bottom:calc(10.2rem + env(safe-area-inset-bottom)); font-size:.75rem; }
 }
+
+/* ============================================================
+   Combat v3 — real-time HUD, hotbar, bind screen (spec §17)
+   ============================================================ */
+.b3d-hurt{
+  position:absolute; inset:0; pointer-events:none; z-index:7; opacity:0;
+  background:radial-gradient(ellipse at center, rgba(229,23,63,0) 45%, rgba(229,23,63,.55) 100%);
+}
+.b3d-hurt.on{ animation:b3dHurt .5s ease-out; }
+@keyframes b3dHurt{ 0%{opacity:0;} 15%{opacity:1;} 100%{opacity:0;} }
+
+.b3d-cross{
+  position:absolute; top:50%; left:50%; width:8px; height:8px;
+  transform:translate(-50%,-50%); border-radius:50%;
+  background:rgba(255,255,255,.55); box-shadow:0 0 5px rgba(0,0,0,.9);
+  z-index:5; pointer-events:none; transition:background .12s, transform .12s;
+}
+.b3d-cross.in-reach{ background:var(--red); transform:translate(-50%,-50%) scale(1.6); }
+
+/* resource bars, bottom-left */
+.b3d-res{
+  position:absolute; left:.9rem; bottom:calc(5.6rem + env(safe-area-inset-bottom));
+  width:min(260px, 42vw); display:flex; flex-direction:column; gap:.28rem; z-index:6;
+}
+.b3d-res-row{ display:flex; align-items:center; gap:.4rem; }
+.b3d-res-row .lbl{
+  font-size:.55rem; letter-spacing:.12em; color:var(--dim); width:52px; flex:0 0 auto;
+}
+.b3d-res-bar{
+  flex:1 1 auto; height:9px; border-radius:5px; overflow:hidden;
+  background:rgba(0,0,0,.55); border:1px solid #2a2630;
+}
+.b3d-res-bar .fill{ height:100%; width:100%; transition:width .12s linear; }
+.b3d-res-row.hp .fill{ background:linear-gradient(90deg,#e5173f,#ff5c78); }
+.b3d-res-row.mana .fill{ background:linear-gradient(90deg,#2f6fd0,#7fb3e8); }
+.b3d-res-row.sta .fill{ background:linear-gradient(90deg,#2f9b57,#7fd08a); }
+.b3d-res-row .num{ font-size:.6rem; color:var(--dim); width:56px; text-align:right; flex:0 0 auto; }
+
+/* hotbar */
+.b3d-hotbar{
+  position:absolute; left:50%; bottom:calc(1.1rem + env(safe-area-inset-bottom));
+  transform:translateX(-50%); display:flex; gap:.4rem; z-index:6;
+}
+.b3d-slot{
+  position:relative; width:66px; height:66px; overflow:hidden;
+  border:1px solid #2a2630; border-radius:9px; background:rgba(10,10,12,.8);
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  cursor:pointer; user-select:none; transition:border-color .12s, box-shadow .12s;
+}
+.b3d-slot.empty{ opacity:.45; }
+.b3d-slot.ready{ border-color:var(--red); box-shadow:0 0 12px rgba(229,23,63,.3); }
+.b3d-slot .key{
+  position:absolute; top:2px; left:5px; font-size:.6rem; color:var(--dim);
+  font-family:var(--font-head); letter-spacing:.08em;
+}
+.b3d-slot .icon{ font-size:1.5rem; line-height:1; }
+.b3d-slot .nm{
+  font-size:.52rem; color:var(--dim); letter-spacing:.04em; margin-top:.15rem;
+  max-width:92%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.b3d-slot .ch{ position:absolute; top:2px; right:5px; font-size:.62rem; color:#ffd166; }
+.b3d-slot .sweep{
+  position:absolute; left:0; bottom:0; width:100%; height:0%;
+  background:rgba(0,0,0,.66); pointer-events:none; transition:height .1s linear;
+}
+
+/* evade pip */
+.b3d-evade{
+  position:absolute; right:.9rem; bottom:calc(1.4rem + env(safe-area-inset-bottom));
+  padding:.4rem .7rem; border-radius:9px; text-align:center; z-index:6;
+  border:1px solid #2a2630; background:rgba(10,10,12,.8); opacity:.5;
+  transition:opacity .12s, border-color .12s, box-shadow .12s;
+}
+.b3d-evade b{ display:block; font-family:var(--font-head); letter-spacing:.1em; font-size:.85rem; }
+.b3d-evade span{ display:block; font-size:.55rem; color:var(--dim); letter-spacing:.1em; }
+.b3d-evade.ready{ opacity:1; border-color:#7fd08a; box-shadow:0 0 12px rgba(127,208,138,.25); }
+.b3d-evade.iframe{ border-color:#fff; box-shadow:0 0 18px rgba(255,255,255,.5); }
+
+/* cast bar */
+.b3d-cast{
+  position:absolute; left:50%; top:58%; transform:translateX(-50%);
+  width:min(240px,40vw); height:6px; border-radius:4px; z-index:6;
+  background:rgba(0,0,0,.6); border:1px solid #2a2630; overflow:hidden;
+}
+.b3d-cast.hidden{ display:none; }
+.b3d-cast .fill{ height:100%; width:0%; background:linear-gradient(90deg,#e5a017,#ffd166); }
+
+/* ---------- bind screen (Menu -> Moves) ---------- */
+.bind-slots{ display:flex; flex-wrap:wrap; gap:.4rem; margin:.7rem 0; }
+.bind-slot{
+  width:74px; height:70px; border:1px solid #2a2630; border-radius:9px;
+  background:#141317; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; cursor:pointer; position:relative;
+}
+.bind-slot.sel{ border-color:var(--red); box-shadow:0 0 12px rgba(229,23,63,.3); }
+.bind-slot.locked{ opacity:.38; cursor:not-allowed; }
+.bind-slot .key{ position:absolute; top:3px; left:6px; font-size:.6rem; color:var(--dim); }
+.bind-slot .icon{ font-size:1.4rem; }
+.bind-slot .nm{
+  font-size:.52rem; color:var(--dim); max-width:92%;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.bind-head{
+  font-family:var(--font-head); letter-spacing:.1em; color:var(--text);
+  margin:.8rem 0 .4rem; font-size:.95rem;
+}
+.bind-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:.5rem; }
+.bind-card{
+  border:1px solid #2a2630; border-radius:9px; background:#141317;
+  padding:.5rem .6rem; cursor:pointer; transition:border-color .12s;
+}
+.bind-card:hover{ border-color:var(--deep-red); }
+.bind-card.on{ border-color:var(--red); box-shadow:0 0 10px rgba(229,23,63,.22); }
+.bind-card-head{ display:flex; align-items:center; gap:.4rem; }
+.bind-card-head .icon{ font-size:1.15rem; }
+.bind-card-head .nm{ font-family:var(--font-head); letter-spacing:.06em; }
+.bind-card-head .at{ margin-left:auto; font-size:.58rem; color:var(--red); }
+.bind-card .ds{ color:var(--dim); font-size:.72rem; margin:.3rem 0; }
+.bind-meta{ display:flex; flex-wrap:wrap; gap:.5rem; font-size:.6rem; color:#7f7885; }
+
+@media (max-width:560px){
+  .b3d-slot{ width:52px; height:52px; }
+  .b3d-slot .icon{ font-size:1.1rem; }
+  .b3d-slot .nm{ display:none; }
+  .b3d-res{ width:46vw; }
+}

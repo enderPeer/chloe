@@ -288,6 +288,46 @@ Battles now happen IN 3D: engaging the room's enemy pulls the run into an **old 
 - `CHLOE.ui.battle3d.begin(enemyId)`; every end funnels through `CHLOE.ui.scene.onBattleEnd(result)` exactly like battleui, so room3d's wrapper owns the roguelike outcomes.
 - world3d additions: `onPickup(cb)`, `resetPlayer()` also respawns pickups; debug() gains crouch/eye/pickupHover/pickupsLeft/hands.
 
+> **Superseded by §17**: the turn-based round loop described below is replaced by real-time Combat v3. The church, the knight, the telegraphed patterns and the dodge rules all stay exactly as specified here — only the player's side became real-time.
+
 ### Balance targets
 A first-run solo Chloe beats the knight in 4-5 rounds IF she dodges most swings; face-tanking every pattern loses. slash is the common swing (weight 3), charge the rare heavy (weight 1, 170% power). The chart makes occult take 2x physical, so the knight carries `resists:{physical:1.0}` — the plate blunts that back to NEUTRAL (a chart override, not a reduction). Fire stays chart-halved; divine (Voice tree) burns it 2x later. Tree resist nodes are PERCENT cuts applied after the chart (arena.js mirrors battle.js), never chart multipliers.
 
+
+## 17. Combat v3 — real-time abilities, hotbar, evade (supersedes the turn-based round loop of §16; the arena, knight patterns and dodge rules of §16 remain)
+
+The fight is no longer turn-based. You stand in the church and play it live: move, sprint, crouch, evade, and fire abilities off the number keys while the knight telegraphs and swings.
+
+### Controls
+`WASD` move · mouse look (click to lock) · `Shift` sprint (drains stamina) · `Ctrl` or `C` crouch (also ducks the Wide Slash) · `SPACE` **evade** (stamina cost, short i-frames, dashes along your movement input or straight back if idle) · `1`-`9` fire the ability bound to that key. Arrows/`Q`/`E` remain the keyboard-only fallback.
+
+### Resources (per fight, from §12 effective stats)
+**life** (hp), **magic** (mana), **stamina**. Abilities declare `cost:{sta?, mana?}`, paid when the cast STARTS. Sprinting drains stamina continuously and stops when dry. Evading costs stamina. Stamina and magic regenerate after a short idle delay (`abilityConfig.regen`), so trading blows is a resource decision, not a spam contest.
+
+### Abilities (`game/js/data/abilities.js`)
+`{ id, name, icon, type, desc, cost, castMs, recoverMs, cooldownMs, charges, rechargeMs, range, arc, power, usesMag, hits, hitAtMs[], anim, animSpeed, grantedBy }`
+- A cast locks other casts until `hitAtMs[last] + recoverMs`.
+- Each entry in `hitAtMs` is a separate hit window; at each one the 3D layer tests reach+arc (`arena3d.abilityHits`) and only then does damage resolve. Walking out mid-flurry drops the remaining hits.
+- Damage: `max(1, round(base * power/100 * chartMult * rand(0.9-1.1) - def*0.5))`, `base` = atk or mag. The §12 type chart and tree resist percentages apply exactly as in §16.
+- `charges` > 1 gives burst uses that refill on `rechargeMs`.
+
+**Authored abilities.** `punch` (Rapid Punches) is the floor and the one that got the animation work: 3 hits, 8 stamina, ~0.7s, weak per hit, always known. `hammer_fist`, `ember_jab` and `hollow_breaker` are tree-granted and reuse the punch rig at different timing/cost/type.
+
+### Hotbar, keybinds and the tree
+Level 1 = **one** key and **one** ability (punch, auto-bound to key 1). Both the abilities and the keys come from the skill tree: nodes carry `grant.ability` (adds to the known pool) and `grant.abilitySlot` (+1 usable number key, capped at 9). Binding happens in **Menu → Moves** (`ui/binds.js`): pick a key, pick a known ability; locked keys show why. Binds live in `party.state.binds[charId]` and are run-scoped like everything else (§15). An ability occupies one key at a time.
+
+### First-person arms (the punch animation)
+`game/assets/3d/punch.glb` (~0.9MB) comes from the supplied `rapid-punching-animation.zip` — a Maya BodyMechanic rig with 92 armatures and ~2070 control empties, of which only `DeformationSystem` (147 bones, action already baked, no constraints) skins the mesh. The converter keeps that armature + mesh, deletes the control rig, purges ~70 orphan actions and exports a single clip named `Punch`.
+
+In-engine the rig is parented to the camera and **fitted from the SKELETON, not `Box3`** — `setFromObject` on a SkinnedMesh returns un-posed bind bounds, which yields a wrong up-axis and scale. Head and ankle bones give the true height and up-axis; the model is stood up, scaled so head-above-feet ≈ 0.9 × body height, and positioned so the **head bone sits exactly at the camera**. The 180° facing spin goes on the WRAPPER group — composing it into the same Euler as the stand-up rotation flips the rig upside down. `Head_M` is scaled to ~0 so the head never blocks the view. Arms are visible only while a cast plays.
+
+### Contracts
+- `CHLOE.engine.combat3`: start/tick/press/evade/spendSprint/hitEnemy/takeHit/snapshot/flee + knownAbilities/slotCount/binds/bind. Pure rules, no DOM, no THREE.
+- `CHLOE.engine.arena3d` gains: `playAbility(id, clip, speed, durationMs)`, `stopAbility()`, `abilityHits(ability)`, `doEvade(distance, durationMs)` and the test hooks `_renderOnce/_look/_animSeek/_fpBones/_fpPlace/_diag`.
+- `CHLOE.ui.battle3d` drives the frame loop, HUD and key input; every end still funnels through `CHLOE.ui.scene.onBattleEnd(result)` so §15's roguelike outcomes are unchanged.
+
+### Asset versioning (why the church looked broken for so long)
+`data/arena3d.js` carries `assetVersion`; every model/HDRI URL is loaded through `versioned()` which appends `?v=N`. **Bump it whenever a `.glb` is rebuilt** — browsers happily served a cached, all-black church long after the fix shipped, which reads as "no textures".
+
+### Balance targets
+Punch alone should beat the knight but slowly and only with clean dodging — it is deliberately the worst option per stamina. Every tree ability must beat it in damage-per-stamina or reach. Sprint + evade together must not outpace stamina regen, so repositioning has a cost.
