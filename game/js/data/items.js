@@ -20,6 +20,9 @@ CHLOE.data.items = {
     id: 'adrenaline_shot', name: 'Adrenaline Shot', effect: { revivePct: 50 }, price: 60, icon: '💉',
     desc: 'Brings a fallen bandmate back at 50% HP.'
   },
+  /* antidote + tourniquet are SHOP-RESERVED for a future vendor: no drop table
+     or pickup grants them yet, and no current enemy inflicts the statuses they
+     cure. (sage_smoke IS obtainable — the_hollow drops it; shade_touch curses.) */
   antidote: {
     id: 'antidote', name: 'Antidote', effect: { cure: ['poisoned', 'infection'] }, price: 25, icon: '🧪',
     desc: 'Bitter as a bad review. Cures poison and infection.'

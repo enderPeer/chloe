@@ -154,8 +154,11 @@ CHLOE.ui.room3d = (function(){
     if (w && typeof w.debug === 'function') {
       try { d = w.debug(); } catch (e) {}
     }
-    var enemyHover = !!(d && d.enemyAlive && typeof d.enemyDist === 'number' &&
-                        d.enemyDist <= ENGAGE_RANGE);
+    // world3d only fires engage when the crosshair RAY hits the enemy mesh, so
+    // the hint must follow the real aim signal (cbHover), not distance alone —
+    // otherwise "CLICK TO ENGAGE" shows while clicks do nothing.
+    var enemyHover = cbHover === 'enemy' && !!(d && d.enemyAlive) &&
+                     !(typeof d.enemyDist === 'number' && d.enemyDist > ENGAGE_RANGE);
     setHint(enemyHover ? 'enemy' : (tvHovered(d) ? 'tv' : null));
     if (els.overlay) els.overlay.classList.toggle('hidden', isLocked());
     refreshHud();

@@ -49,9 +49,7 @@ CHLOE.engine.progression = (function(){
 
   function cap(){
     var c = CHLOE.data && CHLOE.data.config && CHLOE.data.config.levelCap;
-    // v3 cap is 100; a lingering v2 config value of 50 is superseded (spec §12).
-    if (!c || c === 50) return 100;
-    return c;
+    return c || 100; // spec §12: cap 100 (config.js is the single source of truth)
   }
 
   function xpToNext(level){
@@ -265,6 +263,7 @@ CHLOE.engine.progression = (function(){
     var before = movesAt(charDef, member.level);
     member.xp += Math.round(xp);
 
+    var wasDown = member.hp <= 0; // KO'd members stay down through a level-up
     while (member.level < cap() && member.xp >= xpToNext(member.level)) {
       member.xp -= xpToNext(member.level);
       member.level += 1;
@@ -276,6 +275,8 @@ CHLOE.engine.progression = (function(){
       member.stamina = Math.max(member.stamina || 0, 0) + Math.round(baseAndGrowth(charDef, 'stamina').g);
       member.faith = Math.max(member.faith || 0, 0) + Math.round(baseAndGrowth(charDef, 'faith').g);
     }
+    // the pool bumps must not silently revive a downed member (revive items own that)
+    if (wasDown) member.hp = 0;
     if (member.level >= cap()) member.xp = 0;
 
     // §12: each level grants +1 skill point (spent in the skill tree screen)

@@ -53,7 +53,11 @@
        statusImmune respected, tree statusResist reduces buildup taken, item
        effect cure:[ids] works mid-battle, everything clears at battle end.
      - tree passive hooks: onKillLifePct, staminaRegenPct, blockPower
-       (multiplies the 80% block reduction), resists:{type:pct} damage cut.
+       (multiplies the 80% block reduction), resists:{type:pct} damage cut,
+       plus the keystone grants: faithPerTurn, healPowerPct, spdPct,
+       burnBuildupPct/shockBuildupPct (buildup inflicted), fireDamagePct
+       (vs burning), ghostOccultDamagePct, vsStatusedDamagePct, dotDamagePct,
+       chargedDodgePct, deathDefianceOnce (once per battle).
 
    Resolution order per move (spec §10.4, implemented exactly):
      1 MP  2 stance  3 status  4 defense (block until own next turn)
@@ -170,6 +174,7 @@ CHLOE.engine.battle = (function(){
         e: { buildup: {}, active: {} }
       },
       boss: !!(def.boss || (opts && opts.boss)),
+      defianceUsed: false,  // tree keystone deathDefianceOnce: once per battle
       over: false,
       result: null,
       rewards: null,
@@ -251,7 +256,12 @@ CHLOE.engine.battle = (function(){
     return mult;
   }
 
-  function effStat(s, stat){ return baseStats(s)[stat] * statMod(s, stat) * statusStatMult(s, stat); }
+  function effStat(s, stat){
+    var v = baseStats(s)[stat] * statMod(s, stat) * statusStatMult(s, stat);
+    // tree keystone: spdPct (+% speed) — enemies have no tree, so this is 0
+    if (stat === 'spd') v *= 1 + (treePassives(s).spdPct || 0) / 100;
+    return v;
+  }
   function maxHpOf(s){
     if (s === 'e') return state.enemy.maxHp;
     var m = party().active();
@@ -308,7 +318,10 @@ CHLOE.engine.battle = (function(){
     if (!bu || !bu.status || !(bu.amount > 0) || !STATUS_DEFS[bu.status]) return;
     var id = bu.status;
     if (statusImmune(s, id)) { log(ev, actorName(s) + ' is immune to ' + id + '.', ''); return; }
-    var amt = Math.round(bu.amount * (1 - statusResistPct(s, id) / 100));
+    // tree keystones: burnBuildupPct / shockBuildupPct boost buildup INFLICTED
+    // by the attacker (always other(s); enemies have no tree -> 0)
+    var inflictPct = treePassives(other(s))[id + 'BuildupPct'] || 0;
+    var amt = Math.round(bu.amount * (1 + inflictPct / 100) * (1 - statusResistPct(s, id) / 100));
     if (amt <= 0) return;
     var meters = statusState(s).buildup;
     var v = (meters[id] || 0) + amt;
@@ -360,6 +373,16 @@ CHLOE.engine.battle = (function(){
     var m = party().active();
     if (!m) return false;
     var eff = party().effStats(m);
+    // tree keystone: deathDefianceOnce — once per battle a lethal hit leaves
+    // the member at 1 life instead of downing them
+    if (m.hp - amount <= 0 && !state.defianceUsed && treePassives('p').deathDefianceOnce) {
+      state.defianceUsed = true;
+      m.hp = 1;
+      ev.push({ t: 'dmg', side: 'p', amount: amount, mult: mult, hpAfter: m.hp, maxHp: eff.maxHp,
+                memberId: m.id, blocked: !!extra.blocked, dot: !!extra.dot, label: extra.label || '' });
+      log(ev, charName(m.id) + ' refuses to go down!', 'hot');
+      return false;
+    }
     m.hp = Math.max(0, m.hp - amount);
     ev.push({ t: 'dmg', side: 'p', amount: amount, mult: mult, hpAfter: m.hp, maxHp: eff.maxHp,
               memberId: m.id, blocked: !!extra.blocked, dot: !!extra.dot, label: extra.label || '' });
@@ -381,6 +404,9 @@ CHLOE.engine.battle = (function(){
 
   function healSide(ev, s, amount){
     if (!(amount > 0)) return;
+    // tree keystone: healPowerPct — the player's healing restores +n% more
+    var healPct = treePassives(s).healPowerPct || 0;
+    if (healPct) amount = Math.round(amount * (1 + healPct / 100));
     // infection: healing halved while active (§12)
     if (hasStatus(s, 'infection')) amount = Math.max(1, Math.floor(amount * (STATUS_DEFS.infection.healMult || 0.5)));
     if (s === 'e') {
@@ -499,7 +525,8 @@ CHLOE.engine.battle = (function(){
     }
     var maxFaith = eff.faith || 0;
     if (!cursed && maxFaith && (m.faith || 0) < maxFaith) {
-      m.faith = (m.faith || 0) + 1;
+      // tree keystone: faithPerTurn — bonus faith on top of the base +1
+      m.faith = Math.min(maxFaith, (m.faith || 0) + 1 + (treePassives('p').faithPerTurn || 0));
       ev.push({ t: 'res', side: 'p', kind: 'faith', after: m.faith, memberId: m.id });
     }
   }
@@ -536,6 +563,24 @@ CHLOE.engine.battle = (function(){
       log(ev, actorName(t) + ' is afflicted by ' + mv.name + '!', 'sys');
       ev.push({ t: 'status', side: t, kind: 'dot', amount: oAmt, turns: oTurns, name: mv.name });
     }
+    // cleanse:true — clears every active §12 status AND all buildup on the user
+    if (eff.cleanse) {
+      var stS = statusState(s), cleared = false;
+      for (var cid in stS.active) {
+        if (!Object.prototype.hasOwnProperty.call(stS.active, cid)) continue;
+        delete stS.active[cid];
+        ev.push({ t: 'status', side: s, kind: 'clear', status: cid });
+        cleared = true;
+      }
+      stS.buildup = {};
+      if (cleared) log(ev, 'The afflictions on ' + actorName(s) + ' wash away.', s === 'p' ? 'hot' : '');
+    }
+  }
+
+  // effect.lifesteal on attack moves: the attacker drinks n% of damage dealt.
+  function applyLifesteal(ev, a, mv, dmg){
+    var pct = mv.effect && mv.effect.lifesteal;
+    if (pct > 0) healSide(ev, a, Math.max(1, Math.round(dmg * pct / 100)));
   }
 
   function doAttack(ev, a, mv){
@@ -549,6 +594,17 @@ CHLOE.engine.battle = (function(){
       ev.push({ t: 'miss', side: a, moveId: mv.id, label: 'WHIFF' });
       setPhase(ev, a, 'staggered', 'whiff');
       return;
+    }
+
+    // tree keystone: chargedDodgePct — a charged defender may slip the attack
+    // entirely (no stagger for the attacker; the swing simply finds nothing)
+    if (getPhase(b) === 'charged') {
+      var dodgePct = treePassives(b).chargedDodgePct || 0;
+      if (dodgePct && Math.random() < dodgePct / 100) {
+        log(ev, actorName(b) + ' slips through the veil!', b === 'p' ? 'hot' : 'sys');
+        ev.push({ t: 'miss', side: a, moveId: mv.id, label: 'DODGED' });
+        return;
+      }
     }
 
     // RAW type multiplier (v3 types.js chart, legacy elements fallback) —
@@ -567,6 +623,18 @@ CHLOE.engine.battle = (function(){
     var resistPct = (treePassives(b).resists || {})[moveType(mv)] || 0;
     if (resistPct) dmg = Math.max(1, Math.round(dmg * (1 - Math.min(90, resistPct) / 100)));
 
+    // tree keystones: conditional damage bonuses (enemies have no tree -> all 0)
+    var ap = treePassives(a), mt = moveType(mv), dmgBonus = 0;
+    if (mt === 'fire' && hasStatus(b, 'burn')) dmgBonus += ap.fireDamagePct || 0;
+    if (mt === 'ghost' || mt === 'occult') dmgBonus += ap.ghostOccultDamagePct || 0;
+    if (ap.vsStatusedDamagePct) {
+      var bAct = statusState(b).active;
+      for (var sid in bAct) {
+        if (Object.prototype.hasOwnProperty.call(bAct, sid)) { dmgBonus += ap.vsStatusedDamagePct; break; }
+      }
+    }
+    if (dmgBonus) dmg = Math.max(1, Math.round(dmg * (1 + dmgBonus / 100)));
+
     // active block matching cat OR element: x0.2, attacker staggered, defender stays guarded
     var blk = state.blocks[b];
     var blocked = !!(blk && (
@@ -580,8 +648,10 @@ CHLOE.engine.battle = (function(){
       dmg = Math.max(1, Math.round(dmg * (1 - reduction)));
       log(ev, actorName(b) + ' blocks it!', 'sys');
       ev.push({ t: 'block', side: b, kind: 'hit', moveId: blk.moveId, label: 'BLOCKED' });
-      applyDamage(ev, b, dmg, elemMult, { blocked: true });
-      addBuildup(ev, b, mv.buildup); // a blocked hit still lands (x0.2)
+      var koedBlk = applyDamage(ev, b, dmg, elemMult, { blocked: true });
+      // a blocked hit still lands (x0.2) — but never on a switched-in member
+      if (!koedBlk) addBuildup(ev, b, mv.buildup);
+      applyLifesteal(ev, a, mv, dmg);
       setPhase(ev, a, 'staggered', 'blocked');
       return;
     }
@@ -591,6 +661,7 @@ CHLOE.engine.battle = (function(){
       { label: elemMult >= 2 ? 'SUPER' : (elemMult <= 0.5 ? 'RESIST' : '') });
     if (elemMult <= 0.5 && !koed) log(ev, actorName(b) + ' shrugs it off...', '');
     if (!koed) addBuildup(ev, b, mv.buildup); // §12 status buildup on hit
+    applyLifesteal(ev, a, mv, dmg);
     // tree keystone: onKillLifePct — a kill feeds the killer
     if (koed && b === 'e' && a === 'p') {
       var lifePct = treePassives('p').onKillLifePct || 0;
@@ -629,6 +700,7 @@ CHLOE.engine.battle = (function(){
     }
     if (cat === 'status') {
       applyEffect(ev, s, mv);
+      addBuildup(ev, other(s), mv.buildup); // §12: status moves land their buildup too
       return;
     }
     if (cat === 'defense') {
@@ -695,6 +767,11 @@ CHLOE.engine.battle = (function(){
       var d = STATUS_DEFS[id];
       if (d && d.tickPct && hpOf(s) > 0 && !state.over) {
         var tick = Math.max(1, Math.round(maxHpOf(s) * d.tickPct / 100));
+        // tree keystone: dotDamagePct — statuses the player inflicts tick harder
+        if (s === 'e') {
+          var dotPct = treePassives('p').dotDamagePct || 0;
+          if (dotPct) tick = Math.round(tick * (1 + dotPct / 100));
+        }
         log(ev, actorName(s) + ' suffers from ' + id + '!', 'sys');
         ev.push({ t: 'status', side: s, kind: 'tick', status: id, amount: tick });
         applyDamage(ev, s, tick, 1, { dot: true });

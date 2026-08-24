@@ -32,17 +32,9 @@ CHLOE.data.room3d = {
     enemyFallback: 'assets/gen/enemy-the-hollow.jpg'
   },
 
-  /* ==================== PATHS BLOCK — VERIFY AGAINST MANIFEST ====================
-     tools/model-manifest.json was NOT on disk when this file was built. The paths
-     below are the CANONICAL guessed pattern from GAME_SPEC.md section 14:
-       hdri   -> game/assets/hdri/<file>.hdr
-       models -> game/assets/models/<canonical id>/<entryFile>.gltf
-     VERIFY AGENT: replace `hdri` and each `models.*` value with the manifest's
-     real entryFile paths. KEEP the keys (sofa/tv/lamp/vanity/chair) — the engine
-     looks models up by canonical id. Paths here must be relative to
-     game/index.html (i.e. strip any leading "game/" from manifest paths).
-     A missing/404 file is safe: the engine falls back per item.
-  ================================================================================ */
+  /* hdri + models paths verified against tools/model-manifest.json entryFile
+     values (repo paths minus the leading "game/"); all files are on disk.
+     A missing/404 file is still safe: the engine falls back per item. */
   hdri: 'assets/hdri/creepy_bathroom_1k.hdr',
   models: {
     sofa:   'assets/models/sofa/Sofa_01_1k.gltf',
@@ -53,13 +45,11 @@ CHLOE.data.room3d = {
     clutter1: 'assets/models/clutter1/cassette_player_1k.gltf',
     clutter2: 'assets/models/clutter2/wine_bottles_01_1k.gltf'
   },
-  /* ================================ END PATHS BLOCK ============================ */
 
   // TV screen plane, local to the TV furniture group (x right, y up from floor,
   // z toward the room = out of the tube face). w/h in meters.
   //  - model:    used when the GLTF tv model loads; offsets fit the plane over the
   //              tube face AFTER the model is scaled to targetH and floor-dropped.
-  //              (VERIFY AGENT: tune y/z/w/h against the actual manifest model.)
   //  - fallback: matches the textured-box TV builder (stand 45% + body 50% of h).
   tvScreen: {
     model:    { x: 0, y: 0.55, z: 0.26, w: 0.42, h: 0.32 },

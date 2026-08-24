@@ -27,7 +27,6 @@ CHLOE.ui.menu = (function(){
 
   function render(){
     var l = ui.clear(layer());
-    l.addEventListener && l.setAttribute('data-open', '1');
     var card = ui.el('div', 'menu-card');
 
     var tabs = ui.el('div', 'menu-tabs');

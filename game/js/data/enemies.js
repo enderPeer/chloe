@@ -28,7 +28,8 @@ CHLOE.data.enemies = {
     statusImmune: ['haunt', 'bleed'],         // can't haunt an absence; nothing in it bleeds
     moveset: ['shade_touch', 'dead_air', 'hollow_stare'],
     ai: 'phased',
-    rewards: { xp: 10, shards: 6, drops: [ { itemId: 'bandage', chance: 0.5 } ] },
+    // sage_smoke cures the curse its own shade_touch builds up
+    rewards: { xp: 10, shards: 6, drops: [ { itemId: 'bandage', chance: 0.5 }, { itemId: 'sage_smoke', chance: 0.25 } ] },
     desc: 'A stagehand-shaped absence. It still remembers how to reach for you.'
   },
   neon_wisp: {

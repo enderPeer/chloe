@@ -221,8 +221,9 @@ CHLOE.engine.tree = (function(){
     return out;
   }
 
-  /* Aggregated passive/keystone grants. Numbers SUM, blockPower values MULTIPLY
-     (it scales the 80% block reduction), resists/statusResist merge by summed pct. */
+  /* Aggregated passive/keystone grants. Numbers SUM, blockPower percent grants
+     compound multiplicatively (each grant of n => x(1+n/100) on the 80% block
+     reduction), resists/statusResist merge by summed pct. */
   function passives(charId){
     var out = { resists: {}, statusResist: {}, staminaRegenPct: 0, onKillLifePct: 0, blockPower: 1 };
     var list = ownedList(charId);
@@ -242,7 +243,9 @@ CHLOE.engine.tree = (function(){
             out.statusResist[s] = (out.statusResist[s] || 0) + v[s];
           }
         } else if (k === 'blockPower') {
-          out.blockPower *= (typeof v === 'number' && v > 0) ? v : 1;
+          // grants are PERCENTAGES (blockPower:15 => x1.15 on the 80% block
+          // reduction); battle.js multiplies 0.8 by the aggregated factor
+          out.blockPower *= (typeof v === 'number' && v > 0) ? 1 + v / 100 : 1;
         } else if (typeof v === 'number') {
           out[k] = (out[k] || 0) + v;
         } else {
