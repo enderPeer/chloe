@@ -193,6 +193,28 @@ CHLOE.engine.tree = (function(){
     return out;
   }
 
+  /* §17 Combat v3: nodes may grant a real-time ability (grant.ability) and
+     extra number-key slots (grant.abilitySlot). */
+  function abilities(charId){
+    var list = ownedList(charId), out = [];
+    for (var i = 0; i < list.length; i++) {
+      var n = node(charId, list[i]);
+      if (n && n.grant && n.grant.ability && out.indexOf(n.grant.ability) === -1) {
+        out.push(n.grant.ability);
+      }
+    }
+    return out;
+  }
+
+  function abilitySlots(charId){
+    var list = ownedList(charId), n = 0;
+    for (var i = 0; i < list.length; i++) {
+      var d = node(charId, list[i]);
+      if (d && d.grant && d.grant.abilitySlot) n += d.grant.abilitySlot;
+    }
+    return n;
+  }
+
   function statGrants(charId){
     var out = {}, i, k;
     for (i = 0; i < STAT_KEYS.length; i++) out[STAT_KEYS[i]] = 0;
@@ -274,6 +296,8 @@ CHLOE.engine.tree = (function(){
     respecCost: respecCost,
     respec: respec,
     treeMoves: treeMoves,
+    abilities: abilities,
+    abilitySlots: abilitySlots,
     statGrants: statGrants,
     passives: passives,
     effectiveStats: effectiveStats,

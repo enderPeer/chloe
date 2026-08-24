@@ -8,9 +8,15 @@ window.CHLOE = window.CHLOE || {};
 CHLOE.data = CHLOE.data || {};
 
 CHLOE.data.arena3d = {
+  /* Bump assetVersion whenever a .glb here is rebuilt: the loaders append it
+     as ?v=N so browsers that cached an older build refetch instead of
+     rendering the stale one (a cached all-black church looked like "no
+     textures" long after the fix shipped). */
+  assetVersion: 3,
   models: {
     church: 'assets/3d/church.glb',
-    knight: 'assets/3d/knight.glb'
+    knight: 'assets/3d/knight.glb',
+    punch:  'assets/3d/punch.glb'
   },
   // image-based light for the nave (Poly Haven, CC0)
   hdri: 'assets/hdri/afrikaans_church_interior_1k.hdr',
@@ -43,17 +49,25 @@ CHLOE.data.arena3d = {
 
   eye: { stand: 1.6, crouch: 0.85 },
 
+  /* §17 first-person rig placement: the punch model is parented to the camera,
+     pushed down so the camera sits at its shoulders and back so the fists
+     swing into view. Its head bone is collapsed by the engine. */
+  firstPerson: { x: 0, y: -0.06, z: 0.12, rotY: Math.PI, height: 1.8 },
+
   lights: {
-    // Keep ambient NEUTRAL: a purple-blue ambient plus the red altar accent
-    // turns grey steel mauve.
-    ambient:  { color: 0x5a5f6a, intensity: 1.0 },
-    moon:     { color: 0xaebdd6, intensity: 2.2, x: 6, y: 12, z: -4 }, // shafts
+    /* Lit for PLAYABILITY, not mood: you have to read the knight's windup and
+       your own footing. Keep ambient NEUTRAL — a purple-blue ambient plus the
+       red altar accent turns grey steel mauve. */
+    ambient:  { color: 0x6b707c, intensity: 2.0 },
+    moon:     { color: 0xc2d0e6, intensity: 3.2, x: 6, y: 12, z: -4 }, // shafts
     // red altar glow: an accent behind the knight, far enough back that it
     // silhouettes him instead of painting his armour
     altar:    { color: 0xe5173f, intensity: 1.4, x: 0, y: 2.4, z: -9, distance: 16, decay: 1.7 },
     knight:   { color: 0xff2038, intensity: 0.55, distance: 4.5, decay: 2 }, // pools at his feet
     // cool key over the fight so steel reads as steel
-    key:      { color: 0xc8d4ea, intensity: 1.5, x: 0, y: 5.2, z: 1.5, distance: 22, decay: 1.5 },
+    key:      { color: 0xd8e2f2, intensity: 3.4, x: 0, y: 5.2, z: 1.5, distance: 26, decay: 1.4 },
+    // second key further down the aisle so the arena floor stays readable
+    key2:     { color: 0xbfcbe0, intensity: 2.2, x: 0, y: 4.6, z: -4.5, distance: 20, decay: 1.4 },
     candles:  [ { x: -3.2, z: 1.5 }, { x: 3.2, z: 1.5 } ]   // warm flickers
   },
   // The nave is long — keep the haze subtle and far, or the church reads as a

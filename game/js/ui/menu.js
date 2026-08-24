@@ -207,9 +207,11 @@ CHLOE.ui.menu = (function(){
     });
   }
 
-  /* ---------- Moves (loadout editor) ---------- */
+  /* ---------- Moves (§17 ability keybinds; falls back to the v2 editor) ---------- */
   function renderMoves(body){
-    if (CHLOE.ui.loadout && CHLOE.ui.loadout.renderInto) {
+    if (CHLOE.ui.binds && CHLOE.ui.binds.renderInto) {
+      CHLOE.ui.binds.renderInto(body, {});
+    } else if (CHLOE.ui.loadout && CHLOE.ui.loadout.renderInto) {
       CHLOE.ui.loadout.renderInto(body, { readOnly: false });
     } else {
       body.appendChild(ui.el('div', 'menu-note', 'The moves board is dark right now.'));
@@ -226,9 +228,10 @@ CHLOE.ui.menu = (function(){
     };
     add('<b>Explore.</b> You\'re in the room in first person: <span class="k">WASD</span> to move, mouse to look (click the room to lock the view, ESC to release), <span class="k">Ctrl or C</span> to crouch, <span class="k">Shift</span> to sprint. No mouse? Arrows move, <span class="k">Q/E</span> turn.');
     add('<b>Your hands.</b> <span class="k">Left click</span> closes your left hand, <span class="k">right click</span> your right. See something glinting red? Look at it, click, and your hand reaches out and takes it in the motion. Walk up to what haunts the room — when the crosshair lights up, click to engage.');
-    add('<b>Battle.</b> The fight drags you into an <span class="k">old church</span>. It\'s turn-based: every bandmate picks one attack, they land, and then the <span class="k">Hollow Black Knight</span> takes its swing — at YOU, in the room, for real.');
-    add('<b>Evade.</b> When the knight winds up, the prompt tells you what\'s coming. <span class="k">Wide Slash — CROUCH</span> under it (Ctrl or C) or back out of reach. <span class="k">Overhead Ruin</span> and <span class="k">Hollow Charge</span> smash a lane aimed where you STOOD — <span class="k">sidestep</span>. Dodge clean and you take nothing.');
-    add('<b>Attacks.</b> Each attack shows its damage type (colored dot), its cost — <span class="k">stamina</span> for physical moves, <span class="k">magic</span> for spells, <span class="k">faith</span> for the holy and the unholy — and an arrow if it hits a weakness (▲ 2x) or a resistance (▼ half). Stamina comes back a little every round. <span class="k">Struggle</span> is always free.');
+    add('<b>Battle.</b> The fight drags you into an <span class="k">old church</span> — and it is <span class="k">real time</span>. You keep walking, sprinting and crouching while the <span class="k">Hollow Black Knight</span> hunts you. Nothing waits for a turn.');
+    add('<b>Your keys.</b> <span class="k">1-9</span> fire the abilities you bound in <span class="k">Menu → Moves</span>. Each one costs <span class="k">stamina</span> or <span class="k">magic</span>, takes a moment to wind up, and then needs to cool down. Get close — a punch that lands nothing still costs you.');
+    add('<b>Evade.</b> <span class="k">SPACE</span> throws you clear and makes you briefly untouchable — for stamina. When the knight winds up, the prompt says what\'s coming: <span class="k">Wide Slash</span>, crouch under it (Ctrl or C) or back out of reach; <span class="k">Overhead Ruin</span> and <span class="k">Hollow Charge</span> smash a lane aimed where you STOOD, so <span class="k">sidestep</span>. Dodge clean and you take nothing.');
+    add('<b>Getting stronger.</b> You start with <span class="k">one ability on one key</span> — your fists. Every level-up is a skill point: spend it in the <span class="k">Skill Tree</span> to learn a new ability or unlock another number key, then bind it in <span class="k">Moves</span>.');
     add('<b>Falling.</b> If the bandmate the knight is hunting drops, the other steps in as the body. If everyone falls, the run is over — for good.');
     add('<b>One night, one run.</b> CHLOE is a roguelike: nothing is saved, ever. Death starts a fresh run at level 1 with empty pockets, and so does closing or reloading the page. Make the night count.');
     add('<b>Shards ◆.</b> Splinters of the club\'s broken mirror wall — the only currency the Between respects. Yours until the run ends.');
