@@ -418,3 +418,60 @@ Clamping `envMapIntensity` at material-creation time is not enough. `applyEnvInt
 
 ### Test hooks added
 `arena3d._nav()` (grid summary + `free(x,z)`), `arena3d._probeAt(x,z)` (what is under and over a cell, with mesh and material names — French names in this model: `banc` pew, `autel` altar, `mur-haut` high wall, `sol` floor), `arena3d._bakeExport(cell, pad, tol)`, and `world3d._teleport(x, z)`.
+
+## 21. Loading gate, one ladder in one place, the asteroid, and a knight who levels (extends §20)
+
+### Nothing moves until the scene is there
+The church is 26MB and the knight 6.6MB, and both used to stream in **after** the fight had started: you spawned into grey nothing while an invisible knight walked you down. Both 3D scenes now keep an asset ledger (`arena3d.assetsReady()` / `world3d.assetsReady()` + `assetProgress()`), and `ui/loading.js` holds a veil over the screen until they are ready. Every loader settles its slot on success, failure **and** skip — a missing optional asset must never wedge the gate.
+
+`ui/loading.js` animates in **CSS only**, on purpose: it is on screen precisely when the main thread is busy parsing a 26MB GLB, so it must not ask for JS frames.
+
+### Warming shaders is not enough — warm the textures
+The first Fire Tornado cost **444ms** against a 2.9ms baseline. `renderer.compile()` did not fix it: compile builds shader *programs* but never uploads *textures*, and those go to the GPU lazily on the frame a material is first actually drawn. The tornado, hand sign and asteroid all sit hidden until cast, so every one of their texture uploads landed on a single frame mid-fight.
+
+The warm-up now pushes every texture through `renderer.initTexture()` **and** draws one frame with all hidden objects forced visible, behind the loading veil where the flash is never seen. Measured after: **2.2ms**. Any new hidden VFX gets this for free; anything that bypasses the gate will hitch.
+
+### Winning switches you out of movement mode
+Pointer lock hides the mouse and eats clicks, so the victory card's Continue button was unreachable unless you knew to press Escape. Releasing the *lock* alone is not enough — the keydown listener stays live, so WASD keeps walking the camera behind the card and the PREVENT map keeps eating the Space that would press its button. `arena3d.releaseLock()` hands back the **whole input surface** (`controlOff`) while deliberately leaving the render loop running: `stop()` would tear the arena down and leave the card on a dead canvas, since the renderer has no `preserveDrawingBuffer`. `A.start()` re-arms it.
+
+`requestPointerLock()` returns a promise that Chrome **rejects** inside the exit/enter cooldown. Unhandled, that is a console error, and releasing mid-fight made it reachable — so it is swallowed.
+
+### One ladder, in one place
+**The Skill Tree is deleted** (`ui/tree.js` and its script tag are gone). Progression has been a ladder since §19 — reach the level, gain the row, nothing to spend — so a whole screen for it was a list you had to go and find. It now lives in **Menu → Moves**, next to the keys it unlocks: current level, XP bar, and the rows either side of you. `engine/tree.js` **stays**: `effectiveStats` is still the aggregator behind every stat in the game. Only the *screen* was dead.
+
+**Levels 1-9 are the authored game**, and every ability arrives WITH the key to put it on — granting a move with nowhere to bind it reads as a bug, not a reward:
+
+| Lv | Row | Lv | Row |
+|---|---|---|---|
+| 1 | punch + key 1 | 6 | hammer_fist + key 4 |
+| 2 | fire_tornado + key 2 | 7 | stat |
+| 3 | **asteroid** + key 3 | 8 | ember_jab + key 5 |
+| 4 | Ash joins | 9 | hollow_breaker + key 6 |
+| 5 | stat | 10+ | generated growth to 9 keys |
+
+**New moves bind themselves.** `combat3.binds()` auto-places any newly known ability into the first free key. Each ability is auto-placed **once** and remembered in `state.autoBound`; without that memory, deliberately clearing a key would be impossible — the next call would helpfully put it back.
+
+### Asteroid (level 3)
+The first thing you can throw. Both hands up with the sigil, then a burning rock falls out of the vault onto where you **aimed** — scored on your look direction, not proximity, so you pick which cluster eats it — tumbling with a trail of ember motes, and detonates in a crater ring.
+
+It is the first **splash** ability: `splash: true, splashRadius: 3.4` damages every knight in the crater regardless of facing, which is what makes it the answer to a round fielding six. Damage is **deferred until the rock lands** (`spawnAsteroid(onLand)`), so the number and the impact are the same moment.
+
+### The knight animation was wrong in three ways
+1. **The rig was measured in the wrong space.** `buildKnightRig` took a WORLD `Box3` but wrote the result into `g.position`, which is MODEL-LOCAL — and `model` is already parented to `k.group` at `knight.x = 5`. Measured: the leader's shoulder pivot sat **5.9m from his own hand**, so an overhead threw the sword across the nave, while a clone's (whose group is still at the origin during rig build) sat 2.0m away and barely moved. One line, two opposite failures — which is why a squad looked like one windmilling leader and N-1 statues. Now measured in model space; **every knight in a squad reports identical pivots**.
+2. **The picture and the damage ran on two clocks 25% apart.** `swingDur = telegraphMs * 1.25`, so at the damage instant the visual swing was at p = 0.800 for *every* pattern — the blade still 375-475ms from its lowest point, roughly **twice the entire 220ms i-frame window**. A player who dodged when the blade *looked* like it landed was guaranteed to be hit. `swingDur` is now `telegraphMs` exactly and the phase is measured off `atk.t0`, the same `performance.now()` stamp the strike timer counts from, so **impact is p = 1.0 by construction**. Damage stays on `setTimeout` (§16's contract — headless tests have no rAF); the picture moved onto its clock, taking `max(wall, swingT + dt)` so rAF snaps to the wall and `_tick` scrubs.
+3. **There was no animation, only smoothing.** Exponential smoothing over a linear ramp was the whole system: constant angular velocity, no anticipation, no ease, no impact frame, and `Math.min(1, 14*dt)` — the Euler approximation — over-closed by 25% at 30fps, so the knight got *snappier* the worse your machine ran.
+
+Now: `alpha(rate, dt) = 1 - exp(-rate*dt)` (frame-rate correct), per-joint rates (head leads, torso is heaviest), **elbows** built from the model's own elbow markers so the blade folds on the wind-up instead of sweeping a rigid bar through his chest, and a `swingEnvelope` with anticipation → decelerating wind-up → a readable apex **hold** → the whole arc spent in the last 12%. `recoverMs` finally drives something: he settles into `GUARD` instead of stepping 1.4rad back to breathing. Body yaw eases instead of teleporting. Each knight gets a `phase` offset, or a squad breathes as one organism.
+
+The charge is now its own **thrust** pose (it and overhead share `evade:'sidestep'`, so evade alone could not tell them apart) and it starts lunging inside the last quarter of the wind-up — it used to start moving only *after* the hit test had already run.
+
+Also fixed here: the midline is taken from the **body only** (the drawn sword dragged it 0.135m and flipped a shin plate, which is why the documented split was a lopsided 9/7 — it is now 8/8); harness pieces straddling the midline go to `torso` instead of riding the left arm; and `knightProto` is captured **before** rigging, so clones no longer carry a set of orphan pivots.
+
+### The knight levels too
+`data/knighttree.js` + `engine/knighttree.js`, mirroring the player's ladder as a pure function of level. **His level is the round you are on** — a squad that only ever grew in NUMBER stops being a threat and becomes a chore. Stats are **multipliers** on the base def (the last row that sets one wins, so the table reads as "what he is at level N"), and his **attack patterns unlock by level**: round 1 he only knows the slash, round 2 adds the overhead, round 4 the charge. `combat3` reads `st.enemyStats` for both his defence and his damage, the battle HUD names his level, and the room's poster shows what he is **now** rather than what the data file says he starts as.
+
+### Test hooks added
+`arena3d._rigProbe(index)` (pivots, live rotations, lever arms, `swingP`, `swingDur`), `arena3d._nav()`, `._probeAt(x,z)`, `._bakeExport()`, `world3d._teleport(x,z)`, `world3d.releaseLock()/isLocked()`.
+
+### A note on `disableAPI`
+`arena3d`'s no-WebGL fallback had drifted badly — `stopAbility` alone was already being called unguarded, so a machine without WebGL threw its way through the fight instead of degrading. It now covers the whole public surface. **Keep it in step whenever the API grows.**

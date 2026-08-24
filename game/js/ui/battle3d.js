@@ -170,7 +170,13 @@ CHLOE.ui.battle3d = (function () {
     setRes(els.manaBar, snap.mana, snap.max.mana);
     setRes(els.staBar, snap.sta, snap.max.sta);
     ui.setBar(els.enemyBar, snap.enemy.life, snap.enemy.max);
-    els.enemyName.textContent = snap.enemy.name;
+    /* §21: name it with the level it actually is, and how many. The plate
+       is the only place the fight tells you he has grown. */
+    var kt = CHLOE.engine.knighttree;
+    var kL = kt ? kt.level() : null;
+    els.enemyName.textContent = snap.enemy.name +
+      (kL ? '  ·  Lv ' + kL : '') +
+      (snap.enemy.count > 1 ? '  ·  ' + snap.enemy.alive + '/' + snap.enemy.count : '');
     refreshHotbar(snap);
 
     els.evade.classList.toggle('ready', snap.evade.ready);
@@ -319,8 +325,20 @@ CHLOE.ui.battle3d = (function () {
     }, who);
   }
 
+  /* §21: he only swings what his level has taught him. Round 1 is one
+     pattern; the charge does not exist until he has learned it. */
+  function knownPatterns() {
+    var all = (CHLOE.data.arena3d && CHLOE.data.arena3d.patterns) || {};
+    var kt = CHLOE.engine.knighttree;
+    if (!kt) return all;
+    var ids = kt.patterns(kt.level());
+    var out = {};
+    ids.forEach(function (id) { if (all[id]) out[id] = all[id]; });
+    return Object.keys(out).length ? out : all;
+  }
+
   function pickPattern() {
-    var pats = (CHLOE.data.arena3d && CHLOE.data.arena3d.patterns) || {};
+    var pats = knownPatterns();
     var pool = [];
     for (var id in pats) {
       var w = pats[id].weight || 1;

@@ -117,7 +117,13 @@ CHLOE.engine.displays = (function () {
   function poster() {
     var W = 512, H = 700, c = make(W, H), g = c.getContext('2d');
     var e = (CHLOE.data.enemies || {}).hollow_black_knight || {};
-    var st = e.stats || {};
+    /* §21: show what he is NOW, not what the data file says he starts as.
+       His level is the round you are on and his stats climb with it. */
+    var kt = CHLOE.engine.knighttree;
+    var kLevel = kt ? kt.level() : (e.level || 2);
+    var st = kt ? kt.stats(kLevel, e) : (e.stats || {});
+    var kRow = kt ? kt.rowAt(kLevel) : null;
+    var known = kt ? kt.patterns(kLevel) : null;
     panel(g, W, H, 'KNOWN: THE HOLLOW', RED);
 
     var y = H * 0.17;
@@ -125,7 +131,8 @@ CHLOE.engine.displays = (function () {
     g.fillText((CHLOE.data.arena3d && CHLOE.data.arena3d.knight
       ? CHLOE.data.arena3d.knight.name : e.name || 'Hollow Black Knight').toUpperCase(), 36, y);
     g.fillStyle = RED; g.font = '20px system-ui, sans-serif';
-    g.fillText('Level ' + (e.level || 2) + '  ·  ' + (e.type || 'occult'), 36, y + 30);
+    g.fillText('Level ' + kLevel + '  ·  ' + (e.type || 'occult') +
+               (kRow ? '  ·  ' + kRow.name : ''), 36, y + 30);
 
     y += 66;
     g.fillStyle = DIM; g.font = '15px system-ui, sans-serif';
@@ -149,6 +156,8 @@ CHLOE.engine.displays = (function () {
     var pats = (CHLOE.data.arena3d && CHLOE.data.arena3d.patterns) || {};
     for (var id in pats) {
       var pt = pats[id];
+      // only the swings he has actually learned by this level
+      if (known && known.indexOf(id) === -1) continue;
       g.fillStyle = TXT; g.font = 'bold 18px system-ui, sans-serif';
       g.fillText(pt.name, 36, y);
       g.fillStyle = '#ffd166'; g.font = '15px system-ui, sans-serif';

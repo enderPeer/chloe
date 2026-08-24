@@ -154,11 +154,19 @@ CHLOE.engine.combat3 = (function () {
     var m = p.active() || (p.state.members[0]);
     if (!m) return null;
     var eff = p.effStats(m);
-    var es = def.stats || {};
+    /* §21: the knight levels because YOU do — his level is the round you are
+       on, so the thing you beat at round 1 is not what meets you at round 8.
+       A squad that only ever grew in NUMBER stopped being a threat and became
+       a chore. Falls back to the flat def if the ladder is missing. */
+    var kt = CHLOE.engine.knighttree;
+    var enemyLevel = kt ? kt.level() : (def.level || 1);
+    var es = kt ? kt.stats(enemyLevel, def) : (def.stats || {});
 
     st = {
       enemyId: enemyId,
       enemyDef: def,
+      enemyLevel: enemyLevel,
+      enemyStats: es,
       // one entry per knight on the floor
       enemies: (function () {
         var arr = [];
@@ -319,7 +327,9 @@ CHLOE.engine.combat3 = (function () {
     var base = a.usesMag ? eff.mag : eff.atk;
     var chart = types().multiplier(a.type, st.enemyDef);
     var rand = 0.9 + Math.random() * 0.2;
-    var def = (st.enemyDef.stats && st.enemyDef.stats.def) || 0;
+    // §21: his LEVELLED defence, not the flat number in data/enemies.js
+    var def = (st.enemyStats && st.enemyStats.def) ||
+              (st.enemyDef.stats && st.enemyDef.stats.def) || 0;
     var dmg = Math.max(1, Math.round(
       base * ((a.power || 50) / 100) * chart * (mult || 1) * rand - def * 0.5));
     var idx = (typeof target === 'number') ? target : 0;
@@ -339,7 +349,8 @@ CHLOE.engine.combat3 = (function () {
     var p = party();
     var m = p.get(st.charId);
     var eff = p.effStats(m);
-    var es = st.enemyDef.stats || {};
+    // §21: he hits with his LEVELLED attack - round 8 is not round 1
+    var es = st.enemyStats || st.enemyDef.stats || {};
     var cdef = (CHLOE.data.characters || {})[st.charId] || {};
     var atkType = st.enemyDef.type || st.enemyDef.element;
     var chart = types().multiplier(atkType, { type: cdef.type || cdef.element, resists: cdef.resists || null });
