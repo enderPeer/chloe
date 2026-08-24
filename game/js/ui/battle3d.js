@@ -358,7 +358,33 @@ CHLOE.ui.battle3d = (function () {
     if (!inited3d) { a3d.init(els.canvas); inited3d = true; }
     a3d.reset();
     if (a3d.spawnSquad) a3d.spawnSquad(round);
-    a3d.resize(); a3d.start();
+    a3d.resize();
+
+    /* §21: hold the fight behind the loading gate. The church is 26MB;
+       starting the clock before it arrives spawned you in grey nothing with an
+       invisible knight already walking you down. The gate also warms every
+       shader, which is what stops the first Fire Tornado from hitching. */
+    var load = CHLOE.ui.loading;
+    if (load && a3d.assetsReady && !a3d.assetsReady()) {
+      load.show('Unsealing the church…');
+      load.waitFor(
+        function () { return a3d.assetsReady(); },
+        function (setProgress) {
+          var pr = a3d.assetProgress ? a3d.assetProgress() : null;
+          if (pr) setProgress(pr.done, pr.total + 1, pr.done >= pr.total
+            ? 'Lighting the candles…' : 'Unsealing the church…');
+        },
+        function () { load.hide(); startFight(round); }
+      );
+      return;
+    }
+    startFight(round);
+  }
+
+  /* Everything that must not happen until the scene is actually on screen. */
+  function startFight(round) {
+    if (!active) return;
+    a3d.start();
     a3d.stopAbility();
 
     buildHotbar(C3.snapshot());
@@ -396,6 +422,10 @@ CHLOE.ui.battle3d = (function () {
     active = false;
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     a3d.stopAbility();
+    /* §21: the fight is over, so put the player in cursor mode BEFORE the
+       result card goes up. Pointer lock hides the mouse and eats clicks, so
+       the Continue button was unreachable until you knew to press Escape. */
+    if (a3d.releaseLock) a3d.releaseLock();
     if (snap && snap.result === 'victory') showVictory();
     else if (snap && snap.result === 'defeat') showDefeat();
     else end(snap ? snap.result : 'fled');

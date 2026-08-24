@@ -395,7 +395,11 @@ Each knight is fully independent — its own attack window (`k.atk`), animation 
 `ui/battle3d.js` drives them: swing cadence tightens with squad size (`base / sqrt(aliveCount)`, floored at 650ms), each swing is performed by a randomly chosen living knight via `arena3d.telegraph(pattern, cb, index)`, and a player ability damages **every knight its arc catches** — `arena3d.abilityTargets(ability)` returns the indices, each resolved through `combat3.hitEnemy(id, mult, index)`.
 
 ### The wall remembers
-Clearing a round pushes a trophy onto `runStats.trophies`: `{round, knights, by, hpLeft, hpMax}`. `engine/displays.js` `trophy(entry)` paints it (round number, one hollow-helm mark per knight felled, who landed the kill, life remaining) and `world3d.buildTrophies()` hangs it in a wooden frame on the dressing-room wall. Slots run the east wall, then the north wall right of the mirror, then the south wall; past that they tuck in below so a long run **crowds** the wall instead of silently dropping rounds. `world3d.refreshPanels()` rebuilds the gallery, and the room router calls that on every entry, so the new picture is up before you have finished walking in. It is run-scoped like everything else (§15) — dying clears the wall.
+Clearing a round pushes a trophy onto `runStats.trophies`: `{round, knights, by, hpLeft, hpMax}`.
+
+There is **ONE picture**, not a gallery. It hangs on the east wall above the couch and always shows **the round you are standing in now** — the big number, one hollow-helm mark per knight that round will field, and the run's record in small print underneath (`N rounds cleared · M felled`, and how the last round fell). A row of frames accumulating down the wall buried the number that actually matters, so `world3d.buildTrophies()` **repaints the existing canvas in place** rather than adding a second frame; the mesh is built once per scene, so the frame never flickers out and back between rounds.
+
+`engine/displays.js` `trophy()` takes no argument — it reads `runStats` directly, which keeps the picture and the round counter from drifting apart. `world3d.refreshPanels()` repaints it and the room router calls that on every entry, so the new number is up before you have finished walking in. Run-scoped like everything else (§15) — dying resets it to round 1.
 
 ### The arena is baked from the actual stone
 `arena.bounds` was a hand-guessed rectangle, and it was wrong in both directions: it cut off ~2.6m of walkable side aisle on each side **and** let you stroll straight through the rood screen, the altar and the columns.

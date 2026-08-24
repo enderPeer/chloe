@@ -163,17 +163,23 @@ CHLOE.engine.displays = (function () {
     return c;
   }
 
-  /* ---------------- trophy: one cleared round ---------------- */
-  /* Hung on the dressing-room wall the moment a squad goes down, so the run's
-     history is something you walk past rather than a number in a menu. */
-  function trophy(entry) {
+  /* ---------------- trophy: the round you are on ---------------- */
+  /* ONE picture on the dressing-room wall, not a growing row of them. It
+     repaints between fights to show the round you are standing in now, with
+     the run's record underneath — so the wall reads as a single tally that
+     climbs, rather than a gallery that crowds. */
+  function trophy() {
     var W = 384, H = 512, c = make(W, H), g = c.getContext('2d');
-    entry = entry || {};
-    var round = entry.round || 1;
-    var knights = entry.knights || 1;
+    var pt = CHLOE.engine.party;
+    var rs = (pt && pt.state && pt.state.runStats) || {};
+    var cleared = rs.trophies || [];
+    var round = rs.round || 1;
+    var last = cleared.length ? cleared[cleared.length - 1] : null;
+    var felled = 0;
+    cleared.forEach(function (e) { felled += e.knights || 0; });
 
-    // aged paper, not the black panel the mirror/poster use - these read as
-    // things pinned up over time
+    // aged paper, not the black panel the mirror/poster use — this reads as
+    // something pinned up and written on, night after night
     g.fillStyle = '#171114'; g.fillRect(0, 0, W, H);
     var wash = g.createLinearGradient(0, 0, 0, H);
     wash.addColorStop(0, 'rgba(90,60,45,0.30)');
@@ -193,18 +199,29 @@ CHLOE.engine.displays = (function () {
     g.fillStyle = TXT; g.font = 'bold 122px Impact, "Arial Narrow", sans-serif';
     g.fillText(String(round), W / 2, 208);
 
-    knightMark(g, W / 2, 286, 54, knights);
-
+    // what is waiting for you THIS round — round N fields N knights
+    knightMark(g, W / 2, 282, 54, round);
     g.fillStyle = TXT; g.font = 'bold 19px Impact, "Arial Narrow", sans-serif';
-    g.fillText(knights + (knights === 1 ? ' HOLLOW KNIGHT' : ' HOLLOW KNIGHTS'), W / 2, 366);
+    g.fillText(round + (round === 1 ? ' HOLLOW KNIGHT' : ' HOLLOW KNIGHTS'), W / 2, 350);
     g.fillStyle = RED; g.font = '16px system-ui, sans-serif';
-    g.fillText('PUT DOWN', W / 2, 390);
+    g.fillText(cleared.length ? 'STILL COMING' : 'WAITING FOR YOU', W / 2, 374);
 
-    var who = (CHLOE.data.characters || {})[entry.by] || {};
+    // the record so far, kept small — the big number is the point
+    g.strokeStyle = 'rgba(107,74,47,0.55)'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(48, 400); g.lineTo(W - 48, 400); g.stroke();
+
     g.fillStyle = DIM; g.font = '15px system-ui, sans-serif';
-    g.fillText('felled by ' + (who.name || entry.by || 'you'), W / 2, 428);
-    if (entry.hpMax) {
-      g.fillText(entry.hpLeft + ' / ' + entry.hpMax + ' life still standing', W / 2, 452);
+    if (!cleared.length) {
+      g.fillText('Nothing has fallen yet tonight.', W / 2, 430);
+    } else {
+      g.fillStyle = TXT; g.font = 'bold 17px Impact, "Arial Narrow", sans-serif';
+      g.fillText(cleared.length + (cleared.length === 1 ? ' ROUND CLEARED' : ' ROUNDS CLEARED') +
+                 '  ·  ' + felled + ' FELLED', W / 2, 428);
+      var who = (CHLOE.data.characters || {})[last.by] || {};
+      g.fillStyle = DIM; g.font = '14px system-ui, sans-serif';
+      g.fillText('round ' + last.round + ' fell to ' + (who.name || last.by || 'you') +
+                 (last.hpMax ? ' — ' + last.hpLeft + '/' + last.hpMax + ' life left' : ''),
+                 W / 2, 452);
     }
     g.textAlign = 'left';
     return c;

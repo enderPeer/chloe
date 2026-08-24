@@ -228,22 +228,19 @@ CHLOE.ui.sheet = (function(){
       wrap.appendChild(pRow);
     }
 
-    /* skill points + tree link */
-    var pts = pointsOf(m.id);
+    /* §21: no skill points and no tree any more — progression is a ladder
+       (§19), so this links to the Moves tab where the ladder is shown. */
     var spRow = ui.el('div', 'sheet-points');
-    var pill = ui.el('span', 'points-pill', pts + ' skill point' + (pts === 1 ? '' : 's'));
-    spRow.appendChild(pill);
-    var treeBtn = ui.el('button', null, 'Skill Tree');
-    treeBtn.addEventListener('click', function(){
-      if (typeof opts.onOpenTree === 'function') { opts.onOpenTree(m.id); return; }
-      if (CHLOE.ui.tree && CHLOE.ui.tree.open) {
-        if (CHLOE.ui.menu && CHLOE.ui.menu.close) CHLOE.ui.menu.close();
-        CHLOE.ui.tree.open(m.id);
-      } else {
-        ui.toast('The tree is still growing in the dark.');
-      }
+    var sk = CHLOE.engine.skilltree;
+    var nxt = (sk && sk.nextRow) ? sk.nextRow(m.level) : null;
+    spRow.appendChild(ui.el('span', 'points-pill',
+      nxt ? ('Lv ' + nxt.level + ': ' + (nxt.row.name || '—')) : 'Ladder complete'));
+    var ladderBtn = ui.el('button', null, 'Moves & levels');
+    ladderBtn.addEventListener('click', function(){
+      if (typeof opts.onOpenLadder === 'function') { opts.onOpenLadder(m.id); return; }
+      if (CHLOE.ui.menu && CHLOE.ui.menu.close) CHLOE.ui.menu.close();
     });
-    spRow.appendChild(treeBtn);
+    spRow.appendChild(ladderBtn);
     wrap.appendChild(spRow);
 
     /* xp */

@@ -113,6 +113,97 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   // ---------------------------------------------------------------- loaders
+  /* ------------------------------------------------------------ asset gate
+     §21. The church is 26MB and the knight 6.6MB. They used to stream in
+     AFTER the fight had already begun, so you spawned into grey nothing while
+     an invisible knight walked at you. Every loader now checks in here, and
+     ui/battle3d.js will not start the fight until `A.assetsReady()` is true.
+
+     Shader warm-up happens at the same gate: three compiles a material's
+     program the first time it is actually drawn, so the first Fire Tornado
+     cost several frames of stall mid-fight. renderer.compile() walks the whole
+     scene with scene.traverse (not traverseVisible - checked against the
+     vendored r128 build), so it reaches the tornado, the hand sign and the
+     asteroid even though all three are hidden until cast. */
+  var assets = { total: 0, done: 0, warm: false, names: {} };
+
+  function assetExpect(name) {
+    if (assets.names[name]) return;
+    assets.names[name] = 'pending';
+    assets.total++;
+  }
+  /* Settle a slot whether it loaded, failed or was skipped - a missing
+     optional asset must never wedge the gate. Every path falls back. */
+  function assetDone(name, how) {
+    if (!assets.names[name] || assets.names[name] !== 'pending') return;
+    assets.names[name] = how || 'ok';
+    assets.done++;
+  }
+
+  A.assetProgress = function () {
+    return { done: assets.done, total: Math.max(1, assets.total), warm: assets.warm };
+  };
+  A.assetsReady = function () {
+    if (!inited) return false;
+    if (assets.done < assets.total) return false;
+    // everything is in the scene: compile it before anyone gets to move
+    if (!assets.warm) warmShaders();
+    return assets.warm;
+  };
+
+  /* Warm everything the first cast would otherwise pay for, mid-fight.
+
+     renderer.compile() alone is NOT enough, and measuring proved it: with the
+     programs precompiled, the first Fire Tornado frame still cost 444ms
+     against a 2.9ms baseline. compile() builds shader programs but never
+     uploads textures - those go to the GPU lazily, on the frame a material is
+     first actually drawn. The tornado, the hand sign and the asteroid all sit
+     hidden until cast, so all of their texture uploads landed on one frame in
+     the middle of a real-time fight.
+
+     So: push every texture in the scene through initTexture(), then draw one
+     frame with everything forced visible. Both happen behind the loading
+     veil, so the flash of a tornado at the origin is never seen. */
+  function warmShaders() {
+    if (assets.warm || !renderer || !scene || !camera) return;
+
+    try { renderer.compile(scene, camera); } catch (e) {
+      console.warn('[arena3d] shader warm-up failed', e);
+    }
+
+    // textures: upload now rather than on the frame they are first drawn
+    if (renderer.initTexture) {
+      var seen = [];
+      var SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap',
+                   'aoMap', 'alphaMap', 'bumpMap', 'displacementMap', 'lightMap'];
+      scene.traverse(function (o) {
+        if (!o.isMesh || !o.material) return;
+        var mats = Array.isArray(o.material) ? o.material : [o.material];
+        for (var i = 0; i < mats.length; i++) {
+          for (var k = 0; k < SLOTS.length; k++) {
+            var t = mats[i] && mats[i][SLOTS[k]];
+            if (t && t.isTexture && seen.indexOf(t) === -1) {
+              seen.push(t);
+              try { renderer.initTexture(t); } catch (e) {}
+            }
+          }
+        }
+      });
+    }
+
+    /* One frame with the hidden VFX forced on, so their draw calls are really
+       issued once. Visibility is restored before anyone sees a frame. */
+    var hidden = [];
+    scene.traverse(function (o) {
+      if (o.visible === false) { hidden.push(o); o.visible = true; }
+    });
+    try { renderer.render(scene, camera); } catch (e) { renderFailed = true; }
+    for (var h = 0; h < hidden.length; h++) hidden[h].visible = false;
+    try { renderer.render(scene, camera); } catch (e) { renderFailed = true; }
+
+    assets.warm = true;
+  }
+
   function makeLoader() {
     if (typeof THREE.GLTFLoader !== 'function') return null;
     var loader = new THREE.GLTFLoader();
@@ -129,9 +220,14 @@ CHLOE.engine = CHLOE.engine || {};
   var churchFallback = null;
 
   function loadChurch() {
+    assetExpect('church');
     var loader = makeLoader();
     var models = D().models || {};
-    if (!loader || !models.church) { churchFallback = buildFallbackChurch(); return; }
+    if (!loader || !models.church) {
+      churchFallback = buildFallbackChurch();
+      assetDone('church', 'skipped');
+      return;
+    }
     // draco/network failures can stall without ever calling the error cb —
     // if nothing arrived after 12s, build the fallback nave so the arena is
     // never a void (removed again if the real church shows up late)
@@ -170,7 +266,9 @@ CHLOE.engine = CHLOE.engine || {};
         console.warn('[arena3d] church setup failed — fallback nave', e);
         if (!churchFallback) churchFallback = buildFallbackChurch();
       }
+      assetDone('church');
     }, undefined, function () {
+      assetDone('church', 'failed');
       window.clearTimeout(fallbackTimer);
       console.warn('[arena3d] church.glb failed to load — fallback nave');
       if (!churchFallback) churchFallback = buildFallbackChurch();
@@ -205,6 +303,7 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   function loadKnight() {
+    assetExpect('knight');
     var loader = makeLoader();
     var models = D().models || {};
     knight.group = new THREE.Group();
@@ -264,7 +363,11 @@ CHLOE.engine = CHLOE.engine || {};
       if (pendingSquad > 1) { spawnSquad(pendingSquad); pendingSquad = 0; }
     };
 
-    if (!loader || !models.knight) { attach(buildFallbackKnight()); return; }
+    if (!loader || !models.knight) {
+      attach(buildFallbackKnight());
+      assetDone('knight', 'skipped');
+      return;
+    }
     // stalled load safety: a totem after 12s keeps the fight visible
     var fallbackTimer = window.setTimeout(function () {
       if (!knight.model) attach(buildFallbackKnight());
@@ -276,7 +379,9 @@ CHLOE.engine = CHLOE.engine || {};
         attach(gltf.scene);
       }
       catch (e) { console.warn('[arena3d] knight setup failed — fallback totem', e); if (!knight.model) attach(buildFallbackKnight()); }
+      assetDone('knight');
     }, undefined, function () {
+      assetDone('knight', 'failed');
       window.clearTimeout(fallbackTimer);
       console.warn('[arena3d] knight.glb failed to load — fallback totem');
       if (!knight.model) attach(buildFallbackKnight());
@@ -449,9 +554,10 @@ CHLOE.engine = CHLOE.engine || {};
   // HDRI -> PMREM -> scene.environment. Gives the stone and glass real
   // image-based light; failure just leaves the rig lighting alone (§14 pattern).
   function loadEnvironment() {
+    assetExpect('hdri');
     envMapOk = false;
     var path = D().hdri;
-    if (!path || !THREE.RGBELoader || !THREE.PMREMGenerator) return;
+    if (!path || !THREE.RGBELoader || !THREE.PMREMGenerator) { assetDone('hdri', 'skipped'); return; }
     var pmrem = null;
     function bail() { if (pmrem) { try { pmrem.dispose(); } catch (e) {} pmrem = null; } }
     try {
@@ -466,8 +572,9 @@ CHLOE.engine = CHLOE.engine || {};
         } catch (e) { envMapOk = false; }
         try { hdrTex.dispose(); } catch (e) {}
         bail();
-      }, undefined, function () { bail(); });
-    } catch (e) { bail(); }
+        assetDone('hdri');
+      }, undefined, function () { bail(); assetDone('hdri', 'failed'); });
+    } catch (e) { bail(); assetDone('hdri', 'failed'); }
   }
 
   function applyEnvIntensity() {
@@ -554,9 +661,10 @@ CHLOE.engine = CHLOE.engine || {};
      the player sees their own arms swing. Missing asset = no arms, never a
      crash: the fight still resolves through engine/combat3.js. */
   function loadFirstPerson() {
+    assetExpect('punch');
     var loader = makeLoader();
     var models = D().models || {};
-    if (!loader || !models.punch) return;
+    if (!loader || !models.punch) { assetDone('punch', 'skipped'); return; }
     loader.load(versioned(models.punch), function (gltf) {
       try {
         var place = D().firstPerson || {};
@@ -637,7 +745,9 @@ CHLOE.engine = CHLOE.engine || {};
         fp.root.visible = false;        // only while swinging
         fp.loaded = true;
       } catch (e) { console.warn('[arena3d] first-person rig failed', e); }
+      assetDone('punch');
     }, undefined, function () {
+      assetDone('punch', 'failed');
       console.warn('[arena3d] punch.glb failed to load — no first-person arms');
     });
   }
@@ -842,9 +952,10 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   function loadHandSign() {
+    assetExpect('handsign');
     var loader = makeLoader();
     var models = D().models || {};
-    if (!loader || !models.handsign) return;
+    if (!loader || !models.handsign) { assetDone('handsign', 'skipped'); return; }
     loader.load(versioned(models.handsign), function (gltf) {
       try {
         var p = D().handSign || {};
@@ -885,13 +996,18 @@ CHLOE.engine = CHLOE.engine || {};
         camera.add(rune);
         sign.rune = rune;
       } catch (e) { console.warn('[arena3d] hand sign failed', e); }
-    }, undefined, function () { console.warn('[arena3d] handsign.glb missing'); });
+      assetDone('handsign');
+    }, undefined, function () {
+      console.warn('[arena3d] handsign.glb missing');
+      assetDone('handsign', 'failed');
+    });
   }
 
   function loadTornado() {
+    assetExpect('tornado');
     var loader = makeLoader();
     var models = D().models || {};
-    if (!loader || !models.tornado) return;
+    if (!loader || !models.tornado) { assetDone('tornado', 'skipped'); return; }
     loader.load(versioned(models.tornado), function (gltf) {
       try {
         var cfgT = D().tornado || {};
@@ -929,7 +1045,11 @@ CHLOE.engine = CHLOE.engine || {};
         tornado.light.position.y = 1.6;
         wrap.add(tornado.light);
       } catch (e) { console.warn('[arena3d] tornado failed', e); }
-    }, undefined, function () { console.warn('[arena3d] firetornado.glb missing'); });
+      assetDone('tornado');
+    }, undefined, function () {
+      console.warn('[arena3d] firetornado.glb missing');
+      assetDone('tornado', 'failed');
+    });
   }
 
   /* Show the cast pose: hand up, rune spinning up off the fingers. */
@@ -1206,6 +1326,7 @@ CHLOE.engine = CHLOE.engine || {};
   function onKeyDown(e) { keys[e.code] = true; if (PREVENT[e.code]) e.preventDefault(); }
   function onKeyUp(e) { keys[e.code] = false; }
   function onBlur() { keys = {}; }
+  var lockSuppressed = false;   // §21: a panel is up; do not re-grab the cursor
   function isLocked() { return !!(canvas && document.pointerLockElement === canvas); }
   function onMouseMove(e) {
     if (!isLocked()) return;
@@ -1215,7 +1336,7 @@ CHLOE.engine = CHLOE.engine || {};
     if (pitch < -PITCH_MAX) pitch = -PITCH_MAX;
   }
   function onClick() {
-    if (!running || isLocked()) return;
+    if (!running || isLocked() || lockSuppressed) return;
     try { canvas.requestPointerLock(); } catch (e) {}
   }
   function addListeners() {
@@ -1832,6 +1953,7 @@ CHLOE.engine = CHLOE.engine || {};
 
   // ---------------------------------------------------------------- API
   A.start = function () {
+    lockSuppressed = false;   // a new fight starts in movement mode
     if (disabled || !inited || running) return;
     running = true;
     keys = {};
@@ -1841,6 +1963,22 @@ CHLOE.engine = CHLOE.engine || {};
     lastTime = performance.now();
     rafId = requestAnimationFrame(loop);
   };
+
+  /* §21: hand the cursor back. Pointer lock hides the mouse and swallows
+     every click, so any UI put on screen over the arena is unreachable until
+     the lock is dropped - the player had to know to press Escape first. The
+     game now does it for them whenever it puts up a panel.
+     `suppressLock` keeps the canvas click handler from silently grabbing the
+     lock straight back while that panel is still up. */
+  A.releaseLock = function (suppress) {
+    if (suppress !== false) lockSuppressed = true;
+    if (isLocked()) { try { document.exitPointerLock(); } catch (e) {} }
+  };
+
+  /* Let the player put themselves back in movement mode (click-to-look). */
+  A.allowLock = function () { lockSuppressed = false; };
+
+  A.isLocked = function () { return isLocked(); };
 
   A.stop = function () {
     if (!running) return;

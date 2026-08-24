@@ -223,8 +223,38 @@ CHLOE.ui.room3d = (function(){
   function resume(){
     if (!ensureInit()) return;
     var w = world();
+    try { if (typeof w.resize === 'function') w.resize(); }
+    catch (e) { console.warn('[CHLOE] world3d.resize failed', e); }
+
+    /* §21: hold the room behind the loading gate until its models are in and
+       its shaders are compiled. Walking into a half-built room - furniture
+       popping in around you, the first turn of the head stuttering - was the
+       worst first impression the game made. */
+    var load = CHLOE.ui.loading;
+    if (load && w.assetsReady && !w.assetsReady() && !load.isShown()) {
+      load.show('Waking the room…');
+      load.waitFor(
+        function () { return w.assetsReady(); },
+        function (setProgress) {
+          var pr = w.assetProgress ? w.assetProgress() : null;
+          if (pr) setProgress(pr.done, pr.total + 1,
+            pr.done >= pr.total ? 'Turning on the lights…' : 'Waking the room…');
+        },
+        function () {
+          load.hide();
+          // the router may have moved on while we waited
+          if (ui && ui.current() === 'room3d' && !inBattle) startRoom();
+        }
+      );
+      return;
+    }
+    startRoom();
+  }
+
+  /* The room is on screen and ready: start the loop and let the player move. */
+  function startRoom(){
+    var w = world();
     try {
-      if (typeof w.resize === 'function') w.resize();
       w.start();
       running = true;
     } catch (e) { console.warn('[CHLOE] world3d.start failed', e); }

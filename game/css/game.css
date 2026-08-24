@@ -1761,3 +1761,49 @@ button:disabled .cost-chip{ opacity:.7; }
   .b3d-slot .nm{ display:none; }
   .b3d-res{ width:46vw; }
 }
+
+/* ---------------------------------------------- §21 loading gate
+   Sits over everything while a 3D scene streams in and warms its shaders.
+   Deliberately CSS-only animation: this is on screen exactly when the main
+   thread is busy parsing a 26MB church, so it must not ask for JS frames. */
+.loading-veil{
+  position:fixed; inset:0; z-index:120;
+  display:flex; align-items:center; justify-content:center;
+  background:radial-gradient(ellipse at 50% 45%, #1a0d12 0%, #08060a 70%);
+  opacity:1; transition:opacity .3s ease;
+}
+.loading-veil.out{ opacity:0; pointer-events:none; }
+.loading-card{ width:min(420px,84vw); text-align:center; }
+.loading-title{
+  font-family:var(--font-head); font-size:2.6rem; letter-spacing:.34em;
+  color:var(--red); text-shadow:0 0 26px rgba(229,23,63,.5);
+  animation:loadPulse 2.6s ease-in-out infinite;
+}
+@keyframes loadPulse{ 0%,100%{ opacity:.82; } 50%{ opacity:1; } }
+.loading-label{ color:var(--dim); font-size:.8rem; margin:.7rem 0 1rem; min-height:1.1em; }
+.loading-track{
+  height:4px; border-radius:3px; background:rgba(255,255,255,.08); overflow:hidden;
+}
+.loading-bar{
+  height:100%; width:0%; border-radius:3px;
+  background:linear-gradient(90deg,#8c1028,var(--red),#ff7a44);
+  transition:width .28s ease;
+}
+.loading-embers{ position:relative; height:44px; margin-top:.5rem; }
+.loading-embers span{
+  position:absolute; bottom:0; left:50%; width:4px; height:4px; border-radius:50%;
+  background:#ff7a44; box-shadow:0 0 8px #ff5a1a;
+  animation:ember 1.65s ease-in-out infinite;
+}
+.loading-embers span:nth-child(1){ margin-left:-26px; }
+.loading-embers span:nth-child(2){ margin-left:0; }
+.loading-embers span:nth-child(3){ margin-left:26px; }
+@keyframes ember{
+  0%{ transform:translateY(0) scale(.7); opacity:0; }
+  35%{ opacity:1; }
+  100%{ transform:translateY(-34px) scale(1.15); opacity:0; }
+}
+.loading-tip{
+  color:#6e6774; font-size:.7rem; font-style:italic; margin-top:.6rem;
+  min-height:2.4em; line-height:1.5;
+}
