@@ -51,7 +51,7 @@ CHLOE.ui.sheet = (function(){
     return OLD2NEW[def.element || 'none'] || 'physical';
   }
 
-  /* Skill points for a character — engine.tree first, then save-state shapes. */
+  /* Skill points for a character — engine.tree first, then party-state shapes. */
   function pointsOf(charId){
     var eng = (CHLOE.engine || {}).tree;
     var names = ['points', 'getPoints', 'pointsOf', 'skillPoints'];

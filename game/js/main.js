@@ -1,7 +1,9 @@
 /* CHLOE — main.js
    Boot: wire up UI, sanity-check data, show title.
-   Flow (Room3D mode, spec sec 13): title -> account (PIN) -> 3D room <-> battle.
-   The 2D scene flow below stays as a fallback but is no longer routed. */
+   Flow (roguelike mode, spec sec 15): title -> fresh run in the 3D room <-> battle.
+   No accounts, no saves: every page load starts clean, and death starts a
+   brand-new run. The 2D scene flow below stays as a fallback but is no longer
+   routed. */
 window.CHLOE = window.CHLOE || {};
 
 CHLOE.game = (function(){
@@ -9,19 +11,19 @@ CHLOE.game = (function(){
 
   function story(){ return CHLOE.data.story || null; }
 
-  /* Room3D mode (spec sec 13): after login/new game the game routes straight
-     into the first-person room — no intro dialog, no 2D scene routing. */
+  /* Room3D mode (spec sec 13): the run happens in the first-person room —
+     no intro dialog, no 2D scene routing. */
   function room3dAvailable(){
     return !!(CHLOE.ui.room3d && typeof CHLOE.ui.room3d.enter === 'function');
   }
   function enterRoom3d(){
-    // any legacy save scene value maps to 'room3d' in this mode
     CHLOE.engine.party.state.scene = 'room3d';
-    CHLOE.engine.save.autosave();
     CHLOE.ui.room3d.enter();
   }
 
-  /* Start a brand-new game for the current account. */
+  /* Start a fresh run (spec sec 15). Called from the title screen on page
+     load AND from the defeat panel after death — both land on a clean
+     level-1 solo Chloe with nothing carried over. */
   function startNew(){
     CHLOE.engine.party.newGame();
 
@@ -35,31 +37,9 @@ CHLOE.game = (function(){
     }
     // Enter the start scene, then play the intro dialog over it.
     CHLOE.ui.scene.goto(startScene || '__missing__', { skipIntro: !!(st && st.introDialog) });
-    CHLOE.engine.save.autosave();
     if (st && st.introDialog) {
       CHLOE.ui.dialog.play(st.introDialog);
     }
-  }
-
-  /* Continue from a save blob (local or cloud-merged). */
-  function continueFrom(blob){
-    var ok = CHLOE.engine.party.applyBlob(blob);
-    if (!ok) { startNew(); return; }
-
-    if (room3dAvailable()) {
-      enterRoom3d();
-      CHLOE.ui.toast('Welcome back, ' + (blob.name || 'stranger') + '.');
-      return;
-    }
-
-    // legacy 2D flow (unrouted fallback)
-    var sceneId = CHLOE.engine.party.state.scene;
-    if (!sceneId) {
-      var st = story();
-      sceneId = (st && st.startScene) || '__missing__';
-    }
-    CHLOE.ui.scene.goto(sceneId);
-    CHLOE.ui.toast('Welcome back, ' + (blob.name || 'stranger') + '.');
   }
 
   /* ---------- data sanity (warn, never crash) ---------- */
@@ -132,7 +112,6 @@ CHLOE.game = (function(){
   }
 
   return {
-    startNew: startNew,
-    continueFrom: continueFrom
+    startNew: startNew
   };
 })();

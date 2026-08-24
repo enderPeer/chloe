@@ -876,8 +876,6 @@ CHLOE.ui.battle = (function(){
   /* ---------- end panels ---------- */
   function showEnd(ev){
     playing = false;
-    // autosave on battle end (scene.onBattleEnd saves again after flags/respawn)
-    if (CHLOE.engine.save.getCurrent()) CHLOE.engine.save.autosave();
 
     var result = ev.result || ((state() || {}).result) || 'victory';
     if (result === 'fled') {
@@ -912,13 +910,19 @@ CHLOE.ui.battle = (function(){
       });
       card.appendChild(cont);
     } else {
+      // roguelike (spec §15): death ends the run — show the run summary
       card.appendChild(ui.el('h2', null, 'The Night Wins'));
       var dl = ui.el('div', 'result-lines');
       dl.appendChild(ui.el('div', null, 'The Backstage Between swallows the stage...'));
-      dl.appendChild(ui.el('div', null, 'You lose ' +
-        ((CHLOE.data.config && CHLOE.data.config.defeatShardLossPct) || 30) + '% of your shards.'));
+      var p = CHLOE.engine.party, st = (p && p.state) || {};
+      var topLv = 1;
+      (st.members || []).forEach(function(m){ if (m.level > topLv) topLv = m.level; });
+      var kills = (st.runStats && st.runStats.kills) || 0;
+      dl.appendChild(ui.el('div', 'big', 'Run over — Lv ' + topLv + ' · ◆ ' + (st.shards || 0) +
+        ' · ' + kills + (kills === 1 ? ' fight won' : ' fights won')));
+      dl.appendChild(ui.el('div', null, 'Every night starts from nothing.'));
       card.appendChild(dl);
-      var re = ui.el('button', null, 'Crawl back');
+      var re = ui.el('button', null, 'Begin again');
       re.addEventListener('click', function(){
         if (veil.parentNode) veil.parentNode.removeChild(veil);
         CHLOE.ui.scene.onBattleEnd('defeat');

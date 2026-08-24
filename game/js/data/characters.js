@@ -2,7 +2,7 @@
    Portraits are STORY-agent data (data/portraits.js) and are resolved at USE time
    via CHLOE.ui.portraitSrc(key) — never dereferenced at load time.
    learnset replaces skillsByLevel (v1). defaultLoadouts: per-phase <=5 move ids,
-   all valid vs usableIn AND the level-1 learnset, so a fresh save works untouched.
+   all valid vs usableIn AND the level-1 learnset, so a fresh run works untouched.
    v3 resources (spec §12): life (was hp), stamina (physical resource, regen 20%/turn),
    magic (was mp), faith (starts battles at 3, +1/turn; growth is fractional — FLOOR
    at use: Math.floor(base + growth*(level-1))). `type` is the v3 damage type;

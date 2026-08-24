@@ -15,18 +15,6 @@ CHLOE.engine.inventory = (function(){
   function itemDef(id){ return (CHLOE.data.items || {})[id] || null; }
 
   function reset(){ bag = {}; }
-  function load(obj){
-    bag = {};
-    obj = obj || {};
-    for (var k in obj) {
-      if (Object.prototype.hasOwnProperty.call(obj, k) && obj[k] > 0) bag[k] = Math.floor(obj[k]);
-    }
-  }
-  function serialize(){
-    var out = {};
-    for (var k in bag) if (Object.prototype.hasOwnProperty.call(bag, k) && bag[k] > 0) out[k] = bag[k];
-    return out;
-  }
 
   function count(id){ return bag[id] || 0; }
   function add(id, n){
@@ -115,8 +103,6 @@ CHLOE.engine.inventory = (function(){
 
   return {
     reset: reset,
-    load: load,
-    serialize: serialize,
     count: count,
     add: add,
     remove: remove,

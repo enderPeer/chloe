@@ -198,7 +198,7 @@ CHLOE.data.story = {
   startScene: 'the_room',
   introDialog: 'intro',
   // First story fight is now the_hollow in the_room (spec §11); its victory beat covers mirror-shatter + door click + Ash joining.
-  // ('first_victory' is kept above for saves/flows that already passed the old opening.)
+  // ('first_victory' is kept above for the legacy 2D flow, which is unrouted but must not break.)
   onFirstVictoryDialog: 'room_victory',
   // Flag documentation — every flag set/required anywhere in scenes.js:
   flags: {

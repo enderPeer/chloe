@@ -5,7 +5,7 @@
      spent(charId)            -> points sunk into owned nodes
      canBuy(charId, nodeId)   -> {ok:bool, reason:string}
      buy(charId, nodeId)      -> {ok, node?, error?}  (spends points, persists
-                                 party.state.tree, autosave, toast; stat grants
+                                 party.state.tree, toast; stat grants
                                  bump current pools; move grants auto-equip)
      respecCost(charId)       -> shards (10 * level)
      respec(charId)           -> {ok, refunded?, cost?, error?} (refund ALL)
@@ -20,9 +20,6 @@
                                    weaponAtk, maxHp(=life), maxMp(=magic) }
                                  NOTE: atk INCLUDES weaponAtk (battle.js no longer
                                  re-adds it); weaponAtk kept for display breakdowns.
-     sanitizeState(charId, level, rawOwned, rawPoints) -> {owned, points}
-                                 (save-load validation: unknown node ids dropped,
-                                 points refunded via the earned-points invariant)
    Tree DATA lives in game/js/data/tree.js as CHLOE.data.trees (data agent).
    Node: { id, branch, name, desc, cost, requires:[any-of; []=root], pos,
            kind:'stat'|'move'|'passive'|'keystone', grant }
@@ -43,12 +40,6 @@ CHLOE.engine.tree = (function(){
   function notify(text){
     try {
       if (CHLOE.ui && typeof CHLOE.ui.toast === 'function') CHLOE.ui.toast(text);
-    } catch(e){}
-  }
-  function tryAutosave(){
-    try {
-      var sv = CHLOE.engine.save;
-      if (sv && sv.getCurrent && sv.getCurrent()) sv.autosave();
     } catch(e){}
   }
 
@@ -81,7 +72,7 @@ CHLOE.engine.tree = (function(){
     return (map && map[nodeId]) || null;
   }
 
-  /* ---------- owned / points (runtime home: party.state, saved by save.js) ---------- */
+  /* ---------- owned / points (runtime home: party.state, run-scoped) ---------- */
   function ownedList(charId){
     var st = party() && party().state;
     var arr = st && st.tree && st.tree[charId];
@@ -158,7 +149,6 @@ CHLOE.engine.tree = (function(){
       }
     }
     notify((def.name || nodeId) + ' unlocked!');
-    tryAutosave();
     return { ok: true, node: def };
   }
 
@@ -190,7 +180,6 @@ CHLOE.engine.tree = (function(){
     st.loadouts[charId] = prog().sanitizeLoadouts(charId, m.level, st.loadouts[charId]);
 
     notify('Respec: ' + refund + ' point' + (refund === 1 ? '' : 's') + ' refunded (-' + cost + ' ◆).');
-    tryAutosave();
     return { ok: true, refunded: refund, cost: cost };
   }
 
@@ -275,28 +264,6 @@ CHLOE.engine.tree = (function(){
     return out;
   }
 
-  /* ---------- save-load validation ---------- */
-  /* Drop unknown node ids and refund their points. Costs of unknown ids are
-     unknowable, so refunds use the earned-points invariant: a character has
-     earned (level-1) points from level-ups, so unspent >= (level-1) - spent
-     on the KEPT nodes. rawPoints is trusted upward (future point grants). */
-  function sanitizeState(charId, level, rawOwned, rawPoints){
-    var keep = [], seen = {};
-    var arr = Array.isArray(rawOwned) ? rawOwned : [];
-    for (var i = 0; i < arr.length; i++) {
-      var id = arr[i];
-      if (typeof id !== 'string' || seen[id]) continue;
-      if (!node(charId, id)) continue; // unknown -> dropped (refunded below)
-      seen[id] = true;
-      keep.push(id);
-    }
-    var spentKept = 0;
-    for (var j = 0; j < keep.length; j++) spentKept += (node(charId, keep[j]).cost || 1);
-    var raw = (typeof rawPoints === 'number' && rawPoints > 0) ? Math.floor(rawPoints) : 0;
-    var earned = Math.max(0, (level || 1) - 1);
-    return { owned: keep, points: Math.max(raw, earned - spentKept) };
-  }
-
   return {
     owned: owned,
     isOwned: isOwned,
@@ -310,7 +277,6 @@ CHLOE.engine.tree = (function(){
     statGrants: statGrants,
     passives: passives,
     effectiveStats: effectiveStats,
-    sanitizeState: sanitizeState,
     node: node,
     nodesOf: nodesOf
   };

@@ -17,6 +17,16 @@ CHLOE.data.room3d = {
   playerSpawn: { x: -2.2, z: 2, yaw: -0.885 },
   enemySpawn:  { x: 2.2,  z: -1.6 },
 
+  // §16: engaging the ghost pulls the run into the church arena vs this enemy
+  enemy: { id: 'hollow_black_knight' },
+
+  // Grabbable items (spec §16 hands): click while looking at the glint —
+  // the hand closes and takes it. y = resting height (vanity top / couch seat).
+  pickups: [
+    { itemId: 'bandage',      label: 'Bandage',      x: -1.1, y: 1.02, z: -2.55 },
+    { itemId: 'energy_drink', label: 'Energy Drink', x: 3.25, y: 0.52, z: 1.15 }
+  ],
+
   // Paths relative to game/index.html (per tools/room3d-assets.json contract).
   // Missing files are fine: world3d falls back to flat colored materials.
   textures: {

@@ -35,13 +35,10 @@ CHLOE.ui.scene = (function(){
       ui.show('scene');
       return;
     }
-    var changed = currentId !== sceneId;
     currentId = sceneId;
     party.state.scene = sceneId;
     render(sc);
     ui.show('scene');
-    // autosave on scene change
-    if (changed && CHLOE.engine.save.getCurrent()) CHLOE.engine.save.autosave();
 
     // first-visit intro
     if (sc.intro && !party.getFlag(seenFlag(sceneId)) && !(opts && opts.skipIntro)) {
@@ -193,30 +190,29 @@ CHLOE.ui.scene = (function(){
         console.warn('[CHLOE] pickup action with unknown item', action);
       }
       completeAction(sc, action, index);
-      CHLOE.engine.save.autosave();
       return;
     }
     if (type === 'heal') {
       party.fullHeal();
       ui.toast('The band catches its breath. Fully rested.');
       completeAction(sc, action, index);
-      CHLOE.engine.save.autosave();
       return;
     }
     console.warn('[CHLOE] unknown hotspot action type "' + type + '"', action);
   }
 
-  /* Called by battle UI when a battle finishes. */
+  /* Called by battle UI when a battle finishes. May run before goto() ever
+     did (battles can start without the 2D scene screen) — init refs here. */
   function onBattleEnd(result){
+    ui = CHLOE.ui; party = CHLOE.engine.party;
     var ctx = pendingBattleAction;
     pendingBattleAction = null;
 
     if (result === 'defeat') {
-      var lost = party.respawn();
-      var startScene = party.state.scene;
-      currentId = null; // force scene-change autosave
-      goto(startScene, { skipIntro: true });
-      ui.toast(lost > 0 ? ('You lost ' + lost + ' ◆ in the dark.') : 'You wake up back where the night began.');
+      // roguelike (spec §15): death ends the run — a fresh one begins
+      currentId = null;
+      CHLOE.game.startNew();
+      ui.toast('The night resets. Everything is gone.');
       return;
     }
 
@@ -239,7 +235,6 @@ CHLOE.ui.scene = (function(){
         CHLOE.ui.dialog.play(story.onFirstVictoryDialog);
       }
     }
-    CHLOE.engine.save.autosave();
   }
 
   function currentSceneId(){ return currentId; }

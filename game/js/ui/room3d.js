@@ -78,7 +78,7 @@ CHLOE.ui.room3d = (function(){
 
     // bottom control hints
     els.controls = ui.el('div', 'r3d-controls',
-      'WASD move · mouse look · Space jump · Shift sprint · arrows/Q/E turn · M menu');
+      'WASD move · mouse look · Space jump · Ctrl or C crouch · clicks close your hands · M menu');
     r.appendChild(els.controls);
 
     // lock overlay (informational — clicks pass through to the canvas,
@@ -87,7 +87,7 @@ CHLOE.ui.room3d = (function(){
     var card = ui.el('div', 'r3d-lock-card');
     card.appendChild(ui.el('div', 'r3d-lock-title', 'The Dressing Room'));
     card.appendChild(ui.el('div', 'r3d-lock-line',
-      'Click to look around · WASD move · Shift sprint · ESC release · M menu'));
+      'Click to look around · WASD move · Space jump · Ctrl or C crouch · ESC release · M menu'));
     els.overlayLine = card.lastChild;
     els.overlay.appendChild(card);
     r.appendChild(els.overlay);
@@ -130,16 +130,17 @@ CHLOE.ui.room3d = (function(){
     if (typeof d.tvDist === 'number' && d.tvDist <= TV_RANGE) return true;
     return false;
   }
-  function setHint(kind){ // 'enemy' | 'tv' | null
+  function setHint(kind, label){ // 'enemy' | 'tv' | 'item' | null
     if (els.crosshair) {
-      els.crosshair.classList.toggle('in-range', kind === 'enemy');
+      els.crosshair.classList.toggle('in-range', kind === 'enemy' || kind === 'item');
       els.crosshair.classList.toggle('tv-range', kind === 'tv');
     }
     if (els.hint) {
       els.hint.classList.toggle('hidden', !kind);
       els.hint.classList.toggle('tv', kind === 'tv');
       if (kind) {
-        var text = kind === 'tv' ? 'TV — click to turn on/off' : 'CLICK TO ENGAGE';
+        var text = kind === 'tv' ? 'TV — click to turn on/off'
+                 : (kind === 'item' ? ('take the ' + (label || 'item')) : 'CLICK TO ENGAGE');
         if (els.hint.textContent !== text) els.hint.textContent = text;
       }
     }
@@ -159,7 +160,10 @@ CHLOE.ui.room3d = (function(){
     // otherwise "CLICK TO ENGAGE" shows while clicks do nothing.
     var enemyHover = cbHover === 'enemy' && !!(d && d.enemyAlive) &&
                      !(typeof d.enemyDist === 'number' && d.enemyDist > ENGAGE_RANGE);
-    setHint(enemyHover ? 'enemy' : (tvHovered(d) ? 'tv' : null));
+    // §16: a glinting item under the crosshair — enemy and TV keep priority
+    var pk = (!enemyHover && !tvHovered(d) && d) ? d.pickupHover : null;
+    setHint(enemyHover ? 'enemy' : (tvHovered(d) ? 'tv' : (pk ? 'item' : null)),
+            pk && pk.label);
     if (els.overlay) els.overlay.classList.toggle('hidden', isLocked());
     refreshHud();
   }
@@ -180,6 +184,14 @@ CHLOE.ui.room3d = (function(){
         w.init(els.canvas);
         if (typeof w.onEngage === 'function') w.onEngage(engage);
         if (typeof w.onHover === 'function') w.onHover(onWorldHover);
+        if (typeof w.onPickup === 'function') {
+          w.onPickup(function(itemId, label){
+            var item = (CHLOE.data.items || {})[itemId];
+            if (!item) return;
+            CHLOE.engine.inventory.add(itemId, 1);
+            ui.toast('Taken: ' + (item.icon ? item.icon + ' ' : '') + (item.name || label));
+          });
+        }
         inited = true;
       } catch (e) {
         console.warn('[CHLOE] world3d.init failed', e);
@@ -258,8 +270,12 @@ CHLOE.ui.room3d = (function(){
     }
     inBattle = true;
     pause();
-    // the exact battle entry scene hotspots use (scene.js runAction 'battle')
-    CHLOE.ui.battle.begin(id, { boss: false });
+    // §16: battles happen in the 3D church arena (fallback: 2D battle screen)
+    if (CHLOE.ui.battle3d && typeof CHLOE.ui.battle3d.begin === 'function') {
+      CHLOE.ui.battle3d.begin(id);
+    } else {
+      CHLOE.ui.battle.begin(id, { boss: false });
+    }
   }
 
   function backToRoom(){
@@ -274,24 +290,24 @@ CHLOE.ui.room3d = (function(){
     var w = world();
 
     if (result === 'defeat') {
-      // existing defeat flow (shard loss + full heal), but respawn INTO the
-      // room with the enemy reset instead of the 2D start scene.
-      var lost = party.respawn();
+      // roguelike (spec §15): death ends the run. Reset the room (enemy back,
+      // player at spawn, pickups restored) and start a brand-new level-1 run.
+      if (respawnTimer) { window.clearTimeout(respawnTimer); respawnTimer = null; }
       if (w) {
         try {
           if (typeof w.setEnemyAlive === 'function') w.setEnemyAlive(true);
-          if (typeof w.respawn === 'function') w.respawn(); // optional API
+          if (typeof w.resetPlayer === 'function') w.resetPlayer();
         } catch (e) {}
       }
-      if (respawnTimer) { window.clearTimeout(respawnTimer); respawnTimer = null; }
-      backToRoom();
-      ui.toast(lost > 0 ? ('You lost ' + lost + ' ◆ in the dark.')
-                        : 'You wake up back in the room.');
-      CHLOE.engine.save.autosave();
+      CHLOE.game.startNew();
+      ui.toast('A new night begins. Nothing came with you.');
       return;
     }
 
     if (result === 'victory') {
+      // §11 via §13: clearing the room's enemy sets roomCleared, which is the
+      // hook that brings Ash into the party. Run-scoped — re-earned each run.
+      if (!party.getFlag('roomCleared')) party.setFlag('roomCleared');
       if (w) { try { if (typeof w.setEnemyAlive === 'function') w.setEnemyAlive(false); } catch (e) {} }
       if (respawnTimer) window.clearTimeout(respawnTimer);
       respawnTimer = window.setTimeout(function(){
@@ -302,7 +318,6 @@ CHLOE.ui.room3d = (function(){
     }
     // victory or fled: back into the room
     backToRoom();
-    CHLOE.engine.save.autosave();
   }
 
   /* ---------- one-time wiring ---------- */
@@ -376,6 +391,7 @@ CHLOE.ui.room3d = (function(){
     openMenu: openMenu,
     /* exposed for tests/debugging */
     _pause: pause,
-    _resume: resume
+    _resume: resume,
+    _engage: engage
   };
 })();
