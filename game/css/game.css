@@ -75,7 +75,6 @@ input[type=text]:focus{ border-color:var(--red); box-shadow:0 0 0 2px rgba(229,2
   transition:opacity .35s ease;
 }
 .screen.active{ display:block; opacity:1; }
-.screen.fading-in{ opacity:0; }
 
 /* film grain + vignette overlay */
 #fx-grain{
@@ -657,7 +656,6 @@ h1,h2,h3,.head{
 .menu-tabs button:hover:not(:disabled){ background:#1a161d; color:var(--text); box-shadow:none; }
 .menu-tabs button.on{ color:var(--red); border-bottom-color:var(--red); }
 .menu-body{ padding:1rem 1.1rem 1.2rem; overflow-y:auto; }
-.menu-close{ position:absolute; }
 .party-card{
   display:flex; gap:.9rem;
   background:var(--panel-2);
@@ -821,32 +819,6 @@ h1,h2,h3,.head{
   flex:1 1 auto; min-width:0;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
-.el-dot{
-  flex:0 0 auto;
-  width:9px; height:9px; border-radius:50%;
-  display:inline-block;
-  background:#5a5560;
-  box-shadow:0 0 6px rgba(0,0,0,.4);
-}
-.el-dot.el-none{   background:#5a5560; }
-.el-dot.el-ember{  background:#ff5d2e; box-shadow:0 0 7px rgba(255,93,46,.8); }
-.el-dot.el-frost{  background:#6ec6ff; box-shadow:0 0 7px rgba(110,198,255,.8); }
-.el-dot.el-volt{   background:#ffd23e; box-shadow:0 0 7px rgba(255,210,62,.8); }
-.el-dot.el-shadow{ background:#8a5cf5; box-shadow:0 0 7px rgba(138,92,245,.8); }
-.el-dot.el-light{  background:#fff3c4; box-shadow:0 0 7px rgba(255,243,196,.9); }
-.mp-chip{
-  flex:0 0 auto;
-  font-size:.72rem; line-height:1;
-  color:var(--mp);
-  border:1px solid rgba(63,169,245,.45);
-  border-radius:999px;
-  padding:.25em .5em .2em;
-  white-space:nowrap;
-  background:rgba(20,74,116,.18);
-}
-.mp-chip.free{ color:var(--dim); border-color:#38323e; background:transparent; }
-button:disabled .mp-chip{ color:#c04a5e; border-color:rgba(229,23,63,.4); background:rgba(122,12,34,.18); }
-
 /* utility commands under the move list */
 .cmd-util{
   display:grid; grid-template-columns:1fr 1fr;
@@ -1075,7 +1047,6 @@ button:disabled .mp-chip{ color:#c04a5e; border-color:rgba(229,23,63,.4); backgr
 @media (max-width:560px){
   .phase-badge{ font-size:.62rem; padding:.3em .45em .24em; letter-spacing:.08em; }
   .move-btn{ font-size:.82rem; gap:.35rem; }
-  .mp-chip{ font-size:.65rem; }
   .cmd-util button{ font-size:.78rem; letter-spacing:.06em; }
   .move-list{ max-height:118px; }
   .lo-grid{ grid-template-columns:1fr; }
@@ -1501,6 +1472,12 @@ button:disabled .cost-chip{ opacity:.7; }
   0%,100%{ transform:scale(1.55); }
   50%    { transform:scale(1.95); }
 }
+/* TV hovered — crosshair stays white, just brightens + grows a touch */
+.r3d-crosshair.tv-range{
+  background:var(--text);
+  transform:scale(1.4);
+  box-shadow:0 0 10px rgba(242,238,240,.75), 0 0 3px rgba(242,238,240,.9);
+}
 /* engage hint under the crosshair */
 .r3d-hint{
   position:absolute; left:50%; top:50%;
@@ -1517,6 +1494,15 @@ button:disabled .cost-chip{ opacity:.7; }
 @keyframes r3dHintPulse{
   0%,100%{ opacity:.65; }
   50%    { opacity:1; }
+}
+/* TV variant of the hint — calm white, keeps the exact "TV — ..." casing */
+.r3d-hint.tv{
+  color:var(--text);
+  text-transform:none;
+  letter-spacing:.08em;
+  font-size:.95rem;
+  text-shadow:0 0 8px rgba(242,238,240,.4), 0 1px 3px rgba(0,0,0,.9);
+  animation:r3dHintPulse 1.8s ease-in-out infinite;
 }
 
 /* bottom control hints line */

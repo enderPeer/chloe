@@ -279,6 +279,7 @@ CHLOE.engine.party = (function(){
       var arr = blob.party || [];
       for (var i = 0; i < arr.length; i++) {
         var p = arr[i];
+        if (!p || typeof p !== 'object') { console.warn('[CHLOE] save contains a malformed party entry'); continue; }
         if (!charDef(p.id)) { console.warn('[CHLOE] save references unknown character: ' + p.id); continue; }
         state.members.push({
           id: p.id,

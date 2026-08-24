@@ -212,3 +212,29 @@ Save: scene field becomes 'room3d' (migration: any old scene value -> 'room3d' o
 
 ### Verification hooks
 world3d.debug() is mandatory (used by automated tests to assert movement/collision/turning). Keyboard fallback must be enough to reach and engage the enemy without pointer lock.
+
+## 14. Room3D v2 — photorealism, real models, jump, hands, interactive TV (extends section 13)
+
+### Photoreal pipeline (engine)
+renderer: outputEncoding sRGB, ACESFilmicToneMapping (exposure ~1.1), physicallyCorrectLights, shadowMap PCFSoft (1024), pixelRatio cap 2, anisotropy 4. **Environment map**: HDRI (.hdr) via vendored RGBELoader + PMREMGenerator -> scene.environment (NOT background — room is enclosed); envMapIntensity ~0.6 on all PBR materials; graceful fallback if HDR fails (debug().envMap=false, never crash). One shadow-casting light (lamp spot or ceiling point), floor+furniture receive. Vendor tags: vendor/GLTFLoader.js + vendor/RGBELoader.js load right after three.min.js (already vendored).
+
+### Real 3D models (MODELS agent) — Poly Haven, CC0, direct download (Sketchfab requires OAuth-gated downloads; not available)
+Query https://api.polyhaven.com/assets?t=models (and /files/{id}) and pick appropriate furniture: a sofa/couch, an old TV (tube/vintage preferred), a floor or table lamp, a console/dresser usable as vanity, optionally a chair + 1-2 clutter props. Also ONE moody dim indoor/night HDRI (t=hdris, 1k or 2k .hdr). Download glTF format (1k textures) preserving relative paths into game/assets/models/<id>/ and the hdr into game/assets/hdri/. TOTAL BUDGET <= 40MB, prefer small. Manifest tools/model-manifest.json with canonical ids EXACTLY: sofa, tv, lamp, vanity, chair(optional), clutter1/clutter2(optional), hdri — each {id, polyhavenId, license, url, entryFile (the .gltf), sizeKB, realDims if stated}. Write tools/ATTRIBUTIONS.md (source, author, license per asset). Verify every entryFile + its referenced .bin/textures exist on disk.
+
+### Placement, colliders, fallback (engine + data)
+data/room3d.js furniture entries gain {model:'<canonical id>'|null, targetH (meters), rotY}. Engine loads via GLTFLoader (path from manifest — engine reads a mirrored copy of entryFile paths in data/room3d.js models block, NOT the json at runtime), scales uniformly to targetH, drops to floor (Box3 min.y -> 0), computes AABB collider from the scaled Box3 (replaces the placeholder box collider). The existing textured-box furniture stays as AUTOMATIC per-item fallback whenever a model fails to load (404/file://) — the room must never have holes. Mirror, door, posters stay as planes.
+
+### Jump (engine)
+Space while grounded: vy=4.8, gravity -14 m/s^2, land at eye 1.6 (y offset over eye height), grounded flag, no double-jump, head bob only while grounded, small camera+hands landing dip (0.05m, ~150ms). debug() adds {y, grounded}.
+
+### First-person hands (engine)
+Camera-attached hand group, always rendered (near plane 0.05, renderOrder high): two stylized gloved hands from primitives (rounded palm + finger segments + thumb, dark worn leather PBR, subtle red rim) at (+-0.28, -0.25, -0.55) angled inward. Animation: idle breath bob; walking sway (x +-0.02, y 0.015) synced to head-bob frequency, 1.5x on sprint; slight rotational lag behind look (slerp ~12/s); jump raises hands slightly, landing dips. If the MODELS agent happens to include a fitting CC0 arms glb, engine MAY use it; primitives are the required baseline. debug().handsVisible.
+
+### Interactive TV (engine + ui)
+TV screen = separate plane fitted over the model's tube face (data-configured local offset/size after scaling; fallback box TV keeps its screen plane). States: ON = animated tv_static texture + bluish emissive + flickering PointLight (~0.6); OFF (default) = near-black glossy env-reflective. Raycast hover within 2.5m -> hint "TV — click to turn on/off"; click toggles (also unlocked-mouse click). debug().tvOn. Engage-enemy interaction unchanged and takes priority when both hovered.
+
+### Debug contract (extended, mandatory)
+debug() -> {x, y, z, yaw, pitch, locked, grounded, enemyDist, enemyAlive, tvOn, envMap, handsVisible, modelsLoaded:{sofa,tv,lamp,vanity,...}, colliders}.
+
+### Ownership
+MODELS agent: game/assets/models/*, game/assets/hdri/*, tools/model-manifest.json, tools/ATTRIBUTIONS.md. ENGINE agent: engine/world3d.js + data/room3d.js. UI agent: ui/room3d.js (hint lines add Space=jump + TV hint), game/index.html (vendor loader tags), css touches. Battle handoff, menu, save flow unchanged.

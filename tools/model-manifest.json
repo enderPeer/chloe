@@ -1,0 +1,77 @@
+{
+  "note": "Poly Haven CC0 assets, glTF 1k-texture variants. entryFile paths are repo-root-relative. sizeKB = total on-disk size of the asset folder (gltf + bin + textures). realDims = Poly Haven stated dimensions converted mm->m, Blender axes (z = height).",
+  "totalKB": 11380,
+  "assets": {
+    "sofa": {
+      "id": "sofa",
+      "polyhavenId": "Sofa_01",
+      "license": "CC0-1.0",
+      "url": "https://polyhaven.com/a/Sofa_01",
+      "entryFile": "game/assets/models/sofa/Sofa_01_1k.gltf",
+      "sizeKB": 506,
+      "realDims": { "x": 1.571, "y": 0.658, "z": 0.797 }
+    },
+    "tv": {
+      "id": "tv",
+      "polyhavenId": "Television_01",
+      "license": "CC0-1.0",
+      "url": "https://polyhaven.com/a/Television_01",
+      "entryFile": "game/assets/models/tv/Television_01_1k.gltf",
+      "sizeKB": 519,
+      "realDims": { "x": 0.6, "y": 0.471, "z": 0.457 }
+    },
+    "lamp": {
+      "id": "lamp",
+      "polyhavenId": "desk_lamp_arm_01",
+      "license": "CC0-1.0",
+      "url": "https://polyhaven.com/a/desk_lamp_arm_01",
+      "entryFile": "game/assets/models/lamp/desk_lamp_arm_01_1k.gltf",
+      "sizeKB": 2809,
+      "realDims": { "x": 0.617, "y": 0.408, "z": 0.879 }
+    },
+    "vanity": {
+      "id": "vanity",
+      "polyhavenId": "ClassicConsole_01",
+      "license": "CC0-1.0",
+      "url": "https://polyhaven.com/a/ClassicConsole_01",
+      "entryFile": "game/assets/models/vanity/ClassicConsole_01_1k.gltf",
+      "sizeKB": 723,
+      "realDims": { "x": 1.543, "y": 0.589, "z": 0.949 }
+    },
+    "chair": {
+      "id": "chair",
+      "polyhavenId": "painted_wooden_chair_01",
+      "license": "CC0-1.0",
+      "url": "https://polyhaven.com/a/painted_wooden_chair_01",
+      "entryFile": "game/assets/models/chair/painted_wooden_chair_01_1k.gltf",
+      "sizeKB": 481,
+      "realDims": { "x": 0.432, "y": 0.54, "z": 0.956 }
+    },
+    "clutter1": {
+      "id": "clutter1",
+      "polyhavenId": "cassette_player",
+      "license": "CC0-1.0",
+      "url": "https://polyhaven.com/a/cassette_player",
+      "entryFile": "game/assets/models/clutter1/cassette_player_1k.gltf",
+      "sizeKB": 923,
+      "realDims": { "x": 0.129, "y": 0.049, "z": 0.237 }
+    },
+    "clutter2": {
+      "id": "clutter2",
+      "polyhavenId": "wine_bottles_01",
+      "license": "CC0-1.0",
+      "url": "https://polyhaven.com/a/wine_bottles_01",
+      "entryFile": "game/assets/models/clutter2/wine_bottles_01_1k.gltf",
+      "sizeKB": 3818,
+      "realDims": { "x": 0.676, "y": 0.081, "z": 0.331 }
+    },
+    "hdri": {
+      "id": "hdri",
+      "polyhavenId": "creepy_bathroom",
+      "license": "CC0-1.0",
+      "url": "https://polyhaven.com/a/creepy_bathroom",
+      "entryFile": "game/assets/hdri/creepy_bathroom_1k.hdr",
+      "sizeKB": 1601
+    }
+  }
+}

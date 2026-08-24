@@ -6,7 +6,7 @@ CHLOE.data.config = {
   // Cloud-save API base URL. Empty string = local-only mode (all cloud calls silently no-op).
   apiUrl: '',
   // Gameplay tuning
-  levelCap: 50,
+  levelCap: 100,
   fleeChance: 0.7,
   defeatShardLossPct: 30,
   typewriterMs: 16,
