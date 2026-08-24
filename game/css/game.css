@@ -1618,6 +1618,33 @@ button:disabled .cost-chip{ opacity:.7; }
   70%{ opacity:1; }
   100%{ opacity:0; transform:translate(-50%,-90%) scale(1); }
 }
+
+/* ---------- §23 "STUNNED", floated over the knight the asteroid caught ------
+   Deliberately NOT the amber "STAGGERED!" of §22. That one is a punish window
+   you earned with a single heavy hit; this is crowd control you bought with a
+   key and it lands on a whole crater at once. Cold blue-white, heavier and
+   wider, and it shudders where the stagger label rises and tilts — so at a
+   glance the two never read as the same event. Positioned in per-cent by
+   ui/battle3d.js, so a resize mid-float cannot strand it. */
+.b3d-float{
+  position:absolute; z-index:7; pointer-events:none; white-space:nowrap;
+  transform:translate(-50%,-50%); font-family:var(--font-head);
+}
+.b3d-float.stunned{
+  font-size:clamp(1rem,2.8vw,1.7rem);
+  letter-spacing:.3em; font-weight:700; color:#dff2ff;
+  text-shadow:0 0 10px rgba(96,190,255,.95), 0 0 26px rgba(40,120,220,.75), 0 2px 4px #000;
+  animation:b3dStun 1.4s ease-out forwards;
+}
+@keyframes b3dStun{
+  0%{ opacity:0; transform:translate(-50%,-40%) scale(.8); }
+  12%{ opacity:1; transform:translate(-50%,-52%) scale(1.1); }
+  20%{ transform:translate(-53%,-50%) scale(1.04); }
+  28%{ transform:translate(-47%,-52%) scale(1.04); }
+  36%{ transform:translate(-51%,-50%) scale(1.02); }
+  75%{ opacity:1; transform:translate(-50%,-56%) scale(1); }
+  100%{ opacity:0; transform:translate(-50%,-72%) scale(1); }
+}
 .b3d-controls{
   position:absolute; right:.9rem; bottom:calc(.55rem + env(safe-area-inset-bottom));
   color:#565059; font-size:.68rem; letter-spacing:.05em;
@@ -1706,6 +1733,17 @@ button:disabled .cost-chip{ opacity:.7; }
   position:absolute; left:0; bottom:0; width:100%; height:0%;
   background:rgba(0,0,0,.66); pointer-events:none; transition:height .1s linear;
 }
+/* §23 pockets: a key holding a consumable. The count badge takes the strip the
+   cost chip owns on an ability — same place, opposite question ("how many
+   left" rather than "what does it cost"), so the two never share a corner.
+   `dim` is the shared consumable lockout OR an empty pocket; `out` is empty
+   specifically, and it keeps the icon and the key because the bind SURVIVES
+   running out — the slot re-arms the moment you pick another one up. */
+.b3d-slot.item .cost.count{ color:var(--gold); font-size:.62rem; letter-spacing:.06em; }
+.b3d-slot.item.ready{ border-color:var(--gold); box-shadow:0 0 12px rgba(232,193,90,.28); }
+.b3d-slot.item.dim{ opacity:.45; }
+.b3d-slot.item.out .icon{ filter:grayscale(1); }
+.b3d-slot.item.out .cost.count{ color:var(--red); }
 
 /* evade pip */
 .b3d-evade{
@@ -1760,6 +1798,19 @@ button:disabled .cost-chip{ opacity:.7; }
 .bind-card-head .at{ margin-left:auto; font-size:.58rem; color:var(--red); }
 .bind-card .ds{ color:var(--dim); font-size:.72rem; margin:.3rem 0; }
 .bind-meta{ display:flex; flex-wrap:wrap; gap:.5rem; font-size:.6rem; color:#7f7885; }
+/* §23 pockets in the Moves tab. The consumables group reuses the ability card
+   wholesale — same shape, same gesture, because it binds to the same kind of
+   key. Only the carried count is new. A key holding an item is NOT drawn as a
+   special "pocket" key: any slot takes either, and marking two of them apart
+   would teach a rule the game does not have. */
+.bind-slot .ct{ position:absolute; bottom:3px; right:6px; font-size:.58rem; color:var(--gold); }
+.bind-slot.out{ opacity:.55; }
+.bind-slot.out .ct{ color:var(--red); }
+.bind-card.item .ct{ color:var(--gold); }
+.bind-card.item.out{ opacity:.6; }
+.bind-card.item.out .ct{ color:var(--red); }
+/* a refused bind has to say why, and it must not read as the calm grey note */
+.menu-note.warn{ color:#ffc27a; }
 
 @media (max-width:560px){
   .b3d-slot{ width:52px; height:52px; }
@@ -1845,4 +1896,16 @@ button:disabled .cost-chip{ opacity:.7; }
 @media (max-width:560px){
   .ladder-row{ flex-wrap:wrap; }
   .ladder-row .give{ width:100%; text-align:left; padding-left:2.2rem; }
+}
+
+/* §23/build stamp — the version shown inside the menu card. Deliberately
+   quiet: it is a reference you go looking for, not something competing with
+   the tabs. Same dim token as .title-foot so the two readings of the version
+   look like the same fact stated twice, not two different UI elements. */
+.menu-version{
+  margin-top:.55rem; padding-top:.5rem;
+  border-top:1px solid rgba(255,255,255,.07);
+  text-align:right; color:var(--dim);
+  font-size:.72rem; letter-spacing:.06em;
+  font-variant-numeric:tabular-nums;   /* the build digit changes often; stop the line jittering */
 }

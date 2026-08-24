@@ -54,6 +54,28 @@ A server (not `file://`) is required for the 3D mode — browsers block GLTF/HDR
 5. **Asset pipelines** (all free, no keys): AI images via `tools/generate-image.ps1` (Pollinations); 3D models/HDRIs from [Poly Haven](https://polyhaven.com) (CC0) — see `tools/model-manifest.json` + `tools/ATTRIBUTIONS.md`. The church and knight in `game/assets/3d/` were converted from user-supplied source archives with Blender (headless: relink textures → downscale to 1k → Draco → GLB).
 6. Deploy = push/merge to `main`; GitHub Pages rebuilds automatically (~1 min).
 
+## Versioning
+
+The version shown on the title screen and in the in-game menu lives in one place:
+[`game/js/data/version.js`](game/js/data/version.js) (`major.minor.build` — `minor` tracks the
+`GAME_SPEC.md` section the build implements, so `v0.23.x` *is* "the game as of §23").
+
+**The build number bumps on every push, automatically.** Enable the hook once per clone:
+
+```bash
+git config core.hooksPath tools/hooks
+```
+
+After that every commit runs [`tools/bump-version.js`](tools/bump-version.js) and stages the bump
+with it. Manual use:
+
+```bash
+node tools/bump-version.js --minor 24 --label "New Drop"
+```
+
+`--print` shows the current version without changing anything, and `SKIP_VERSION_BUMP=1 git commit`
+skips a bump for one commit. The hook never blocks a commit: if node is missing it warns and lets it through.
+
 ## Repo layout
 
 ```

@@ -95,7 +95,15 @@ CHLOE.data.abilities = {
   asteroid: {
     id: 'asteroid', name: 'Asteroid', icon: '☄', type: 'fire',
     desc: 'Call a burning rock down out of the roof. It falls where you aim and everything near the crater takes it.',
-    cost: { mana: 24, sta: 10 },
+    /* 14, not the 24 it shipped at (§23). The ladder grants asteroid one level
+       AFTER fire_tornado, so the newer spell cost MORE mana (24) than the earlier,
+       stronger one (18) — and on the ~26-magic pool you actually have at level 3
+       one cast left you with 2: not enough for a rock, a tornado or even an ember
+       jab, so the round went back to punching while you waited on regen. At 14 you
+       keep enough to still be a caster, and the second rock is affordable long
+       before the 9s cooldown is up. Stamina stays 10 — the arm was never the
+       problem, and it keeps evade (22 sta) competing for the same bar. */
+    cost: { mana: 14, sta: 10 },
     /* Long enough to read as a real cast, short enough that you can still
        fit one in between his swings. The fall itself is the wind-up you
        watch, so the damage lands at the END of it. */
@@ -106,6 +114,15 @@ CHLOE.data.abilities = {
     cast: 'sign',                 // both hands up, sigil at the fingertips
     vfx: 'asteroid',
     splash: true, splashRadius: 3.4,
+    /* Impact stun (§23). This is NOT a new status: it drives the §22 `stagger`
+       state, so the pose, the "cannot attack / cannot move" rules and the
+       staggerTakeMult damage bonus are the ones the knight already has. Every
+       knight inside splashRadius at the impact frame gets it, which is the whole
+       reason the rock is worth one of the nine keys against a squad — the damage
+       alone loses to fire_tornado. Callers must REFRESH, not stack
+       (staggerT = max(current, ms/1000)), or two rocks would lock a knight out
+       of the fight for three seconds. */
+    stun: { ms: 1500 },
     fallMs: 850, fallFrom: 11.0,  // metres above the floor it starts
     grantedBy: 'tree'
   },

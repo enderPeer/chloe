@@ -56,6 +56,11 @@ CHLOE.ui.menu = (function(){
     else renderHelp(body);
     card.appendChild(body);
 
+    /* Build stamp, visible from inside a run: the title screen version
+       scrolls past in two seconds, and this is where someone actually checks
+       what they are playing. Source is data/version.js (bumped every push). */
+    var ver = CHLOE.data.version;
+    if (ver) card.appendChild(ui.el('div', 'menu-version', ver.full() + ' · ' + ver.date));
     l.appendChild(card);
   }
 
