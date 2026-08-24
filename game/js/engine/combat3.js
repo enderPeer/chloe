@@ -34,18 +34,26 @@ CHLOE.engine.combat3 = (function () {
 
   /* Everything this character may bind: punch always, plus whatever the skill
      tree granted (tree nodes with grant.ability). */
+  /* §19: the shared 1-100 ladder is the source of truth — a character knows
+     exactly what their OWN level has unlocked. */
   function knownAbilities(charId) {
-    var out = [], seen = {}, id;
-    for (id in ABIL()) {
-      if (ABIL()[id].grantedBy === 'start') { out.push(id); seen[id] = 1; }
+    var out = [], seen = {}, i;
+    var sk = CHLOE.engine.skilltree;
+    if (sk && typeof sk.abilities === 'function') {
+      var lvl = sk.abilities(charId) || [];
+      for (i = 0; i < lvl.length; i++) {
+        if (ABIL()[lvl[i]] && !seen[lvl[i]]) { out.push(lvl[i]); seen[lvl[i]] = 1; }
+      }
     }
+    // legacy point-buy nodes still count if a save/tree granted them
     var tr = CHLOE.engine.tree;
     if (tr && typeof tr.abilities === 'function') {
       var granted = tr.abilities(charId) || [];
-      for (var i = 0; i < granted.length; i++) {
+      for (i = 0; i < granted.length; i++) {
         if (ABIL()[granted[i]] && !seen[granted[i]]) { out.push(granted[i]); seen[granted[i]] = 1; }
       }
     }
+    if (!out.length) out.push('punch');   // never leave a character empty-handed
     return out;
   }
 
@@ -53,6 +61,8 @@ CHLOE.engine.combat3 = (function () {
   function slotCount(charId) {
     var cfg = CFG();
     var n = cfg.baseSlots || 1;
+    var sk = CHLOE.engine.skilltree;
+    if (sk && typeof sk.slots === 'function') n += sk.slots(charId) || 0;
     var tr = CHLOE.engine.tree;
     if (tr && typeof tr.abilitySlots === 'function') n += tr.abilitySlots(charId) || 0;
     return Math.max(1, Math.min(cfg.maxSlots || 9, n));
@@ -282,9 +292,32 @@ CHLOE.engine.combat3 = (function () {
     }
     st.hp = Math.max(0, st.hp - dmg);
     if (m) m.hp = st.hp;
-    var dead = st.hp <= 0;
-    if (dead) defeat();
-    return { dmg: dmg, dead: dead, evaded: false };
+
+    /* §19: the leader falling does NOT end the run while someone else can
+       still fight — the next member takes over as leader mid-fight and the
+       camera keeps going with their stats and their own hotbar. */
+    var swapped = null;
+    if (st.hp <= 0) {
+      var next = p.firstAliveOther(st.charId);
+      if (next) {
+        p.setActive(next.id);
+        st.charId = next.id;
+        var neff = p.effStats(next);
+        st.max = { hp: neff.life, mana: neff.magic, sta: neff.stamina };
+        st.hp = next.hp;
+        st.mana = neff.magic;
+        st.sta = neff.stamina;
+        st.cast = null;
+        st.lockUntil = 0;
+        st.cd = {};                       // fresh cooldowns for the new fighter
+        st.iframeUntil = st.now + 900;    // a breath to recover, not a free kill
+        swapped = next.id;
+      } else {
+        defeat();
+      }
+    }
+    return { dmg: dmg, dead: st.hp <= 0 && !swapped, evaded: false,
+             leaderSwap: swapped };
   }
 
   /* ---------- tick ---------- */

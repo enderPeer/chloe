@@ -120,11 +120,25 @@ CHLOE.engine.party = (function(){
   }
 
   // §11 hook: if the Room is cleared and Ash is missing, she joins.
-  function ensureAsh(silent){
-    if (!state.flags || !state.flags.roomCleared) return false;
-    if (get('ash') || !charDef('ash')) return false;
-    return add('ash', { silent: !!silent });
+  /* §19: allies are earned by LEVEL now, not by clearing the room. The shared
+     ladder says who joins when (Ash at 3); they arrive at level 1 and level
+     up on their own from there. Idempotent — safe to call every level-up. */
+  function ensureAllies(silent){
+    var sk = CHLOE.engine.skilltree;
+    if (!sk || typeof sk.alliesAt !== 'function') return false;
+    var lead = active() || state.members[0];
+    if (!lead) return false;
+    var want = sk.alliesAt(lead.level) || [];
+    var joined = false;
+    for (var i = 0; i < want.length; i++) {
+      if (!get(want[i]) && charDef(want[i])) {
+        if (add(want[i], { silent: !!silent })) joined = true;
+      }
+    }
+    return joined;
   }
+  // legacy name kept: older call sites still ask for Ash by the room flag
+  function ensureAsh(silent){ return ensureAllies(silent); }
 
   function active(){ return get(state.activeId); }
   function setActive(id){
@@ -257,6 +271,7 @@ CHLOE.engine.party = (function(){
     get: get,
     add: add,
     ensureAsh: ensureAsh,
+    ensureAllies: ensureAllies,
     active: active,
     setActive: setActive,
     maxStats: maxStats,

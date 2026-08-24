@@ -359,3 +359,28 @@ The signature spell: `cast: 'sign'` raises the ZBrush hand (decimated 787k → 7
 
 ### Live slot reads
 `combat3` reads bound slots **live** from `party.state.binds` every frame. A snapshot taken at `start()` meant rebinding mid-fight silently did nothing.
+
+## 19. One ladder, a party that outlives you, a room that talks back (supersedes the point-buy ability tree of §17)
+
+### The skill tree is a 1-100 unlock ladder, not a point shop
+`data/skilltree.js` holds ONE shared track every character walks — "THE first main skill tree is available to all characters". Reaching a level grants that level's row automatically: no points, no prerequisites, nothing to mis-spend. Each character walks it at their OWN level, so a level-1 ally has only fists while a level-12 leader has the whole early kit.
+Row shape: `{ability, slot, stat, ally, name, desc}` — any subset.
+**Authored 1-12:** 1 punch · 2 **Fire Tornado** · 3 Ash joins · 4 +1 keybind · 5 life/stamina · 6 Hammer Fist · 7 +1 keybind · 8 magic · 9 Ember Jab · 10 +1 keybind · 11 atk/def · 12 Hollow Breaker. 13-100 are generated on a stated cadence (every 3rd level widens the hotbar to 9 keys, the rest are stat growth) so the ladder is complete and honest about what is filler; new abilities slot into this table as they are built.
+`engine/skilltree.js` derives everything as a pure function of level — no state to save or de-sync (§15). `combat3.knownAbilities/slotCount` and `tree.effectiveStats` all read it. The old point-buy nodes still resolve if present, so nothing breaks.
+
+### The party outlives its leader
+Allies arrive by LEVEL (`row.ally`), not by clearing the room — checked on every level-up. They join at **level 1 and level independently**, so an ally is genuinely weaker until they earn their own rows.
+When the leader's life hits 0 **and someone else is still standing**, the run does not end: the next member becomes leader mid-fight. `combat3.takeHit` swaps `charId`, re-reads that member's max pools, clears the cast and cooldowns, grants ~0.9s of i-frames so the swap is not a free kill, and returns `leaderSwap`. The HUD rebuilds the hotbar from the new leader's own level and abilities. Only when nobody is left does §15 defeat fire.
+
+### The room reads you back (`engine/displays.js`)
+Three canvas surfaces painted onto existing props, repainted whenever the room screen is entered:
+- **Mirror** — your leader: name, level, life/magic/stamina bars, ATK/DEF/SPD/MAG, unlocked abilities, and what the next level gives.
+- **Poster** — the Hollow Black Knight: level, type, life, stats, and every attack pattern with its dodge hint, wind-up time and power.
+- **TV** — "THE LONG NIGHT", a how-to **programme in chapters** (the room, your hands, the church, dodging, getting stronger, dying). The TV is no longer a toggle: off → on starts chapter 1, each further click turns the page, and after the last chapter it switches off, so one control cycles the whole guide. Painting the programme replaces the static texture, so the jitter animation stops while it is on.
+
+### The nave is the arena
+Arena bounds are now a **rectangle matching the church walls** (`arena.bounds`), not a small circle — you and the knight both roam the whole crossing. The circle is kept as a fallback for configs without bounds.
+**Benches** (`data/arena3d.js` `benches`/`bench`): the model's pews are baked into merged meshes and cannot be split, so the interactive ones are loose benches shoved out of the rows into the fight area. Walking into one **slows you to `slowFactor`** and **shunts it aside** at `pushSpeed` (clamped to stay inside the nave). An ability whose reach/arc catches one **breaks it into a wood pile** of scattered planks that stays on the floor.
+
+### Lighting note
+Anything new in the arena must clamp `envMapIntensity` (~0.1). The keys are bright enough that unclamped IBL renders dark oak, dark leather and skin as white plastic — this has now bitten the room hands, the first-person arms and the benches.

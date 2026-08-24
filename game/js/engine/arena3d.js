@@ -545,6 +545,121 @@ CHLOE.engine = CHLOE.engine || {};
     });
   }
 
+  // ------------------------------------------------------- §19 church benches
+  var benches = [];   // [{group, x, z, rotY, alive, vx, vz, hp}]
+
+  function woodMat() {
+    var m = new THREE.MeshStandardMaterial({ color: 0x2a1d14, roughness: 0.95, metalness: 0 });
+    // the arena keys are bright; unclamped IBL turns dark oak into white plastic
+    m.envMapIntensity = 0.12;
+    return m;
+  }
+
+  function buildBenches() {
+    var list = D().benches || [];
+    var b = D().bench || { w: 2.0, h: 0.85, d: 0.55 };
+    for (var i = 0; i < list.length; i++) {
+      var d = list[i];
+      var g = new THREE.Group();
+      var mat = woodMat();
+      // seat + back + two legs — reads as a pew at fight distance
+      var seat = new THREE.Mesh(new THREE.BoxGeometry(b.w, 0.1, b.d), mat);
+      seat.position.y = b.h * 0.55;
+      g.add(seat);
+      var back = new THREE.Mesh(new THREE.BoxGeometry(b.w, b.h * 0.5, 0.08), mat);
+      back.position.set(0, b.h * 0.8, -b.d * 0.45);
+      g.add(back);
+      var legGeo = new THREE.BoxGeometry(0.12, b.h * 0.55, b.d * 0.9);
+      var l1 = new THREE.Mesh(legGeo, mat); l1.position.set(-b.w * 0.42, b.h * 0.27, 0); g.add(l1);
+      var l2 = new THREE.Mesh(legGeo, mat); l2.position.set(b.w * 0.42, b.h * 0.27, 0); g.add(l2);
+      g.traverse(function (o) { if (o.isMesh) { o.castShadow = false; o.receiveShadow = true; } });
+      g.position.set(d.x, 0, d.z);
+      g.rotation.y = d.rotY || 0;
+      scene.add(g);
+      benches.push({ group: g, mat: mat, x: d.x, z: d.z, rotY: d.rotY || 0,
+                     alive: true, vx: 0, vz: 0, hp: (D().bench || {}).hp || 1,
+                     debris: null });
+    }
+  }
+
+  /* Break a bench: it collapses into a flat wood pile that stays on the floor. */
+  function breakBench(bn) {
+    if (!bn.alive) return;
+    bn.alive = false;
+    var b = D().bench || { w: 2.0, d: 0.55 };
+    var pile = new THREE.Group();
+    var mat = woodMat();
+    for (var i = 0; i < 7; i++) {
+      var len = (0.5 + Math.random() * 0.8) * (b.w / 2);
+      var plank = new THREE.Mesh(new THREE.BoxGeometry(len, 0.07, 0.14), mat);
+      plank.position.set((Math.random() - 0.5) * b.w * 0.7, 0.035 + Math.random() * 0.06,
+                         (Math.random() - 0.5) * b.d * 1.4);
+      plank.rotation.y = Math.random() * Math.PI;
+      plank.rotation.z = (Math.random() - 0.5) * 0.25;
+      pile.add(plank);
+    }
+    pile.position.set(bn.group.position.x, 0, bn.group.position.z);
+    pile.rotation.y = bn.group.rotation.y;
+    scene.add(pile);
+    bn.debris = pile;
+    scene.remove(bn.group);
+  }
+
+  /* Standing benches are soft obstacles: they slow you and slide away. Returns
+     the speed multiplier to apply this frame. */
+  function benchPush(nx, nz, dt) {
+    var cfgB = D().bench || {};
+    var b = { w: cfgB.w || 2.0, d: cfgB.d || 0.55 };
+    var slow = 1;
+    for (var i = 0; i < benches.length; i++) {
+      var bn = benches[i];
+      if (!bn.alive) continue;
+      var dx = nx - bn.group.position.x, dz = nz - bn.group.position.z;
+      var reach = Math.max(b.w, b.d) * 0.5 + RADIUS;
+      var dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist < reach && dist > 0.0001) {
+        slow = Math.min(slow, cfgB.slowFactor || 0.45);
+        // shove it along the contact normal
+        var push = (cfgB.pushSpeed || 1.9) * dt * (1 - dist / reach);
+        bn.group.position.x += (dx / dist) * push;
+        bn.group.position.z += (dz / dist) * push;
+        bn.group.rotation.y += push * 0.35;
+        // keep shoved benches inside the nave
+        var bd = D().arena && D().arena.bounds;
+        if (bd) {
+          bn.group.position.x = Math.max(bd.minX, Math.min(bd.maxX, bn.group.position.x));
+          bn.group.position.z = Math.max(bd.minZ, Math.min(bd.maxZ, bn.group.position.z));
+        }
+      }
+    }
+    return slow;
+  }
+
+  /* Did this ability's swing catch a bench? Called alongside the knight test
+     so a wild swing still breaks the furniture. */
+  A.abilityHitsBench = function (ability) {
+    var broke = [];
+    var fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+    var halfArc = Math.cos(((ability.arc || 60) / 2) * Math.PI / 180);
+    for (var i = 0; i < benches.length; i++) {
+      var bn = benches[i];
+      if (!bn.alive) continue;
+      var dx = bn.group.position.x - pos.x, dz = bn.group.position.z - pos.z;
+      var dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist > (ability.range || 2.5) + 0.6 || dist < 0.0001) continue;
+      if ((dx * fx + dz * fz) / dist < halfArc) continue;
+      bn.hp -= 1;
+      if (bn.hp <= 0) { breakBench(bn); broke.push(i); }
+    }
+    return broke.length;
+  };
+
+  A.benchDebug = function () {
+    return benches.map(function (b) {
+      return { alive: b.alive, x: +b.group.position.x.toFixed(2), z: +b.group.position.z.toFixed(2) };
+    });
+  };
+
   // --------------------------------------------- §18 hand sign + fire tornado
   var sign = { hand: null, rune: null, t: 0, active: false };
   var tornado = { root: null, tubes: [], light: null, t: 0, active: false, dur: 2.4 };
@@ -886,6 +1001,7 @@ CHLOE.engine = CHLOE.engine || {};
     loadChurch();
     loadKnight();
     loadFirstPerson();
+    buildBenches();
     loadHandSign();
     loadTornado();
     A.reset();
@@ -957,6 +1073,7 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   // ---------------------------------------------------------------- movement
+  var benchSlow = 1;   // §19: set by benchPush each frame
   function updatePlayer(dt) {
     var f = ((keys.KeyW || keys.ArrowUp) ? 1 : 0) - ((keys.KeyS || keys.ArrowDown) ? 1 : 0);
     var s = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
@@ -973,6 +1090,7 @@ CHLOE.engine = CHLOE.engine || {};
     }
     var spd = sprinting ? SPRINT : WALK;
     if (crouch) spd *= CROUCH_SPEED;
+    spd *= benchSlow;
     var tx = 0, tz = 0;
     if (f || s) {
       var len = Math.sqrt(f * f + s * s); f /= len; s /= len;
@@ -1018,15 +1136,23 @@ CHLOE.engine = CHLOE.engine || {};
     }
     pos.z = nz;
 
-    // circular arena bound
+    /* §19: the nave WALLS are the arena. Rectangular bounds matching the
+       stone; the old circle is only a fallback for configs without them. */
     var ar = cfg.arena || { cx: 0, cz: 0, radius: 6 };
-    var dx = pos.x - (ar.cx || 0), dz = pos.z - (ar.cz || 0);
-    var d = Math.sqrt(dx * dx + dz * dz);
-    var maxR = (ar.radius || 6) - RADIUS;
-    if (d > maxR && d > 0) {
-      pos.x = (ar.cx || 0) + dx / d * maxR;
-      pos.z = (ar.cz || 0) + dz / d * maxR;
+    if (ar.bounds) {
+      pos.x = Math.max(ar.bounds.minX + RADIUS, Math.min(ar.bounds.maxX - RADIUS, pos.x));
+      pos.z = Math.max(ar.bounds.minZ + RADIUS, Math.min(ar.bounds.maxZ - RADIUS, pos.z));
+    } else {
+      var dx = pos.x - (ar.cx || 0), dz = pos.z - (ar.cz || 0);
+      var d = Math.sqrt(dx * dx + dz * dz);
+      var maxR = (ar.radius || 6) - RADIUS;
+      if (d > maxR && d > 0) {
+        pos.x = (ar.cx || 0) + dx / d * maxR;
+        pos.z = (ar.cz || 0) + dz / d * maxR;
+      }
     }
+    // benches are soft: pushing through one slows you and shoves it aside
+    benchSlow = benchPush(pos.x, pos.z, dt);
     // keep out of the knight's personal space
     if (knight.group) {
       var kx = pos.x - knight.group.position.x, kz = pos.z - knight.group.position.z;
@@ -1282,10 +1408,15 @@ CHLOE.engine = CHLOE.engine || {};
       kx = pos.x - (ndx / nd) * minD;
       kz = pos.z - (ndz / nd) * minD;
     }
-    var cxx = kx - (ar.cx || 0), czz = kz - (ar.cz || 0);
-    var rad = Math.sqrt(cxx * cxx + czz * czz);
-    var maxR = (ar.radius || 6) - 0.4;
-    if (rad > maxR) { kx = (ar.cx || 0) + cxx / rad * maxR; kz = (ar.cz || 0) + czz / rad * maxR; }
+    if (ar.bounds) {
+      kx = Math.max(ar.bounds.minX + 0.5, Math.min(ar.bounds.maxX - 0.5, kx));
+      kz = Math.max(ar.bounds.minZ + 0.5, Math.min(ar.bounds.maxZ - 0.5, kz));
+    } else {
+      var cxx = kx - (ar.cx || 0), czz = kz - (ar.cz || 0);
+      var rad = Math.sqrt(cxx * cxx + czz * czz);
+      var maxR = (ar.radius || 6) - 0.4;
+      if (rad > maxR) { kx = (ar.cx || 0) + cxx / rad * maxR; kz = (ar.cz || 0) + czz / rad * maxR; }
+    }
 
     // charge pattern still lunges along its locked lane
     if (atk.mode === 'strike' && atk.pattern && atk.pattern.id === 'charge') {

@@ -423,6 +423,63 @@ CHLOE.engine = CHLOE.engine || {};
   // TV screen plane fitted over the tube face; cfg = {x,y,z,w,h} local to the
   // TV group ({model} block for GLTF, {fallback} block for the box TV).
   // Also creates the ON/OFF materials + the bluish flicker light. Default OFF.
+
+  /* §19 information surfaces: the mirror shows YOU, the poster shows the
+     knight, the TV plays a chaptered how-to. Each is a CanvasTexture painted
+     by engine/displays.js and refreshed when the room is entered (or, for the
+     TV, when you click it). */
+  var panels = { mirror: null, poster: null, tvChapter: 0, tvMat: null };
+
+  function displayMat(kind) {
+    var D2 = CHLOE.engine.displays;
+    if (!D2) return null;
+    var canvas = (kind === 'mirror') ? D2.mirror() : D2.poster();
+    var tex = new THREE.CanvasTexture(canvas);
+    if (THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
+    var mat = new THREE.MeshBasicMaterial({ map: tex });
+    mat.userData.kind = kind;
+    mat.userData.canvas = canvas;
+    panels[kind] = mat;
+    return mat;
+  }
+
+  /* Repaint the mirror/poster (stats change as you level). */
+  A_refreshPanels = function () {
+    var D2 = CHLOE.engine.displays;
+    if (!D2) return;
+    ['mirror', 'poster'].forEach(function (k) {
+      var mat = panels[k];
+      if (!mat || !mat.map) return;
+      var fresh = (k === 'mirror') ? D2.mirror() : D2.poster();
+      var ctx = mat.userData.canvas.getContext('2d');
+      ctx.clearRect(0, 0, mat.userData.canvas.width, mat.userData.canvas.height);
+      ctx.drawImage(fresh, 0, 0);
+      mat.map.needsUpdate = true;
+    });
+  };
+  var A_refreshPanels;
+
+  function paintTv() {
+    var D2 = CHLOE.engine.displays;
+    if (!D2 || !tv.onMat) return;
+    var canvas = D2.tv(panels.tvChapter);
+    if (!panels.tvMat) {
+      var tex = new THREE.CanvasTexture(canvas);
+      if (THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
+      panels.tvMat = tex;
+      panels.tvCanvas = canvas;
+      tv.onMat.map = tex;
+      tv.onMat.color.setHex(0xffffff);
+      tv.onMat.needsUpdate = true;
+      tv.tex = null;                    // stop the static-jitter animation
+    } else {
+      var c2 = panels.tvCanvas.getContext('2d');
+      c2.clearRect(0, 0, panels.tvCanvas.width, panels.tvCanvas.height);
+      c2.drawImage(canvas, 0, 0);
+      panels.tvMat.needsUpdate = true;
+    }
+  }
+
   function addTvScreen(g, cfg, f) {
     cfg = cfg || { x: 0, y: (f.h || 1) * 0.7, z: (f.d || 0.5) / 2 + 0.01, w: (f.w || 1) * 0.6, h: (f.h || 1) * 0.36 };
     tv.onMat = makeMat(f.tex || 'tv_static', {
@@ -431,6 +488,7 @@ CHLOE.engine = CHLOE.engine || {};
     });
     tv.offMat = stdMat({ color: 0x050607, roughness: 0.08, metalness: 0.85 });
     tv.offMat.envMapIntensity = 0.9; // glossy dead tube catches the env map
+    paintTv();
     tv.screenMesh = new THREE.Mesh(new THREE.PlaneGeometry(cfg.w, cfg.h), tv.on ? tv.onMat : tv.offMat);
     tv.screenMesh.position.set(cfg.x, cfg.y, cfg.z);
     g.add(tv.screenMesh);
@@ -444,11 +502,24 @@ CHLOE.engine = CHLOE.engine || {};
     g.add(tv.light);
   }
 
+  /* §19: the TV is a programme, not a toggle. Off -> on starts at chapter 1;
+     each further click turns the page; after the last chapter it switches off
+     again, so one control cycles the whole guide. */
   function toggleTv() {
     if (!tv.screenMesh) return;
     if (elapsed < tvCooldown) return;
     tvCooldown = elapsed + 0.25;
-    tv.on = !tv.on;
+    var D2 = CHLOE.engine.displays;
+    var total = (D2 && D2.chapterCount) || 1;
+
+    if (!tv.on) {
+      tv.on = true;
+      panels.tvChapter = 0;
+    } else {
+      panels.tvChapter++;
+      if (panels.tvChapter >= total) { tv.on = false; panels.tvChapter = 0; }
+    }
+    if (tv.on) paintTv();
     tv.screenMesh.material = tv.on ? tv.onMat : tv.offMat;
     if (tv.light) tv.light.visible = tv.on;
   }
@@ -468,7 +539,8 @@ CHLOE.engine = CHLOE.engine || {};
         break;
 
       case 'mirror':
-        m = makeMat(f.tex, { fallback: 0x0b0508, emissive: 0x2a0810, emissiveIntensity: 0.55 });
+        m = displayMat('mirror') ||
+            makeMat(f.tex, { fallback: 0x0b0508, emissive: 0x2a0810, emissiveIntensity: 0.55 });
         mesh = new THREE.Mesh(new THREE.PlaneGeometry(f.w, f.h), m);
         mesh.position.y = 1.55;
         g.add(mesh);
@@ -527,7 +599,7 @@ CHLOE.engine = CHLOE.engine || {};
         break;
 
       case 'poster':
-        m = makeMat(f.tex, { fallback: 0x2b2b30 });
+        m = displayMat('poster') || makeMat(f.tex, { fallback: 0x2b2b30 });
         mesh = new THREE.Mesh(new THREE.PlaneGeometry(f.w, f.h), m);
         mesh.position.y = 1.5;
         g.add(mesh);
@@ -1311,6 +1383,9 @@ CHLOE.engine = CHLOE.engine || {};
     try { renderer.render(scene, camera); return true; } catch (e) { return false; }
   };
   W._look = function (y, p) { yaw = y; if (typeof p === 'number') pitch = p; };
+  /* Repaint mirror/poster — levels and stats change between visits. */
+  W.refreshPanels = function () { if (A_refreshPanels) A_refreshPanels(); };
+  W.tvChapter = function () { return panels.tvChapter; };
 
   W.debug = function () {
     if (!inited) return deadDebug();
