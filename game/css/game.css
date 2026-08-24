@@ -1761,3 +1761,82 @@ button:disabled .cost-chip{ opacity:.7; }
   .b3d-slot .nm{ display:none; }
   .b3d-res{ width:46vw; }
 }
+
+/* ---------------------------------------------- §21 loading gate
+   Sits over everything while a 3D scene streams in and warms its shaders.
+   Deliberately CSS-only animation: this is on screen exactly when the main
+   thread is busy parsing a 26MB church, so it must not ask for JS frames. */
+.loading-veil{
+  position:fixed; inset:0; z-index:120;
+  display:flex; align-items:center; justify-content:center;
+  background:radial-gradient(ellipse at 50% 45%, #1a0d12 0%, #08060a 70%);
+  opacity:1; transition:opacity .3s ease;
+}
+.loading-veil.out{ opacity:0; pointer-events:none; }
+.loading-card{ width:min(420px,84vw); text-align:center; }
+.loading-title{
+  font-family:var(--font-head); font-size:2.6rem; letter-spacing:.34em;
+  color:var(--red); text-shadow:0 0 26px rgba(229,23,63,.5);
+  animation:loadPulse 2.6s ease-in-out infinite;
+}
+@keyframes loadPulse{ 0%,100%{ opacity:.82; } 50%{ opacity:1; } }
+.loading-label{ color:var(--dim); font-size:.8rem; margin:.7rem 0 1rem; min-height:1.1em; }
+.loading-track{
+  height:4px; border-radius:3px; background:rgba(255,255,255,.08); overflow:hidden;
+}
+.loading-bar{
+  height:100%; width:0%; border-radius:3px;
+  background:linear-gradient(90deg,#8c1028,var(--red),#ff7a44);
+  transition:width .28s ease;
+}
+.loading-embers{ position:relative; height:44px; margin-top:.5rem; }
+.loading-embers span{
+  position:absolute; bottom:0; left:50%; width:4px; height:4px; border-radius:50%;
+  background:#ff7a44; box-shadow:0 0 8px #ff5a1a;
+  animation:ember 1.65s ease-in-out infinite;
+}
+.loading-embers span:nth-child(1){ margin-left:-26px; }
+.loading-embers span:nth-child(2){ margin-left:0; }
+.loading-embers span:nth-child(3){ margin-left:26px; }
+@keyframes ember{
+  0%{ transform:translateY(0) scale(.7); opacity:0; }
+  35%{ opacity:1; }
+  100%{ transform:translateY(-34px) scale(1.15); opacity:0; }
+}
+.loading-tip{
+  color:#6e6774; font-size:.7rem; font-style:italic; margin-top:.6rem;
+  min-height:2.4em; line-height:1.5;
+}
+
+/* ------------------------------------------- §21 level ladder (Moves tab)
+   Replaces the Skill Tree screen. Progression is a ladder with nothing to
+   spend, so it lives next to the keys it unlocks rather than on its own page. */
+.moves-who{ display:flex; flex-wrap:wrap; gap:.4rem; margin:.5rem 0 .2rem; }
+.moves-who button{ font-size:.7rem; padding:.28rem .6rem; }
+.moves-who button.on{ border-color:var(--red); color:var(--txt); }
+.ladder-now{ display:flex; align-items:center; gap:.6rem; margin:.4rem 0 .7rem; }
+.ladder-now .lv{ font-family:var(--font-head); font-size:1.1rem; color:var(--red); letter-spacing:.08em; }
+.ladder-now .xp{ font-size:.65rem; color:var(--dim); white-space:nowrap; }
+.ladder-xp{ flex:1; height:5px; border-radius:3px; background:rgba(255,255,255,.08); overflow:hidden; }
+.ladder-xp-fill{ height:100%; background:linear-gradient(90deg,var(--deep-red),var(--red)); border-radius:3px; }
+.ladder-list{ display:flex; flex-direction:column; gap:.3rem; }
+.ladder-row{
+  display:flex; align-items:center; gap:.6rem;
+  border:1px solid #24212a; border-left:3px solid #24212a; border-radius:7px;
+  background:#121116; padding:.4rem .6rem; opacity:.55;
+}
+.ladder-row.got{ opacity:1; border-left-color:var(--deep-red); }
+.ladder-row.here{ border-color:var(--red); border-left-color:var(--red); background:#191218; }
+.ladder-row .l{
+  font-family:var(--font-head); font-size:.95rem; color:var(--dim);
+  min-width:1.6rem; text-align:center;
+}
+.ladder-row.got .l{ color:var(--red); }
+.ladder-row .b{ flex:1; min-width:0; }
+.ladder-row .nm{ font-family:var(--font-head); letter-spacing:.05em; font-size:.82rem; }
+.ladder-row .ds{ color:var(--dim); font-size:.68rem; line-height:1.4; }
+.ladder-row .give{ font-size:.68rem; color:#c8c2cc; white-space:nowrap; text-align:right; }
+@media (max-width:560px){
+  .ladder-row{ flex-wrap:wrap; }
+  .ladder-row .give{ width:100%; text-align:left; padding-left:2.2rem; }
+}

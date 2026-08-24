@@ -170,7 +170,13 @@ CHLOE.ui.battle3d = (function () {
     setRes(els.manaBar, snap.mana, snap.max.mana);
     setRes(els.staBar, snap.sta, snap.max.sta);
     ui.setBar(els.enemyBar, snap.enemy.life, snap.enemy.max);
-    els.enemyName.textContent = snap.enemy.name;
+    /* §21: name it with the level it actually is, and how many. The plate
+       is the only place the fight tells you he has grown. */
+    var kt = CHLOE.engine.knighttree;
+    var kL = kt ? kt.level() : null;
+    els.enemyName.textContent = snap.enemy.name +
+      (kL ? '  ·  Lv ' + kL : '') +
+      (snap.enemy.count > 1 ? '  ·  ' + snap.enemy.alive + '/' + snap.enemy.count : '');
     refreshHotbar(snap);
 
     els.evade.classList.toggle('ready', snap.evade.ready);
@@ -235,6 +241,47 @@ CHLOE.ui.battle3d = (function () {
   }
 
   /* ---------- enemy AI loop ---------- */
+  /* Resolve one hit window. Two shapes:
+       - arc abilities hit whoever is inside your reach/facing cone
+       - §21 SPLASH abilities (the asteroid) hit whoever is standing in the
+         crater, regardless of where you happen to be looking by then
+     The asteroid also DELAYS its damage until the rock actually lands, so the
+     number and the impact are the same moment rather than the number arriving
+     while the rock is still in the air. */
+  function resolveStrike(ab, e) {
+    if (ab && ab.vfx === 'asteroid') {
+      a3d.showSign(false);
+      splash('ASTEROID', 'super');
+      var abilityId = e.abilityId;
+      var radius = ab.splashRadius || 3.4;
+      a3d.spawnAsteroid(function () {
+        if (!active || C3.isOver()) return;
+        var hitList = a3d.asteroidTargets ? a3d.asteroidTargets(radius) : [];
+        applyHits(abilityId, hitList, 'CRATER');
+      });
+      return;
+    }
+    var targets = (ab && a3d.abilityTargets) ? a3d.abilityTargets(ab) : [];
+    applyHits(e.abilityId, targets, null);
+  }
+
+  function applyHits(abilityId, targets, tag) {
+    if (!targets || !targets.length) { splash('miss', 'miss'); return; }
+    var shown = 0;
+    targets.forEach(function (ti) {
+      var res = C3.hitEnemy(abilityId, 1, ti);
+      if (!res) return;
+      a3d.flinch(res.dmg, res.killed, ti);
+      if (!shown++) {
+        splash('-' + res.dmg + (res.mult >= 2 ? ' SUPER' : '') +
+               (targets.length > 1 ? ' x' + targets.length : ''),
+               res.mult >= 2 ? 'super' : 'dmg');
+      }
+      if (res.killed) log('A Hollow Knight falls. ' + C3.aliveCount() + ' left.');
+    });
+    if (tag && targets.length > 1) log(tag + ' — ' + targets.length + ' caught in it.');
+  }
+
   function scheduleSwing(now) {
     /* §20: with a squad, swings are staggered — more knights means a faster
        drumbeat, but never all of them winding up on the same frame. */
@@ -278,8 +325,20 @@ CHLOE.ui.battle3d = (function () {
     }, who);
   }
 
+  /* §21: he only swings what his level has taught him. Round 1 is one
+     pattern; the charge does not exist until he has learned it. */
+  function knownPatterns() {
+    var all = (CHLOE.data.arena3d && CHLOE.data.arena3d.patterns) || {};
+    var kt = CHLOE.engine.knighttree;
+    if (!kt) return all;
+    var ids = kt.patterns(kt.level());
+    var out = {};
+    ids.forEach(function (id) { if (all[id]) out[id] = all[id]; });
+    return Object.keys(out).length ? out : all;
+  }
+
   function pickPattern() {
-    var pats = (CHLOE.data.arena3d && CHLOE.data.arena3d.patterns) || {};
+    var pats = knownPatterns();
     var pool = [];
     for (var id in pats) {
       var w = pats[id].weight || 1;
@@ -311,23 +370,7 @@ CHLOE.ui.battle3d = (function () {
         if (ab && a3d.abilityHitsBench && a3d.abilityHitsBench(ab)) {
           splash('CRASH', 'miss');
         }
-        var targets = (ab && a3d.abilityTargets) ? a3d.abilityTargets(ab) : [];
-        if (targets.length) {
-          var shown = 0;
-          targets.forEach(function (ti) {
-            var res = C3.hitEnemy(e.abilityId, 1, ti);
-            if (!res) return;
-            a3d.flinch(res.dmg, res.killed, ti);
-            if (!shown++) {
-              splash('-' + res.dmg + (res.mult >= 2 ? ' SUPER' : '') +
-                     (targets.length > 1 ? ' x' + targets.length : ''),
-                     res.mult >= 2 ? 'super' : 'dmg');
-            }
-            if (res.killed) log('A Hollow Knight falls. ' + C3.aliveCount() + ' left.');
-          });
-        } else {
-          splash('miss', 'miss');
-        }
+        resolveStrike(ab, e);
       } else if (e.t === 'castEnd') {
         a3d.stopAbility();
       }
@@ -358,7 +401,33 @@ CHLOE.ui.battle3d = (function () {
     if (!inited3d) { a3d.init(els.canvas); inited3d = true; }
     a3d.reset();
     if (a3d.spawnSquad) a3d.spawnSquad(round);
-    a3d.resize(); a3d.start();
+    a3d.resize();
+
+    /* §21: hold the fight behind the loading gate. The church is 26MB;
+       starting the clock before it arrives spawned you in grey nothing with an
+       invisible knight already walking you down. The gate also warms every
+       shader, which is what stops the first Fire Tornado from hitching. */
+    var load = CHLOE.ui.loading;
+    if (load && a3d.assetsReady && !a3d.assetsReady()) {
+      load.show('Unsealing the church…');
+      load.waitFor(
+        function () { return a3d.assetsReady(); },
+        function (setProgress) {
+          var pr = a3d.assetProgress ? a3d.assetProgress() : null;
+          if (pr) setProgress(pr.done, pr.total + 1, pr.done >= pr.total
+            ? 'Lighting the candles…' : 'Unsealing the church…');
+        },
+        function () { load.hide(); startFight(round); }
+      );
+      return;
+    }
+    startFight(round);
+  }
+
+  /* Everything that must not happen until the scene is actually on screen. */
+  function startFight(round) {
+    if (!active) return;
+    a3d.start();
     a3d.stopAbility();
 
     buildHotbar(C3.snapshot());
@@ -396,6 +465,15 @@ CHLOE.ui.battle3d = (function () {
     active = false;
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     a3d.stopAbility();
+    /* §21: the fight is over, so put the player in cursor mode BEFORE the
+       result card goes up. Pointer lock hides the mouse and eats clicks, so
+       the Continue button was unreachable until you knew to press Escape.
+       Drop OUR keys too rather than relying on the `active` flag having been
+       cleared first: this handler calls preventDefault on Space, which is the
+       key that would activate the card's focused button. */
+    unwireKeys();
+    hidePrompt();
+    if (a3d.releaseLock) a3d.releaseLock();
     if (snap && snap.result === 'victory') showVictory();
     else if (snap && snap.result === 'defeat') showDefeat();
     else end(snap ? snap.result : 'fled');
@@ -414,7 +492,28 @@ CHLOE.ui.battle3d = (function () {
       lines.appendChild(ui.el('div', 'lvl', (def.name || l.memberId) + ' reached Lv ' + l.level + '!'));
     });
     if ((rw.levelUps || []).length) {
-      lines.appendChild(ui.el('div', null, 'Spend the point in Menu → Skill Tree to unlock a new ability or keybind.'));
+      /* §21: nothing to spend any more — say what the level actually GAVE,
+         and where the new move already is. Reading binds() is what triggers
+         the auto-bind, so ask for it before asking what moved. */
+      (rw.levelUps || []).forEach(function (l) {
+        try { C3.binds(l.memberId); } catch (e) {}
+      });
+      var auto = C3.takeAutoBound ? C3.takeAutoBound() : null;
+      if (auto && auto.placed.length) {
+        auto.placed.forEach(function (pl) {
+          var ad = (CHLOE.data.abilities || {})[pl.abilityId] || {};
+          lines.appendChild(ui.el('div', 'lvl',
+            (ad.icon || '•') + ' ' + (ad.name || pl.abilityId) +
+            ' — ready on key ' + (pl.slot + 1)));
+        });
+      }
+      var sk = CHLOE.engine.skilltree;
+      var lead = party.active();
+      var nxt = (sk && lead) ? sk.nextRow(lead.level) : null;
+      if (nxt) {
+        lines.appendChild(ui.el('div', null,
+          'Next at Lv ' + nxt.level + ': ' + (nxt.row.name || '—')));
+      }
     }
     (rw.drops || []).forEach(function (d) { lines.appendChild(ui.el('div', null, 'Found: ' + d)); });
     card.appendChild(lines);
@@ -465,6 +564,10 @@ CHLOE.ui.battle3d = (function () {
     begin: begin,
     /* test hooks */
     _fire: fire, _evade: doEvade, _active: function () { return active; },
-    _swing: enemySwing
+    _swing: enemySwing,
+    /* The resolve path only runs off rAF, which is frozen whenever the tab
+       is not compositing — so without this the victory/defeat card and the
+       mode switch that goes with it cannot be tested headlessly at all. */
+    _finish: finish
   };
 })();

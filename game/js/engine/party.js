@@ -78,6 +78,7 @@ CHLOE.engine.party = (function(){
     state.skillPoints = {};
     state.tree = {};
     state.runStats = { kills: 0, round: 1, trophies: [] };
+    state.autoBound = {};   // §21: which abilities have been auto-keyed
     // §11: new game starts solo Chloe; Ash joins once the Room is cleared.
     var m = makeMember('chloe');
     if (m) { state.members.push(m); ensureLoadout(m); ensureProgress(m); }

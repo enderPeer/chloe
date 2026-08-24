@@ -1,5 +1,10 @@
 /* CHLOE — ui/menu.js
-   Menu overlay: Party / Inventory / Moves (loadout editor) / Skill Tree / How to play. */
+   Menu overlay: Party / Inventory / Moves (keybinds + the level ladder) /
+   How to play.
+   §21: the Skill Tree tab is gone. Since §19 progression is a LADDER -
+   reaching a level grants that level's row automatically - so there was
+   nothing left to spend or choose on a tree screen. What each level gives you
+   now lives in the Moves tab, next to the keys it unlocks. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -9,12 +14,13 @@ CHLOE.ui.menu = (function(){
   var tab = 'party';
   var pickingItem = null; // itemId while choosing a target member
   var sheetChar = null;   // charId while a character sheet is open (Party tab)
+  var movesChar = null;   // §21: charId the Moves tab is showing (null = leader)
 
   function layer(){ return CHLOE.ui.byId('overlay-menu'); }
 
   function open(){
     ui = CHLOE.ui; party = CHLOE.engine.party;
-    tab = 'party'; pickingItem = null; sheetChar = null;
+    tab = 'party'; pickingItem = null; sheetChar = null; movesChar = null;
     render();
     layer().classList.remove('hidden');
   }
@@ -30,19 +36,13 @@ CHLOE.ui.menu = (function(){
     var card = ui.el('div', 'menu-card');
 
     var tabs = ui.el('div', 'menu-tabs');
-    [['party','Party'], ['inventory','Inventory'], ['moves','Moves'], ['tree','Skill Tree'], ['help','How to play'], ['close','✕']]
+    [['party','Party'], ['inventory','Inventory'], ['moves','Moves'], ['help','How to play'], ['close','✕']]
       .forEach(function(t){
         var b = ui.el('button', tab === t[0] ? 'on' : '', t[1]);
         b.addEventListener('click', function(){
           // NOTE: go through the public export — ui/room3d.js wraps
           // CHLOE.ui.menu.close() to resume the 3D world on close.
           if (t[0] === 'close') { CHLOE.ui.menu.close(); return; }
-          if (t[0] === 'tree') {   // §12: skill tree is its own screen
-            CHLOE.ui.menu.close();
-            if (CHLOE.ui.tree && CHLOE.ui.tree.open) CHLOE.ui.tree.open();
-            else ui.toast('The tree is still growing in the dark.');
-            return;
-          }
           tab = t[0]; pickingItem = null; sheetChar = null; render();
         });
         tabs.appendChild(b);
@@ -66,10 +66,11 @@ CHLOE.ui.menu = (function(){
       var back = ui.el('button', 'sheet-back', '‹ Party');
       back.addEventListener('click', function(){ sheetChar = null; render(); });
       body.appendChild(back);
+      /* §21: no tree to open — the sheet sends you to Moves instead, where
+         the ladder for that character is shown beside their keys. */
       CHLOE.ui.sheet.renderInto(body, sheetChar, {
-        onOpenTree: function(id){
-          CHLOE.ui.menu.close(); // public export — see note in render()
-          if (CHLOE.ui.tree && CHLOE.ui.tree.open) CHLOE.ui.tree.open(id);
+        onOpenLadder: function(id){
+          movesChar = id; tab = 'moves'; sheetChar = null; render();
         }
       });
       return;
@@ -210,7 +211,10 @@ CHLOE.ui.menu = (function(){
   /* ---------- Moves (§17 ability keybinds; falls back to the v2 editor) ---------- */
   function renderMoves(body){
     if (CHLOE.ui.binds && CHLOE.ui.binds.renderInto) {
-      CHLOE.ui.binds.renderInto(body, {});
+      CHLOE.ui.binds.renderInto(body, {
+        charId: movesChar,
+        onPickChar: function(id){ movesChar = id; render(); }
+      });
     } else if (CHLOE.ui.loadout && CHLOE.ui.loadout.renderInto) {
       CHLOE.ui.loadout.renderInto(body, { readOnly: false });
     } else {
@@ -232,7 +236,7 @@ CHLOE.ui.menu = (function(){
     add('<b>Your keys.</b> <span class="k">1-9</span> fire the abilities you bound in <span class="k">Menu → Moves</span>. Each slot shows what it costs (green = stamina, blue = magic) and counts down its cooldown. A swing that lands nothing still costs you, so pick your moment.');
     add('<b>He hunts you.</b> The knight turns to face you, walks you down, and <span class="k">dashes</span> across the nave when you back off too far. Watch his arms: the sword going up over his head means the overhead is coming.');
     add('<b>Evade.</b> <span class="k">SPACE</span> throws you clear and makes you briefly untouchable — for stamina. When the knight winds up, the prompt says what\'s coming: <span class="k">Wide Slash</span>, crouch under it (Ctrl or C) or back out of reach; <span class="k">Overhead Ruin</span> and <span class="k">Hollow Charge</span> smash a lane aimed where you STOOD, so <span class="k">sidestep</span>. Dodge clean and you take nothing.');
-    add('<b>Getting stronger.</b> You start with <span class="k">one ability on one key</span> — your fists. Every level-up is a skill point: spend it in the <span class="k">Skill Tree</span> to learn a new ability or unlock another number key, then bind it in <span class="k">Moves</span>.');
+    add('<b>Getting stronger.</b> You start with <span class="k">one ability on one key</span> — your fists. There is nothing to spend: <span class="k">reaching a level gives you that level’s row</span> automatically — a new ability, another number key, or a stat. See the whole ladder, and bind what it gives you, in <span class="k">Menu → Moves</span>. Everyone walks the same road, and party members level separately.');
     add('<b>Falling.</b> If the bandmate the knight is hunting drops, the other steps in as the body. If everyone falls, the run is over — for good.');
     add('<b>One night, one run.</b> CHLOE is a roguelike: nothing is saved, ever. Death starts a fresh run at level 1 with empty pockets, and so does closing or reloading the page. Make the night count.');
     add('<b>Shards ◆.</b> Splinters of the club\'s broken mirror wall — the only currency the Between respects. Yours until the run ends.');

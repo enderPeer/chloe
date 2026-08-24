@@ -1,7 +1,8 @@
 /* CHLOE — ui/binds.js  (Combat v3, spec §17 — the Moves screen)
    Assign known abilities to number keys 1-9 before a fight. Slots beyond the
-   unlocked count are shown locked, so it is obvious the skill tree is what
-   widens the hotbar. Renders into the menu overlay's Moves tab. */
+   unlocked count are shown locked, so it is obvious that levelling is what
+   widens the hotbar. Renders into the menu overlay's Moves tab, alongside the
+   level ladder (§21). */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -32,6 +33,7 @@ CHLOE.ui.binds = (function () {
   function renderInto(body, opts) {
     ui = CHLOE.ui;
     var charId = (opts && opts.charId) || activeChar();
+    opts = opts || {};
     if (!charId || !C3()) {
       body.appendChild(ui.el('div', 'menu-note', 'No one is ready to fight.'));
       return;
@@ -42,8 +44,26 @@ CHLOE.ui.binds = (function () {
 
     body.appendChild(ui.el('div', 'menu-note',
       'Bind abilities to number keys. In the fight: 1-9 to strike, SPACE to evade, ' +
-      'Shift to sprint, Ctrl or C to crouch. Each level-up gives a skill point — ' +
-      'spend it in the Skill Tree to unlock new abilities and more keys.'));
+      'Shift to sprint, Ctrl or C to crouch. New moves arrive already bound — ' +
+      'rearrange them here if you want them somewhere else.'));
+
+    /* §21: party members walk the ladder on their OWN level, so the tab has to
+       say whose keys and whose levels you are looking at. */
+    var members = (CHLOE.engine.party.state.members || []);
+    if (members.length > 1) {
+      var strip = ui.el('div', 'moves-who');
+      members.forEach(function (m) {
+        var def = (CHLOE.data.characters || {})[m.id] || {};
+        var b = ui.el('button', m.id === charId ? 'on' : '',
+          (def.name || m.id) + ' · Lv ' + m.level);
+        b.addEventListener('click', function () {
+          if (typeof opts.onPickChar === 'function') opts.onPickChar(m.id);
+          else { opts.charId = m.id; rerender(body, opts); }
+        });
+        strip.appendChild(b);
+      });
+      body.appendChild(strip);
+    }
 
     // --- the 9 keys ---
     var row = ui.el('div', 'bind-slots');
@@ -57,7 +77,7 @@ CHLOE.ui.binds = (function () {
       if (!unlocked) {
         d.appendChild(ui.el('span', 'icon', '🔒'));
         d.appendChild(ui.el('span', 'nm', 'locked'));
-        d.title = 'Unlock more keybinds in the Skill Tree';
+        d.title = 'Locked — the ladder hands you more keys as you level';
       } else if (a) {
         var ic = ui.el('span', 'icon', a.icon || '•');
         ic.style.color = typeColor(a.type);
@@ -116,6 +136,80 @@ CHLOE.ui.binds = (function () {
       rerender(body, opts);
     });
     body.appendChild(clear);
+
+    renderLadder(body, charId);
+  }
+
+  /* ------------------------------------------------------------- the ladder
+     §21. This replaces the Skill Tree screen. Since §19 there is nothing to
+     spend and nothing to choose — reaching a level grants that level's row —
+     so a whole separate screen for it was just a list you had to go and find.
+     It belongs here, next to the keys the levels unlock. */
+  function renderLadder(body, charId) {
+    var sk = CHLOE.engine.skilltree;
+    var prog = CHLOE.engine.progression;
+    var m = CHLOE.engine.party.get(charId);
+    if (!sk || !m) return;
+    var T = CHLOE.data.skilltree || { rows: {}, maxLevel: 100 };
+
+    body.appendChild(ui.el('div', 'bind-head', 'Levels — ' + (T.name || 'The Long Night')));
+    body.appendChild(ui.el('div', 'menu-note',
+      T.blurb || 'Reach the level, gain the row. Nothing to spend.'));
+
+    // where this character is right now
+    var head = ui.el('div', 'ladder-now');
+    head.appendChild(ui.el('span', 'lv', 'Lv ' + m.level));
+    if (prog && prog.xpToNext && m.level < (T.maxLevel || 100)) {
+      var need = prog.xpToNext(m.level);
+      var have = m.xp || 0;
+      var track = ui.el('div', 'ladder-xp');
+      var fill = ui.el('div', 'ladder-xp-fill');
+      fill.style.width = Math.max(0, Math.min(100, (have / need) * 100)) + '%';
+      track.appendChild(fill);
+      head.appendChild(track);
+      head.appendChild(ui.el('span', 'xp', have + ' / ' + need + ' XP'));
+    } else {
+      head.appendChild(ui.el('span', 'xp', 'Ladder complete'));
+    }
+    body.appendChild(head);
+
+    /* Show the road either side of you rather than all 100 rows: the last few
+       you earned, and the next few coming. A 100-row dump is not a reward. */
+    var from = Math.max(1, m.level - 2);
+    var to = Math.min(T.maxLevel || 100, Math.max(m.level + 4, 9));
+    var list = ui.el('div', 'ladder-list');
+    for (var L = from; L <= to; L++) {
+      var row = T.rows[L];
+      if (!row) continue;
+      var earned = L <= m.level;
+      var d = ui.el('div', 'ladder-row' + (earned ? ' got' : '') + (L === m.level ? ' here' : ''));
+      d.appendChild(ui.el('span', 'l', String(L)));
+
+      var mid = ui.el('div', 'b');
+      mid.appendChild(ui.el('div', 'nm', row.name || ('Level ' + L)));
+      mid.appendChild(ui.el('div', 'ds', row.desc || ''));
+      d.appendChild(mid);
+
+      // what it hands over, as a chip
+      var give = ui.el('span', 'give');
+      if (row.ability) {
+        var a = ABIL()[row.ability] || {};
+        give.textContent = (a.icon || '•') + ' ' + (a.name || row.ability);
+        give.style.color = typeColor(a.type);
+      } else if (row.ally) {
+        var cd = (CHLOE.data.characters || {})[row.ally] || {};
+        give.textContent = '＋ ' + (cd.name || row.ally);
+      } else if (row.slot) {
+        give.textContent = '⌨ +' + row.slot + ' key';
+      } else if (row.stat) {
+        var bits = [];
+        for (var k in row.stat) bits.push('+' + row.stat[k] + ' ' + k);
+        give.textContent = bits.join(', ');
+      }
+      d.appendChild(give);
+      list.appendChild(d);
+    }
+    body.appendChild(list);
   }
 
   function rerender(body, opts) {

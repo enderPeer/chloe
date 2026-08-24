@@ -100,6 +100,14 @@ CHLOE.engine = CHLOE.engine || {};
   // section 14: env map + models + hands state
   var envMapOk = false;
   var modelsLoaded = {}; // canonical id -> bool (false while loading / failed)
+
+  /* §21 asset gate. modelsLoaded cannot answer "are we done?" - it stores
+     false for BOTH still-loading and failed. This counts settled slots
+     instead, so ui/room3d.js can hold the room behind a loading screen and
+     warm the shaders before you are allowed to walk. */
+  var roomAssets = { total: 0, done: 0, warm: false };
+  function roomExpect() { roomAssets.total++; }
+  function roomSettle() { roomAssets.done++; }
   var hands = { group: null, visible: false, lag: null, tmpQ: null, jumpY: 0,
                 // §16: LMB closes the left hand, RMB the right
                 l: null, r: null, closeL: 0, closeR: 0, targetL: 0, targetR: 0 };
@@ -338,6 +346,7 @@ CHLOE.engine = CHLOE.engine || {};
       var modelPath = f.model && data.models && data.models[f.model];
       if (modelPath && THREE.GLTFLoader) {
         modelsLoaded[f.model] = false;
+        roomExpect();
         loadFurnitureModel(f, g, col, modelPath);
       } else {
         if (f.model) modelsLoaded[f.model] = false;
@@ -357,6 +366,7 @@ CHLOE.engine = CHLOE.engine || {};
       modelsLoaded[f.model] = false;
       buildPiece(g, f);
       enableShadows(g, f.kind !== 'lamp');
+      roomSettle();          // a failed model is still a settled one
     }
     try {
       new THREE.GLTFLoader().load(path, function (gltf) {
@@ -396,6 +406,7 @@ CHLOE.engine = CHLOE.engine || {};
           }
           done = true;
           modelsLoaded[f.model] = true;
+          roomSettle();
         } catch (e) {
           console.warn('[world3d] model "' + f.model + '" setup failed: ' + e.message);
           fail();
@@ -613,75 +624,57 @@ CHLOE.engine = CHLOE.engine || {};
     }
   }
 
-  /* ------------------------------------------------------- trophy gallery
-     §20. One framed picture per Hollow Knight squad you have put down,
-     appearing on the wall between fights. The list lives in runStats, so it
-     fills up over a run and is gone the moment you die (§15) - the wall is
-     the only record the game keeps of how far you got.
+  /* --------------------------------------------------------- round picture
+     §20. ONE framed picture on the dressing-room wall, and it always shows
+     the round you are standing in. It is repainted between fights rather
+     than joined by a second frame — a row of pictures accumulating down the
+     wall buried the number that actually matters. The record of what you
+     have already put down lives in small print underneath it.
 
-     Slots run along the free wall: the east wall above the couch first, then
-     the north wall right of the mirror, then the south wall. Past that they
-     wrap and overlap slightly, which reads as a wall getting crowded. */
+     Hung on the east wall above the couch, at eye height, big enough to read
+     from the middle of the room. Run-scoped like everything else (§15). */
   var trophyGroup = null;
+  var trophyMat = null;    // kept so the canvas can be repainted in place
 
-  var TROPHY_SLOTS = [
-    // east wall (x = +hw), facing -x
-    { x:  3.94, z: -1.85, rotY: -Math.PI / 2 },
-    { x:  3.94, z: -0.95, rotY: -Math.PI / 2 },
-    { x:  3.94, z:  1.55, rotY: -Math.PI / 2 },
-    { x:  3.94, z:  2.45, rotY: -Math.PI / 2 },
-    // north wall (z = -hd), facing +z, clear of the mirror at x -1.5
-    { x:  0.35, z: -2.94, rotY: 0 },
-    { x:  1.25, z: -2.94, rotY: 0 },
-    { x:  2.15, z: -2.94, rotY: 0 },
-    { x:  3.05, z: -2.94, rotY: 0 },
-    // south wall (z = +hd), facing -z, clear of the door at x 0.8
-    { x: -2.60, z:  2.94, rotY: Math.PI },
-    { x:  2.35, z:  2.94, rotY: Math.PI },
-    { x:  3.25, z:  2.94, rotY: Math.PI }
-  ];
-
-  function trophySlot(i) {
-    var base = TROPHY_SLOTS[i % TROPHY_SLOTS.length];
-    var lap = Math.floor(i / TROPHY_SLOTS.length);
-    // later laps tuck in beside and below, so the wall crowds instead of
-    // silently dropping rounds you actually earned
-    return { x: base.x, z: base.z, rotY: base.rotY,
-             y: 1.62 - lap * 0.52, nudge: lap * 0.11 };
-  }
+  var TROPHY_SPOT = { x: 3.93, y: 1.72, z: 0.4, rotY: -Math.PI / 2 };
 
   function buildTrophies() {
-    if (trophyGroup) { scene.remove(trophyGroup); trophyGroup = null; }
     var D2 = CHLOE.engine.displays;
-    var pt = CHLOE.engine.party;
-    if (!D2 || !D2.trophy || !pt || !pt.state || !pt.state.runStats) return;
-    var list = pt.state.runStats.trophies || [];
-    if (!list.length) return;
+    if (!D2 || !D2.trophy) return;
+
+    // already built: repaint the canvas instead of rebuilding the mesh, so
+    // the frame never flickers out and back between rounds
+    if (trophyGroup && trophyMat && trophyMat.userData.canvas) {
+      var fresh = D2.trophy();
+      var ctx = trophyMat.userData.canvas.getContext('2d');
+      ctx.clearRect(0, 0, trophyMat.userData.canvas.width, trophyMat.userData.canvas.height);
+      ctx.drawImage(fresh, 0, 0);
+      trophyMat.map.needsUpdate = true;
+      return;
+    }
 
     trophyGroup = new THREE.Group();
-    var PW = 0.62, PH = 0.83;   // 3:4, matching the 384x512 canvas
-    for (var i = 0; i < list.length; i++) {
-      var slot = trophySlot(i);
-      var g = new THREE.Group();
-      g.position.set(slot.x, slot.y + slot.nudge, slot.z);
-      g.rotation.y = slot.rotY;
+    trophyGroup.position.set(TROPHY_SPOT.x, TROPHY_SPOT.y, TROPHY_SPOT.z);
+    trophyGroup.rotation.y = TROPHY_SPOT.rotY;
 
-      // frame first, picture floated a hair proud of it
-      var frame = new THREE.Mesh(
-        new THREE.BoxGeometry(PW + 0.07, PH + 0.07, 0.035),
-        stdMat({ color: 0x3a2a1c, roughness: 0.85, metalness: 0.05 }));
-      frame.position.z = 0.018;
-      g.add(frame);
+    var PW = 0.86, PH = 1.15;   // 3:4, matching the 384x512 canvas
 
-      var tex = new THREE.CanvasTexture(D2.trophy(list[i]));
-      if (THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
-      var pic = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH),
-        new THREE.MeshBasicMaterial({ map: tex }));
-      pic.position.z = 0.038;
-      g.add(pic);
+    // frame first, picture floated a hair proud of it
+    var frame = new THREE.Mesh(
+      new THREE.BoxGeometry(PW + 0.09, PH + 0.09, 0.04),
+      stdMat({ color: 0x3a2a1c, roughness: 0.85, metalness: 0.05 }));
+    frame.position.z = 0.02;
+    trophyGroup.add(frame);
 
-      trophyGroup.add(g);
-    }
+    var canvas = D2.trophy();
+    var tex = new THREE.CanvasTexture(canvas);
+    if (THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
+    trophyMat = new THREE.MeshBasicMaterial({ map: tex });
+    trophyMat.userData.canvas = canvas;
+    var pic = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH), trophyMat);
+    pic.position.z = 0.043;
+    trophyGroup.add(pic);
+
     scene.add(trophyGroup);
   }
 
@@ -1022,6 +1015,9 @@ CHLOE.engine = CHLOE.engine || {};
 
     colliders.length = 0;
     texturedMats.length = 0;
+    // the scene is new, so the old frame's mesh and material are gone with it
+    trophyGroup = null; trophyMat = null;
+    roomAssets.total = 0; roomAssets.done = 0; roomAssets.warm = false;
     buildRoom();
     buildFurniture();
     buildTrophies();
@@ -1457,6 +1453,30 @@ CHLOE.engine = CHLOE.engine || {};
   };
   W._look = function (y, p) { yaw = y; if (typeof p === 'number') pitch = p; };
   W._teleport = function (x, z) { pos.x = x; pos.z = z; vel.x = vel.z = 0; };
+
+  W.assetProgress = function () {
+    return { done: roomAssets.done, total: Math.max(1, roomAssets.total), warm: roomAssets.warm };
+  };
+  W.assetsReady = function () {
+    if (!inited) return false;
+    if (roomAssets.done < roomAssets.total) return false;
+    if (!roomAssets.warm) {
+      /* Compile every program, then draw one frame so the driver has really
+         uploaded them - otherwise the first look around the room stutters as
+         each material is compiled on the frame it first becomes visible. */
+      try { if (renderer) renderer.compile(scene, camera); }
+      catch (e) { console.warn('[world3d] shader warm-up failed', e); }
+      try { if (renderer) renderer.render(scene, camera); } catch (e) {}
+      roomAssets.warm = true;
+    }
+    return roomAssets.warm;
+  };
+  /* §21: same handle the arena exposes, so callers never special-case which
+     3D scene is up when they need the cursor back for a panel. */
+  W.releaseLock = function () {
+    try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) {}
+  };
+  W.isLocked = function () { return !!document.pointerLockElement; };
   /* Repaint mirror/poster — levels and stats change between visits — and
      rehang the gallery, since a round may have been cleared since you left. */
   W.refreshPanels = function () {
