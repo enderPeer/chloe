@@ -12,6 +12,8 @@ CHLOE.data.arena3d = {
     church: 'assets/3d/church.glb',
     knight: 'assets/3d/knight.glb'
   },
+  // image-based light for the nave (Poly Haven, CC0)
+  hdri: 'assets/hdri/afrikaans_church_interior_1k.hdr',
 
   /* The fight happens in the crossing before the altar steps. The player is
      clamped inside a circle plus pew colliders, and can never leave or clip
@@ -29,7 +31,9 @@ CHLOE.data.arena3d = {
     ]
   },
 
-  playerSpawn: { x: 0, z: 4.2, yaw: Math.PI }, // in the aisle, facing the altar
+  // In the aisle facing the altar (and the knight at z -1.8). Camera forward is
+  // (-sin yaw, -cos yaw), so yaw 0 looks down -Z — yaw PI would face the door.
+  playerSpawn: { x: 0, z: 4.2, yaw: 0 },
   knight: {
     x: 0, z: -1.8,          // before the chancel steps, altar at its back
     targetHeight: 2.15,     // model is bbox-normalized to this height
@@ -40,13 +44,21 @@ CHLOE.data.arena3d = {
   eye: { stand: 1.6, crouch: 0.85 },
 
   lights: {
-    ambient:  { color: 0x101018, intensity: 1.4 },          // cold night nave
-    moon:     { color: 0x8aa3cc, intensity: 0.85, x: 4, y: 9, z: -3 }, // shafts
-    altar:    { color: 0xe5173f, intensity: 1.2, x: 0, y: 2.6, z: -5.5, distance: 12, decay: 1.6 },
-    knight:   { color: 0xff2038, intensity: 0.9, distance: 6, decay: 1.8 }, // follows the knight
+    // Keep ambient NEUTRAL: a purple-blue ambient plus the red altar accent
+    // turns grey steel mauve.
+    ambient:  { color: 0x5a5f6a, intensity: 1.0 },
+    moon:     { color: 0xaebdd6, intensity: 2.2, x: 6, y: 12, z: -4 }, // shafts
+    // red altar glow: an accent behind the knight, far enough back that it
+    // silhouettes him instead of painting his armour
+    altar:    { color: 0xe5173f, intensity: 1.4, x: 0, y: 2.4, z: -9, distance: 16, decay: 1.7 },
+    knight:   { color: 0xff2038, intensity: 0.55, distance: 4.5, decay: 2 }, // pools at his feet
+    // cool key over the fight so steel reads as steel
+    key:      { color: 0xc8d4ea, intensity: 1.5, x: 0, y: 5.2, z: 1.5, distance: 22, decay: 1.5 },
     candles:  [ { x: -3.2, z: 1.5 }, { x: 3.2, z: 1.5 } ]   // warm flickers
   },
-  fog: { color: 0x05050a, near: 4, far: 26 },
+  // The nave is long — keep the haze subtle and far, or the church reads as a
+  // black pit instead of a room.
+  fog: { color: 0x0d1018, near: 14, far: 70 },
 
   /* Attack patterns. The engine (arena.js) picks WHICH one; arena3d.js plays
      the telegraph and, at strike time, tests the player against the volume.
