@@ -49,6 +49,9 @@ CHLOE.engine = CHLOE.engine || {};
   var inited = false, running = false, disabled = false;
   var canvas = null, renderer = null, scene = null, camera = null;
   var rafId = 0, lastTime = 0, elapsed = 0, renderFailed = false;
+  var LIGHT_SCALE = 1;       // becomes PI under physicallyCorrectLights (§14)
+  var ENV_INTENSITY = 0.75;
+  var envMapOk = false;
 
   var cfg = null;
   var pos = { x: 0, z: 4.6 };
@@ -117,9 +120,12 @@ CHLOE.engine = CHLOE.engine || {};
         g.position.set(place.x || 0, place.y || 0, place.z || 0);
         g.traverse(function (o) {
           if (o.isMesh && o.material) {
+            o.userData.isChurch = true;
+            o.receiveShadow = true;
             var mats = Array.isArray(o.material) ? o.material : [o.material];
             for (var i = 0; i < mats.length; i++) {
               if (mats[i].map) mats[i].map.anisotropy = 4;
+              if ('envMapIntensity' in mats[i]) mats[i].envMapIntensity = ENV_INTENSITY;
             }
           }
         });
@@ -172,10 +178,13 @@ CHLOE.engine = CHLOE.engine || {};
     knight.group.position.set(kcfg.x || 0, 0, kcfg.z || 0);
     scene.add(knight.group);
 
+    /* Red glow pooling at his feet, NOT inside his chest — a point light at
+       body height washes the armour pink instead of rimming it. */
     var lcfg = (D().lights || {}).knight || {};
     knight.light = new THREE.PointLight(lcfg.color != null ? lcfg.color : 0xff2038,
-      lcfg.intensity != null ? lcfg.intensity : 0.9, lcfg.distance || 6, lcfg.decay || 1.8);
-    knight.light.position.set(0, 1.4, 0);
+      (lcfg.intensity != null ? lcfg.intensity : 0.55) * LIGHT_SCALE,
+      lcfg.distance || 4.5, lcfg.decay || 2);
+    knight.light.position.set(0, 0.25, 0);
     knight.group.add(knight.light);
 
     var attach = function (model) {
@@ -190,11 +199,23 @@ CHLOE.engine = CHLOE.engine || {};
       model.position.x -= cx; model.position.z -= cz;
       model.traverse(function (o) {
         if (o.isMesh && o.material) {
+          o.castShadow = true;
           var mats = Array.isArray(o.material) ? o.material : [o.material];
           for (var i = 0; i < mats.length; i++) {
             var m = mats[i];
-            if (m.color) m.color.multiplyScalar(0.38);           // blackened plate
-            if (m.emissive) { m.emissive.setHex(0x1a020a); m.emissiveIntensity = 1.0; }
+            /* The source FBX exports a BLACK baseColorFactor over its diffuse
+               map, so multiplying it (as we used to) left pure black — and a
+               black metallic surface just mirrors the environment, which is
+               how he ended up hot pink. Set the tint absolutely instead: a
+               dark steel multiplier that still lets the armour texture read,
+               with metalness/roughness kept out of mirror territory. */
+            if (m.color) m.color.setRGB(0.30, 0.29, 0.33);
+            if (m.map) m.map.anisotropy = 4;
+            if (typeof m.metalness === 'number') m.metalness = Math.min(m.metalness, 0.3);
+            if (typeof m.roughness === 'number') m.roughness = Math.max(m.roughness, 0.62);
+            if ('envMapIntensity' in m) m.envMapIntensity = 0.2;
+            // no self-glow at rest — flinch() flashes him on hit instead
+            if (m.emissive) { m.emissive.setHex(0x000000); m.emissiveIntensity = 1.0; }
             knight.mats.push(m);
           }
         }
@@ -249,27 +270,94 @@ CHLOE.engine = CHLOE.engine || {};
     knight.group.rotation.y = knight.baseRot;
   }
 
+  // HDRI -> PMREM -> scene.environment. Gives the stone and glass real
+  // image-based light; failure just leaves the rig lighting alone (§14 pattern).
+  function loadEnvironment() {
+    envMapOk = false;
+    var path = D().hdri;
+    if (!path || !THREE.RGBELoader || !THREE.PMREMGenerator) return;
+    var pmrem = null;
+    function bail() { if (pmrem) { try { pmrem.dispose(); } catch (e) {} pmrem = null; } }
+    try {
+      pmrem = new THREE.PMREMGenerator(renderer);
+      pmrem.compileEquirectangularShader();
+      new THREE.RGBELoader().load(path, function (hdrTex) {
+        try {
+          if (!pmrem || renderFailed) { bail(); return; }
+          scene.environment = pmrem.fromEquirectangular(hdrTex).texture;
+          envMapOk = true;
+          applyEnvIntensity();
+        } catch (e) { envMapOk = false; }
+        try { hdrTex.dispose(); } catch (e) {}
+        bail();
+      }, undefined, function () { bail(); });
+    } catch (e) { bail(); }
+  }
+
+  function applyEnvIntensity() {
+    scene.traverse(function (o) {
+      if (!o.isMesh || !o.material) return;
+      var mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (var i = 0; i < mats.length; i++) {
+        if ('envMapIntensity' in mats[i]) {
+          mats[i].envMapIntensity = ENV_INTENSITY;
+          mats[i].needsUpdate = true;
+        }
+      }
+    });
+  }
+
   // ---------------------------------------------------------------- build
   function buildLights() {
     var L = D().lights || {};
     var amb = L.ambient || {};
-    scene.add(new THREE.AmbientLight(amb.color != null ? amb.color : 0x101018,
-      amb.intensity != null ? amb.intensity : 1.4));
+    scene.add(new THREE.AmbientLight(amb.color != null ? amb.color : 0x5a5f6a,
+      (amb.intensity != null ? amb.intensity : 1.0) * LIGHT_SCALE));
+
+    // cold moonlight raking in through the stained glass
     var mn = L.moon || {};
-    var moon = new THREE.DirectionalLight(mn.color != null ? mn.color : 0x8aa3cc,
-      mn.intensity != null ? mn.intensity : 0.85);
-    moon.position.set(mn.x || 4, mn.y || 9, mn.z || -3);
+    var moon = new THREE.DirectionalLight(mn.color != null ? mn.color : 0xaebdd6,
+      (mn.intensity != null ? mn.intensity : 2.2) * LIGHT_SCALE);
+    moon.position.set(mn.x || 6, mn.y || 12, mn.z || -4);
+    if (renderer.shadowMap && renderer.shadowMap.enabled) {
+      moon.castShadow = true;
+      moon.shadow.mapSize.set(1024, 1024);
+      var cam = moon.shadow.camera;
+      cam.left = -12; cam.right = 12; cam.top = 12; cam.bottom = -12;
+      cam.near = 0.5; cam.far = 40;
+    }
     scene.add(moon);
+
+    // a soft fill from the nave behind so the space reads as a room, not a pit
+    var fill = L.fill || {};
+    var fillLight = new THREE.HemisphereLight(
+      fill.sky != null ? fill.sky : 0x8092c0,
+      fill.ground != null ? fill.ground : 0x241c1e,
+      (fill.intensity != null ? fill.intensity : 0.9) * LIGHT_SCALE);
+    scene.add(fillLight);
+
+    // red altar glow behind the knight
     var al = L.altar || {};
     var altar = new THREE.PointLight(al.color != null ? al.color : 0xe5173f,
-      al.intensity != null ? al.intensity : 1.2, al.distance || 12, al.decay || 1.6);
-    altar.position.set(al.x || 0, al.y || 2.6, al.z || -3.4);
+      (al.intensity != null ? al.intensity : 3.2) * LIGHT_SCALE,
+      al.distance || 18, al.decay || 1.5);
+    altar.position.set(al.x || 0, al.y || 2.6, al.z || -5.5);
     scene.add(altar);
+
+    // neutral key above the arena so the knight and the aisle stay readable
+    var k = L.key || {};
+    var key = new THREE.PointLight(k.color != null ? k.color : 0xc8d4ea,
+      (k.intensity != null ? k.intensity : 1.5) * LIGHT_SCALE,
+      k.distance || 22, k.decay || 1.5);
+    key.position.set(k.x || 0, k.y || 5.2, k.z || 1.5);
+    scene.add(key);
+
     var cands = L.candles || [];
     for (var i = 0; i < cands.length; i++) {
-      var c = new THREE.PointLight(0xffa050, 0.5, 5, 2);
+      var base = 1.6 * LIGHT_SCALE;
+      var c = new THREE.PointLight(0xffa050, base, 8, 2);
       c.position.set(cands[i].x || 0, 1.1, cands[i].z || 0);
-      c.userData.baseI = 0.5;
+      c.userData.baseI = base;
       c.userData.phase = Math.random() * 10;
       scene.add(c);
       candleLights.push(c);
@@ -277,7 +365,7 @@ CHLOE.engine = CHLOE.engine || {};
   }
   var candleLights = [];
 
-  function cfgSpawn() { return D().playerSpawn || { x: 0, z: 4.6, yaw: Math.PI }; }
+  function cfgSpawn() { return D().playerSpawn || { x: 0, z: 4.6, yaw: 0 }; }
 
   // ---------------------------------------------------------------- init/API
   A.init = function (canvasEl) {
@@ -290,16 +378,32 @@ CHLOE.engine = CHLOE.engine || {};
       renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
     } catch (e) { disableAPI('WebGL unavailable: ' + e.message); disabled = true; return; }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    // Same PBR pipeline as the room (§14): without sRGB output the church's
+    // sRGB textures render almost black.
+    if (THREE.sRGBEncoding !== undefined) renderer.outputEncoding = THREE.sRGBEncoding;
+    if (THREE.ACESFilmicToneMapping !== undefined) {
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.15;
+    }
+    if ('physicallyCorrectLights' in renderer) {
+      renderer.physicallyCorrectLights = true;
+      LIGHT_SCALE = Math.PI;   // punctual/ambient response is divided by ~PI
+    }
+    if (renderer.shadowMap && THREE.PCFSoftShadowMap !== undefined) {
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    }
 
     scene = new THREE.Scene();
     var fg = cfg.fog || {};
-    scene.background = new THREE.Color(fg.color != null ? fg.color : 0x05050a);
-    scene.fog = new THREE.Fog(fg.color != null ? fg.color : 0x05050a, fg.near || 4, fg.far || 26);
+    scene.background = new THREE.Color(fg.color != null ? fg.color : 0x0d1018);
+    scene.fog = new THREE.Fog(fg.color != null ? fg.color : 0x0d1018, fg.near || 14, fg.far || 70);
 
-    camera = new THREE.PerspectiveCamera(72, 1, 0.05, 80);
+    camera = new THREE.PerspectiveCamera(72, 1, 0.05, 200);
     camera.rotation.order = 'YXZ';
 
     buildLights();
+    loadEnvironment();
     loadChurch();
     loadKnight();
     A.reset();
@@ -313,7 +417,7 @@ CHLOE.engine = CHLOE.engine || {};
     var sp = cfgSpawn();
     pos.x = sp.x; pos.z = sp.z;
     vel.x = 0; vel.z = 0;
-    yaw = sp.yaw != null ? sp.yaw : Math.PI;
+    yaw = sp.yaw != null ? sp.yaw : 0;
     pitch = 0; bobPhase = 0;
     crouchForced = false;
     eyeH = eyeStand();
@@ -531,7 +635,7 @@ CHLOE.engine = CHLOE.engine || {};
     window.setTimeout(function () {
       for (var i = 0; i < knight.mats.length; i++) {
         var m = knight.mats[i];
-        if (m.emissive) { m.emissive.setHex(0x1a020a); m.emissiveIntensity = 1.0; }
+        if (m.emissive) { m.emissive.setHex(0x000000); m.emissiveIntensity = 1.0; }
       }
     }, killed ? 900 : 180);
   };
@@ -666,6 +770,7 @@ CHLOE.engine = CHLOE.engine || {};
       mode: atk.mode,
       knightAlive: knight.alive,
       churchLoaded: churchLoaded, knightLoaded: knightLoaded,
+      envMap: envMapOk,
       locked: isLocked()
     };
   };
@@ -673,4 +778,62 @@ CHLOE.engine = CHLOE.engine || {};
   /* test hooks (spec §13/§16: keyboard-free automated verification) */
   A._teleport = function (x, z) { pos.x = x; pos.z = z; vel.x = 0; vel.z = 0; };
   A._setCrouch = function (b) { crouchForced = !!b; };
+  A._look = function (y, p) { yaw = y; if (typeof p === 'number') pitch = p; };
+  /* Geometry probe: world bounds of the loaded church and what is directly
+     under/ahead of the camera. Used to verify placement without eyeballing. */
+  A._diag = function () {
+    if (!inited) return null;
+    var out = { eye: eyeH, pos: { x: pos.x, z: pos.z }, meshes: 0 };
+    var box = new THREE.Box3();
+    var found = false;
+    scene.traverse(function (o) {
+      if (o.isMesh && o.userData && o.userData.isChurch) {
+        out.meshes++;
+        box.expandByObject(o);
+        found = true;
+      }
+    });
+    if (found) out.churchBounds = { min: box.min.toArray().map(function (v) { return +v.toFixed(2); }),
+                                    max: box.max.toArray().map(function (v) { return +v.toFixed(2); }) };
+    var rc = new THREE.Raycaster();
+    camera.updateMatrixWorld();
+    rc.set(new THREE.Vector3(pos.x, eyeH, pos.z), new THREE.Vector3(0, -1, 0));
+    var down = rc.intersectObjects(scene.children, true);
+    out.floorBelow = down.length ? +down[0].distance.toFixed(2) : null;
+    out.floorName = down.length ? (down[0].object.name || '?') : null;
+    rc.set(new THREE.Vector3(pos.x, eyeH, pos.z), new THREE.Vector3(0, 1, 0));
+    var up = rc.intersectObjects(scene.children, true);
+    out.ceilingAbove = up.length ? +up[0].distance.toFixed(2) : null;
+    if (down.length) {
+      var m = down[0].object.material;
+      m = Array.isArray(m) ? m[0] : m;
+      out.floorMat = m ? {
+        type: m.type,
+        color: m.color ? '#' + m.color.getHexString() : null,
+        map: !!m.map,
+        rough: m.roughness, metal: m.metalness,
+        envI: m.envMapIntensity,
+        vis: down[0].object.visible
+      } : null;
+    }
+    out.envMap = envMapOk;
+    out.knightMats = knight.mats.slice(0, 4).map(function (m) {
+      return { type: m.type, color: m.color ? '#' + m.color.getHexString() : null,
+               map: !!m.map, emissive: m.emissive ? '#' + m.emissive.getHexString() : null,
+               emiMap: !!m.emissiveMap, emiI: m.emissiveIntensity, metal: m.metalness };
+    });
+    out.lights = [];
+    scene.traverse(function (o) {
+      if (o.isLight) out.lights.push(o.type + ':' + (+o.intensity.toFixed(2)));
+    });
+    return out;
+  };
+  /* Draw one frame on demand — lets automated checks grab a real screenshot
+     even where requestAnimationFrame is throttled (headless/background tabs). */
+  A._renderOnce = function () {
+    if (disabled || !inited) return false;
+    camera.position.set(pos.x, eyeH, pos.z);
+    camera.rotation.set(pitch, yaw, 0);
+    try { renderer.render(scene, camera); return true; } catch (e) { return false; }
+  };
 })();

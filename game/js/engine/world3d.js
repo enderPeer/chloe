@@ -630,6 +630,10 @@ CHLOE.engine = CHLOE.engine || {};
       color: 0x201417, roughness: 0.58, metalness: 0.08,
       emissive: 0x2a070c, emissiveIntensity: 0.22
     });
+    // The hands sit right at the camera with nothing occluding them, so full
+    // environment IBL washes the dark leather out to a pale grey. Damp the
+    // env contribution so they read as gloves instead of putty.
+    glove.envMapIntensity = 0.12;
 
     // Fingers/thumb live in their own groups so they can curl closed (§16).
     function fingerRow(hand, dir) {
@@ -1297,6 +1301,16 @@ CHLOE.engine = CHLOE.engine || {};
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   };
+
+  /* Draw one frame on demand — lets automated checks grab a real screenshot
+     even where requestAnimationFrame is throttled (headless/background tabs). */
+  W._renderOnce = function () {
+    if (disabled || !inited) return false;
+    camera.position.set(pos.x, eyeH + yOff, pos.z);
+    camera.rotation.set(pitch, yaw, 0);
+    try { renderer.render(scene, camera); return true; } catch (e) { return false; }
+  };
+  W._look = function (y, p) { yaw = y; if (typeof p === 'number') pitch = p; };
 
   W.debug = function () {
     if (!inited) return deadDebug();
