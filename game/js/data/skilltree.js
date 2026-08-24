@@ -25,21 +25,23 @@ CHLOE.data = CHLOE.data || {};
 
   var rows = {
     1:  { ability: 'punch',        name: 'Fists',          desc: 'You always have your hands. Weak, cheap, always ready.' },
-    2:  { ability: 'fire_tornado', name: 'Fire Tornado',   desc: 'Trace the sign and drop a pillar of fire. Your first real spell.' },
+    /* Level 2 grants the spell AND the key to put it on, so you can actually
+       hold BOTH punch and Fire Tornado from the moment you earn it. */
+    2:  { ability: 'fire_tornado', slot: 1, name: 'Fire Tornado', desc: 'Trace the sign and drop a pillar of fire — and a second keybind to carry it. Both fists and fire from here.' },
     3:  { ally: 'ash',             name: 'Ash Finds You',  desc: 'Your sister catches up. She fights at her own level.' },
-    4:  { slot: 1,                 name: 'Second Nature',  desc: '+1 ability keybind — key 2.' },
+    4:  { slot: 1,                 name: 'Second Nature',  desc: '+1 ability keybind — key 3.' },
     5:  { stat: { life: 12, stamina: 6 }, name: 'Roadworn', desc: '+12 life, +6 stamina.' },
     6:  { ability: 'hammer_fist',  name: 'Hammer Fist',    desc: 'One committed overhand. Slow, heavy, expensive.' },
-    7:  { slot: 1,                 name: 'Quick Hands',    desc: '+1 ability keybind — key 3.' },
+    7:  { slot: 1,                 name: 'Quick Hands',    desc: '+1 ability keybind — key 4.' },
     8:  { stat: { magic: 8, mag: 2 },    name: 'Open Channel', desc: '+8 magic, +2 magic power.' },
     9:  { ability: 'ember_jab',    name: 'Ember Jab',      desc: 'A jab that lights on contact.' },
-    10: { slot: 1,                 name: 'Third Hand',     desc: '+1 ability keybind — key 4.' },
+    10: { slot: 1,                 name: 'Third Hand',     desc: '+1 ability keybind — key 5.' },
     11: { stat: { atk: 3, def: 2 },      name: 'Callused',  desc: '+3 attack, +2 defense.' },
     12: { ability: 'hollow_breaker', name: 'Hollow Breaker', desc: 'A rising strike that hurts what armour cannot protect.' }
   };
 
   // 13-100: keep widening the hotbar to 9 keys, otherwise steady stat growth.
-  var slotsSoFar = 3;   // granted at 4, 7, 10
+  var slotsSoFar = 4;   // granted at 2, 4, 7, 10
   for (var L = 13; L <= 100; L++) {
     if (L % 3 === 0 && slotsSoFar < 8) {
       slotsSoFar++;

@@ -163,6 +163,83 @@ CHLOE.engine.displays = (function () {
     return c;
   }
 
+  /* ---------------- trophy: one cleared round ---------------- */
+  /* Hung on the dressing-room wall the moment a squad goes down, so the run's
+     history is something you walk past rather than a number in a menu. */
+  function trophy(entry) {
+    var W = 384, H = 512, c = make(W, H), g = c.getContext('2d');
+    entry = entry || {};
+    var round = entry.round || 1;
+    var knights = entry.knights || 1;
+
+    // aged paper, not the black panel the mirror/poster use - these read as
+    // things pinned up over time
+    g.fillStyle = '#171114'; g.fillRect(0, 0, W, H);
+    var wash = g.createLinearGradient(0, 0, 0, H);
+    wash.addColorStop(0, 'rgba(90,60,45,0.30)');
+    wash.addColorStop(0.55, 'rgba(30,20,24,0.10)');
+    wash.addColorStop(1, 'rgba(0,0,0,0.55)');
+    g.fillStyle = wash; g.fillRect(0, 0, W, H);
+    g.strokeStyle = '#6b4a2f'; g.lineWidth = 5; g.strokeRect(12, 12, W - 24, H - 24);
+    g.strokeStyle = 'rgba(229,23,63,0.55)'; g.lineWidth = 1.5;
+    g.strokeRect(21, 21, W - 42, H - 42);
+
+    g.textAlign = 'center';
+    g.fillStyle = DIM; g.font = '15px "Consolas", monospace';
+    g.fillText('THE NIGHT REMEMBERS', W / 2, 56);
+
+    g.fillStyle = RED; g.font = 'bold 26px Impact, "Arial Narrow", sans-serif';
+    g.fillText('ROUND', W / 2, 96);
+    g.fillStyle = TXT; g.font = 'bold 122px Impact, "Arial Narrow", sans-serif';
+    g.fillText(String(round), W / 2, 208);
+
+    knightMark(g, W / 2, 286, 54, knights);
+
+    g.fillStyle = TXT; g.font = 'bold 19px Impact, "Arial Narrow", sans-serif';
+    g.fillText(knights + (knights === 1 ? ' HOLLOW KNIGHT' : ' HOLLOW KNIGHTS'), W / 2, 366);
+    g.fillStyle = RED; g.font = '16px system-ui, sans-serif';
+    g.fillText('PUT DOWN', W / 2, 390);
+
+    var who = (CHLOE.data.characters || {})[entry.by] || {};
+    g.fillStyle = DIM; g.font = '15px system-ui, sans-serif';
+    g.fillText('felled by ' + (who.name || entry.by || 'you'), W / 2, 428);
+    if (entry.hpMax) {
+      g.fillText(entry.hpLeft + ' / ' + entry.hpMax + ' life still standing', W / 2, 452);
+    }
+    g.textAlign = 'left';
+    return c;
+  }
+
+  /* A helm silhouette per knight felled, drawn small so a wide round still
+     fits the frame. */
+  function knightMark(g, cx, cy, size, count) {
+    var n = Math.min(count, 6);
+    var step = Math.min(size, 250 / n);
+    var startX = cx - (n - 1) * step / 2;
+    for (var i = 0; i < n; i++) {
+      var x = startX + i * step, s = step * 0.42;
+      g.fillStyle = '#0a0709';
+      g.strokeStyle = 'rgba(229,23,63,0.75)';
+      g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(x - s * 0.6, cy - s);
+      g.quadraticCurveTo(x, cy - s * 1.35, x + s * 0.6, cy - s);
+      g.lineTo(x + s * 0.52, cy + s * 0.55);
+      g.quadraticCurveTo(x, cy + s * 1.15, x - s * 0.52, cy + s * 0.55);
+      g.closePath();
+      g.fill(); g.stroke();
+      // the empty visor - the whole point of "hollow"
+      g.fillStyle = 'rgba(229,23,63,0.9)';
+      g.fillRect(x - s * 0.42, cy - s * 0.25, s * 0.84, s * 0.16);
+    }
+    if (count > n) {
+      g.fillStyle = DIM; g.font = 'bold 17px Impact, sans-serif';
+      g.textAlign = 'left';
+      g.fillText('+' + (count - n), cx + (n * step) / 2 + 6, cy + 6);
+      g.textAlign = 'center';
+    }
+  }
+
   /* ---------------- TV: the how-to programme ---------------- */
   var CHAPTERS = [
     { t: 'THE LONG NIGHT', l: ['A programme in six parts.', '', 'Everything you need to survive', 'the Backstage Between.', '', 'Click the TV to turn the page.'] },
@@ -207,5 +284,6 @@ CHLOE.engine.displays = (function () {
     return c;
   }
 
-  return { mirror: mirror, poster: poster, tv: tv, chapterCount: CHAPTERS.length };
+  return { mirror: mirror, poster: poster, tv: tv, trophy: trophy,
+           chapterCount: CHAPTERS.length };
 })();

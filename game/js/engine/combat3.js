@@ -104,9 +104,11 @@ CHLOE.engine.combat3 = (function () {
   }
 
   /* ---------- lifecycle ---------- */
-  function start(enemyId) {
+  /* §20: `count` knights fight you at once. Round N spawns N of them. */
+  function start(enemyId, count) {
     var def = (CHLOE.data.enemies || {})[enemyId];
     if (!def) return null;
+    count = Math.max(1, count || 1);
     var p = party();
     var m = p.active() || (p.state.members[0]);
     if (!m) return null;
@@ -116,7 +118,14 @@ CHLOE.engine.combat3 = (function () {
     st = {
       enemyId: enemyId,
       enemyDef: def,
-      enemy: { life: es.life || 40, max: es.life || 40 },
+      // one entry per knight on the floor
+      enemies: (function () {
+        var arr = [];
+        for (var q = 0; q < count; q++) {
+          arr.push({ index: q, life: es.life || 40, max: es.life || 40, alive: true });
+        }
+        return arr;
+      })(),
       charId: m.id,
       max: { hp: eff.life, mana: eff.magic, sta: eff.stamina },
       hp: Math.max(1, m.hp),
@@ -144,6 +153,16 @@ CHLOE.engine.combat3 = (function () {
 
   function get() { return st; }
   function isOver() { return !st || st.over; }
+  function allDown() {
+    if (!st) return false;
+    for (var i = 0; i < st.enemies.length; i++) if (st.enemies[i].alive) return false;
+    return true;
+  }
+  function aliveCount() {
+    var n = 0;
+    if (st) for (var i = 0; i < st.enemies.length; i++) if (st.enemies[i].alive) n++;
+    return n;
+  }
 
   /* ---------- resources ---------- */
   function spend(cost) {
@@ -248,7 +267,7 @@ CHLOE.engine.combat3 = (function () {
   /* ---------- damage ---------- */
   /* Called by the 3D layer when a cast's hit window connects with the knight.
      `mult` lets the caller pass a positional bonus (e.g. behind = more). */
-  function hitEnemy(abilityId, mult) {
+  function hitEnemy(abilityId, mult, target) {
     if (isOver()) return null;
     var a = ABIL()[abilityId];
     if (!a) return null;
@@ -262,10 +281,14 @@ CHLOE.engine.combat3 = (function () {
     var def = (st.enemyDef.stats && st.enemyDef.stats.def) || 0;
     var dmg = Math.max(1, Math.round(
       base * ((a.power || 50) / 100) * chart * (mult || 1) * rand - def * 0.5));
-    st.enemy.life = Math.max(0, st.enemy.life - dmg);
-    var killed = st.enemy.life <= 0;
-    if (killed) victory();
-    return { dmg: dmg, killed: killed, mult: chart };
+    var idx = (typeof target === 'number') ? target : 0;
+    var e = st.enemies[idx];
+    if (!e || !e.alive) return null;
+    e.life = Math.max(0, e.life - dmg);
+    var killed = e.life <= 0;
+    if (killed) e.alive = false;
+    if (allDown()) victory();
+    return { dmg: dmg, killed: killed, mult: chart, index: idx, cleared: allDown() };
   }
 
   /* The knight's swing landed (or was evaded). */
@@ -367,9 +390,27 @@ CHLOE.engine.combat3 = (function () {
     st.over = true;
     st.result = 'victory';
     var p = party(), state = p.state;
-    if (state.runStats) state.runStats.kills = (state.runStats.kills || 0) + 1;
+    if (state.runStats) {
+      var cleared = state.runStats.round || 1;
+      state.runStats.kills = (state.runStats.kills || 0) + st.enemies.length;
+      /* §20: every cleared floor is hung on the dressing-room wall. The
+         trophy list IS the round history - one entry per Hollow Knight
+         squad put down, in order, and it dies with the run like everything
+         else (§15). */
+      state.runStats.trophies = state.runStats.trophies || [];
+      state.runStats.trophies.push({
+        round: cleared,
+        knights: st.enemies.length,
+        by: st.charId,
+        hpLeft: Math.max(0, Math.round(st.hp)),
+        hpMax: Math.round(st.hpMax || st.hp)
+      });
+      // clearing the floor advances the round - the next fight is bigger
+      state.runStats.round = cleared + 1;
+    }
     var def = st.enemyDef, rw = def.rewards || {};
-    var xp = prog().enemyXp(def), shards = rw.shards || 0;
+    var squad = st.enemies.length;
+    var xp = prog().enemyXp(def) * squad, shards = (rw.shards || 0) * squad;
     var rewards = { xp: xp, shards: shards, drops: [], levelUps: [], learned: [] };
     p.addShards(shards);
     var members = state.members;
@@ -430,8 +471,17 @@ CHLOE.engine.combat3 = (function () {
     var cfg = CFG().evade || {};
     return {
       hp: st.hp, mana: st.mana, sta: st.sta, max: st.max,
-      enemy: { life: st.enemy.life, max: st.enemy.max,
-               name: (CHLOE.data.arena3d && CHLOE.data.arena3d.knight && CHLOE.data.arena3d.knight.name) || st.enemyDef.name },
+      enemy: (function () {
+        // aggregate bar across the whole squad + a per-knight breakdown
+        var life = 0, max = 0;
+        for (var i = 0; i < st.enemies.length; i++) { life += st.enemies[i].life; max += st.enemies[i].max; }
+        return {
+          life: life, max: max,
+          count: st.enemies.length, alive: aliveCount(),
+          each: st.enemies.map(function (e) { return { life: e.life, max: e.max, alive: e.alive }; }),
+          name: (CHLOE.data.arena3d && CHLOE.data.arena3d.knight && CHLOE.data.arena3d.knight.name) || st.enemyDef.name
+        };
+      })(),
       slots: slots,
       casting: st.cast ? { id: st.cast.id, pct: Math.min(1, st.cast.t / Math.max(1, st.cast.dur)) } : null,
       evade: {
@@ -448,6 +498,7 @@ CHLOE.engine.combat3 = (function () {
     start: start, get: get, isOver: isOver, tick: tick,
     press: press, evade: evade, spendSprint: spendSprint,
     hitEnemy: hitEnemy, takeHit: takeHit, invulnerable: invulnerable,
+    aliveCount: aliveCount, allDown: allDown,
     flee: flee, snapshot: snapshot,
     knownAbilities: knownAbilities, slotCount: slotCount, binds: binds, bind: bind,
     readiness: function (id) { return st ? readiness(id) : { ready: false }; }
