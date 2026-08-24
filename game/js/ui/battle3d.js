@@ -1,11 +1,11 @@
-/* CHLOE — ui/battle3d.js  (Arena battles, spec §15 — HUD + round flow)
+/* CHLOE — ui/battle3d.js  (Arena battles, spec §16 — HUD + round flow)
    Owns #screen-battle3d: the arena canvas (engine/arena3d.js renders into it)
    plus the HUD — enemy plate, party plates, move picker, telegraph prompt,
    damage splashes, round log. Orchestrates the round loop against
    engine/arena.js (rules) and engine/arena3d.js (3D + dodge resolution).
    Ends funnel through CHLOE.ui.scene.onBattleEnd(result) exactly like the 2D
    battle screen, so ui/room3d.js's wrapper handles the roguelike outcomes
-   (victory -> back to the room + Ash hook; defeat -> fresh run, §14). */
+   (victory -> back to the room + Ash hook; defeat -> fresh run, §15). */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -379,7 +379,7 @@ CHLOE.ui.battle3d = (function(){
   }
 
   function showDefeat(){
-    // roguelike §14: the run summary, same as the 2D battle screen
+    // roguelike §15: the run summary, same as the 2D battle screen
     var veil = ui.el('div', 'battle-panel-veil');
     var card = ui.el('div', 'result-card defeat');
     card.appendChild(ui.el('h2', null, 'The Night Wins'));

@@ -1,6 +1,6 @@
 /* CHLOE — main.js
    Boot: wire up UI, sanity-check data, show title.
-   Flow (roguelike mode, spec sec 14): title -> fresh run in the 3D room <-> battle.
+   Flow (roguelike mode, spec sec 15): title -> fresh run in the 3D room <-> battle.
    No accounts, no saves: every page load starts clean, and death starts a
    brand-new run. The 2D scene flow below stays as a fallback but is no longer
    routed. */
@@ -21,7 +21,7 @@ CHLOE.game = (function(){
     CHLOE.ui.room3d.enter();
   }
 
-  /* Start a fresh run (spec sec 14). Called from the title screen on page
+  /* Start a fresh run (spec sec 15). Called from the title screen on page
      load AND from the defeat panel after death — both land on a clean
      level-1 solo Chloe with nothing carried over. */
   function startNew(){

@@ -213,7 +213,35 @@ Save: scene field becomes 'room3d' (migration: any old scene value -> 'room3d' o
 ### Verification hooks
 world3d.debug() is mandatory (used by automated tests to assert movement/collision/turning). Keyboard fallback must be enough to reach and engage the enemy without pointer lock.
 
-## 14. Roguelike mode — no accounts, no saves (supersedes accounts/saves in sec 6, the account screen in sec 7, save v2 in sec 10, save v3/migration in sec 12, sec 13's account/PIN flow and its save/scene-migration line, and cloud sync everywhere)
+## 14. Room3D v2 — photorealism, real models, jump, hands, interactive TV (extends section 13)
+
+### Photoreal pipeline (engine)
+renderer: outputEncoding sRGB, ACESFilmicToneMapping (exposure ~1.1), physicallyCorrectLights, shadowMap PCFSoft (1024), pixelRatio cap 2, anisotropy 4. **Environment map**: HDRI (.hdr) via vendored RGBELoader + PMREMGenerator -> scene.environment (NOT background — room is enclosed); envMapIntensity ~0.6 on all PBR materials; graceful fallback if HDR fails (debug().envMap=false, never crash). One shadow-casting light (lamp spot or ceiling point), floor+furniture receive. Vendor tags: vendor/GLTFLoader.js + vendor/RGBELoader.js load right after three.min.js (already vendored).
+
+### Real 3D models (MODELS agent) — Poly Haven, CC0, direct download (Sketchfab requires OAuth-gated downloads; not available)
+Query https://api.polyhaven.com/assets?t=models (and /files/{id}) and pick appropriate furniture: a sofa/couch, an old TV (tube/vintage preferred), a floor or table lamp, a console/dresser usable as vanity, optionally a chair + 1-2 clutter props. Also ONE moody dim indoor/night HDRI (t=hdris, 1k or 2k .hdr). Download glTF format (1k textures) preserving relative paths into game/assets/models/<id>/ and the hdr into game/assets/hdri/. TOTAL BUDGET <= 40MB, prefer small. Manifest tools/model-manifest.json with canonical ids EXACTLY: sofa, tv, lamp, vanity, chair(optional), clutter1/clutter2(optional), hdri — each {id, polyhavenId, license, url, entryFile (the .gltf), sizeKB, realDims if stated}. Write tools/ATTRIBUTIONS.md (source, author, license per asset). Verify every entryFile + its referenced .bin/textures exist on disk.
+
+### Placement, colliders, fallback (engine + data)
+data/room3d.js furniture entries gain {model:'<canonical id>'|null, targetH (meters), rotY}. Engine loads via GLTFLoader (path from manifest — engine reads a mirrored copy of entryFile paths in data/room3d.js models block, NOT the json at runtime), scales uniformly to targetH, drops to floor (Box3 min.y -> 0), computes AABB collider from the scaled Box3 (replaces the placeholder box collider). The existing textured-box furniture stays as AUTOMATIC per-item fallback whenever a model fails to load (404/file://) — the room must never have holes. Mirror, door, posters stay as planes.
+
+### Jump (engine)
+Space while grounded: vy=4.8, gravity -14 m/s^2, land at eye 1.6 (y offset over eye height), grounded flag, no double-jump, head bob only while grounded, small camera+hands landing dip (0.05m, ~150ms). debug() adds {y, grounded}.
+
+### First-person hands (engine)
+Camera-attached hand group, always rendered (near plane 0.05, renderOrder high): two stylized gloved hands from primitives (rounded palm + finger segments + thumb, dark worn leather PBR, subtle red rim) at (+-0.28, -0.25, -0.55) angled inward. Animation: idle breath bob; walking sway (x +-0.02, y 0.015) synced to head-bob frequency, 1.5x on sprint; slight rotational lag behind look (slerp ~12/s); jump raises hands slightly, landing dips. If the MODELS agent happens to include a fitting CC0 arms glb, engine MAY use it; primitives are the required baseline. debug().handsVisible.
+
+### Interactive TV (engine + ui)
+TV screen = separate plane fitted over the model's tube face (data-configured local offset/size after scaling; fallback box TV keeps its screen plane). States: ON = animated tv_static texture + bluish emissive + flickering PointLight (~0.6); OFF (default) = near-black glossy env-reflective. Raycast hover within 2.5m -> hint "TV — click to turn on/off"; click toggles (also unlocked-mouse click). debug().tvOn. Engage-enemy interaction unchanged and takes priority when both hovered.
+
+### Debug contract (extended, mandatory)
+debug() -> {x, y, z, yaw, pitch, locked, grounded, enemyDist, enemyAlive, tvOn, envMap, handsVisible, modelsLoaded:{sofa,tv,lamp,vanity,...}, colliders}.
+
+### Ownership
+MODELS agent: game/assets/models/*, game/assets/hdri/*, tools/model-manifest.json, tools/ATTRIBUTIONS.md. ENGINE agent: engine/world3d.js + data/room3d.js. UI agent: ui/room3d.js (hint lines add Space=jump + TV hint), game/index.html (vendor loader tags), css touches. Menu unchanged.
+
+> **Superseded in part by §15/§16**: the save flow is gone (no accounts, no persistence) and the battle handoff now enters the 3D church arena. The hands rig defined here is the baseline that §16 extends — the same gloved hands also open/close on the mouse buttons and reach out to take items.
+
+## 15. Roguelike mode — no accounts, no saves (supersedes accounts/saves in sec 6, the account screen in sec 7, save v2 in sec 10, save v3/migration in sec 12, sec 13's account/PIN flow and its save/scene-migration line, sec 14's "save flow unchanged", and cloud sync everywhere)
 
 CHLOE is a roguelike: **one run per page load, permadeath on defeat.** Nothing is ever persisted — no localStorage, no PIN, no cloud.
 
@@ -226,7 +254,7 @@ CHLOE is a roguelike: **one run per page load, permadeath on defeat.** Nothing i
 - **Menu**: Save tab removed (Party / Inventory / Moves / Skill Tree / How to play). How-to-play explains the roguelike rule in plain words.
 - **Balance intent**: shards/tree/respec now price against a single run's economy; future content (P6 shop) must assume run-scoped wallets, not banked savings.
 
-## 15. Arena battles — the church, the Hollow Black Knight, hands & crouch (supersedes the routed battle presentation of sec 10; the 2D battle screen stays for the unrouted legacy flow)
+## 16. Arena battles — the church, the Hollow Black Knight, hands & crouch (supersedes the routed battle presentation of sec 10; the 2D battle screen stays for the unrouted legacy flow)
 
 Battles now happen IN 3D: engaging the room's enemy pulls the run into an **old church** (real Sketchfab asset) where the **Hollow Black Knight** (real asset, static model driven procedurally like a haunted statue) waits before the altar. Turn-based attack selection + REAL-TIME dodging.
 
@@ -262,3 +290,4 @@ Battles now happen IN 3D: engaging the room's enemy pulls the run into an **old 
 
 ### Balance targets
 A first-run solo Chloe beats the knight in 4-5 rounds IF she dodges most swings; face-tanking every pattern loses. slash is the common swing (weight 3), charge the rare heavy (weight 1, 170% power). The chart makes occult take 2x physical, so the knight carries `resists:{physical:1.0}` — the plate blunts that back to NEUTRAL (a chart override, not a reduction). Fire stays chart-halved; divine (Voice tree) burns it 2x later. Tree resist nodes are PERCENT cuts applied after the chart (arena.js mirrors battle.js), never chart multipliers.
+

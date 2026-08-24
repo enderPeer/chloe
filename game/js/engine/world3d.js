@@ -1,9 +1,14 @@
 /* CHLOE — engine/world3d.js
-   First-person 3D room (spec section 13). Owns all Three.js logic.
+   First-person 3D room (spec sections 13 + 14). Owns all Three.js logic.
    API: CHLOE.engine.world3d = { init(canvas), start(), stop(), setEnemyAlive(bool),
-        onEngage(cb), resize(), debug() }  (+ optional onHover(cb) hint hook for the UI).
+        onEngage(cb), resize(), debug() }  (+ optional onHover(cb) hint hook for the UI:
+        cb(enemyHovered, enemyDist, tvHovered)).
+   Section 14: PBR pipeline (sRGB + ACES + physicallyCorrectLights + PCFSoft shadows),
+   HDRI environment via RGBELoader+PMREM, GLTF furniture with per-item textured-box
+   fallback, jump, first-person hands rig, interactive TV.
    No DOM outside the given canvas + pointer lock. No UI/game-rule logic.
-   Degrades safely: no THREE -> no-op API; missing/blocked textures -> flat colors.
+   Degrades safely: no THREE -> no-op API; missing/blocked textures/models/HDR ->
+   flat colors / box furniture / no env map. Never crashes on asset failure.
 */
 window.CHLOE = window.CHLOE || {};
 CHLOE.engine = CHLOE.engine || {};
@@ -16,12 +21,17 @@ CHLOE.engine = CHLOE.engine || {};
 
   function noop() {}
   function deadDebug() {
-    return { x: 0, z: 0, yaw: 0, pitch: 0, locked: false, enemyDist: 0, enemyAlive: false, colliders: [] };
+    return {
+      x: 0, y: 1.6, z: 0, yaw: 0, pitch: 0, locked: false, grounded: true,
+      enemyDist: 0, enemyAlive: false, tvOn: false, envMap: false,
+      handsVisible: false, modelsLoaded: {}, colliders: []
+    };
   }
   function disableAPI(reason) {
     if (reason) console.warn('[world3d] disabled: ' + reason);
     W.init = noop; W.start = noop; W.stop = noop;
-    W.setEnemyAlive = noop; W.resetPlayer = noop; W.onEngage = noop; W.onHover = noop;
+    W.setEnemyAlive = noop; W.onEngage = noop; W.onHover = noop;
+    W.resetPlayer = noop; W.onPickup = noop;
     W.resize = noop; W.debug = deadDebug;
   }
 
@@ -29,54 +39,75 @@ CHLOE.engine = CHLOE.engine || {};
 
   // ---------------------------------------------------------------- constants
   var EYE_HEIGHT = 1.6;
-  var CROUCH_EYE = 0.85;      // Ctrl/C held (spec §15 controls)
+  var CROUCH_EYE = 0.85;      // Ctrl/C held (spec §16 controls)
   var CROUCH_MULT = 0.55;     // crouch speed factor
+  var GRAB_RANGE = 2.2;       // how far a hand can reach for a pickup
   var RADIUS = 0.35;
   var WALK = 3.0, SPRINT = 5.0;
-  var GRAB_RANGE = 2.2;       // how far a hand can reach for a pickup
   var ACCEL_LERP = 10;                 // approach rate per second
   var TURN_RATE = 100 * Math.PI / 180; // keyboard yaw, rad/s
   var SENS = 0.0022;
   var PITCH_MAX = 80 * Math.PI / 180;
   var ENGAGE_DIST = 3.5;
+  var TV_DIST = 2.5;
   var BOB_AMP = 0.03;
   var RESPAWN_SECS = 15;
   var DISSOLVE_SECS = 0.8;
+  // section 14
+  var JUMP_V = 4.8, GRAVITY = -14;
+  var DIP_TIME = 0.15, DIP_AMP = 0.05; // landing dip (camera + hands)
+  var ENV_INTENSITY = 0.6;
+  var ANISO = 4;
+  // physicallyCorrectLights divides punctual/ambient response by ~PI vs the
+  // legacy pipeline this room was tuned in; scale data intensities back up so
+  // the room keeps its pre-v2 brightness. 1 if the flag can't be enabled.
+  var LIGHT_SCALE = 1;
 
   // ---------------------------------------------------------------- state
   var inited = false, running = false, disabled = false;
   var canvas = null, renderer = null, scene = null, camera = null;
   var rafId = 0, lastTime = 0, elapsed = 0, renderFailed = false;
+  var maxAniso = ANISO;
 
   var pos = { x: -2.5, z: 2 };
   var vel = { x: 0, z: 0 };
   var yaw = 0, pitch = 0, bobPhase = 0;
+  // vertical / jump state (section 14)
+  var yOff = 0, vy = 0, grounded = true, jumpQueued = false, dipTimer = 0;
   var keys = {};
   var colliders = [];       // [{kind,minX,maxX,minZ,maxZ}]
   var texturedMats = [];    // materials that got a map (for strip-on-failure)
   var data = null;
 
-  var engageCb = null, hoverCb = null, onPickupCb = null, engageCooldown = 0;
-  var hovered = false, hoverGlow = 0, enemyDist = Infinity;
-  var eyeH = EYE_HEIGHT;
+  var engageCb = null, hoverCb = null, engageCooldown = 0, tvCooldown = 0;
+  var hovered = false, tvHovered = false, hoverGlow = 0, enemyDist = Infinity;
 
-  // first-person hands (spec §15: LMB closes the left hand, RMB the right;
-  // a click near a glinting item reaches out and takes it in the motion)
-  var hands = { built: false, l: null, r: null, closeL: 0, closeR: 0,
-                targetL: 0, targetR: 0 };
-  var pickups = [];          // [{id,itemId,label,mesh,glow,x,y,z,taken}]
-  var pickupHover = null;    // {itemId,label,dist} under the crosshair
-  var grab = null;           // {hand:'l'|'r', pk, t}  active grab animation
+  var mouseNdc = null; // last unlocked mouse pos over the canvas, NDC
 
   var enemy = {
     mesh: null, mat: null, glow: null, light: null,
     alive: true, dissolving: false, dissolveT: 0, respawnTimer: 0,
     baseY: 1.0, baseScaleX: 1.1, baseScaleY: 1.9
   };
-  var tvScreen = { mat: null, tex: null };
+  // interactive TV (section 14). onMat is the animated-static ON material,
+  // offMat the near-black glossy OFF material. Default OFF.
+  var tv = { screenMesh: null, onMat: null, offMat: null, tex: null, light: null,
+             lightBase: 0.6, on: false };
   var ceilLight = null, ceilBase = 1, ceilTarget = 1, ceilTimer = 0;
   var raycaster = null, ndc = null;
   var listeners = []; // [target, type, fn]
+
+  // section 14: env map + models + hands state
+  var envMapOk = false;
+  var modelsLoaded = {}; // canonical id -> bool (false while loading / failed)
+  var hands = { group: null, visible: false, lag: null, tmpQ: null, jumpY: 0,
+                // §16: LMB closes the left hand, RMB the right
+                l: null, r: null, closeL: 0, closeR: 0, targetL: 0, targetR: 0 };
+  var eyeH = EYE_HEIGHT;     // lerped stand/crouch eye height (§16)
+  var pickups = [];          // [{itemId,label,mesh,glow,x,y,z,taken}]
+  var pickupHover = null;    // {itemId,label,dist} under the crosshair
+  var grab = null;           // {hand:'l'|'r', pk, t} active grab animation
+  var onPickupCb = null;
 
   // ---------------------------------------------------------------- helpers
   function texPath(key) {
@@ -88,6 +119,8 @@ CHLOE.engine = CHLOE.engine || {};
     try {
       new THREE.TextureLoader().load(path, function (t) {
         t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        if (THREE.sRGBEncoding !== undefined) t.encoding = THREE.sRGBEncoding;
+        t.anisotropy = maxAniso;
         if (onLoad) onLoad(t);
       }, undefined, function () { if (onError) onError(); });
     } catch (e) { if (onError) onError(); }
@@ -102,6 +135,7 @@ CHLOE.engine = CHLOE.engine || {};
       m = new THREE.MeshBasicMaterial({ color: fb });
     } else {
       m = new THREE.MeshStandardMaterial({ color: fb, roughness: 0.95, metalness: 0.0 });
+      m.envMapIntensity = ENV_INTENSITY;
       if (opts.emissive) { m.emissive = new THREE.Color(opts.emissive); m.emissiveIntensity = opts.emissiveIntensity || 0.3; }
     }
     m.userData.fb = fb;
@@ -115,8 +149,16 @@ CHLOE.engine = CHLOE.engine || {};
     return m;
   }
 
+  // Plain PBR material for untextured parts (all get the env-map intensity).
+  function stdMat(params) {
+    var m = new THREE.MeshStandardMaterial(params);
+    m.envMapIntensity = ENV_INTENSITY;
+    return m;
+  }
+
   // file:// in some browsers lets the <img> load but throws SecurityError at
   // GL upload; if render throws, strip every map back to flat colors once.
+  // Also traverses the scene so late-loading GLTF textures get stripped too.
   function stripMaps() {
     for (var i = 0; i < texturedMats.length; i++) {
       var m = texturedMats[i];
@@ -125,7 +167,23 @@ CHLOE.engine = CHLOE.engine || {};
       m.needsUpdate = true;
     }
     texturedMats.length = 0;
-    if (tvScreen.mat) { tvScreen.tex = null; }
+    if (scene) {
+      scene.traverse(function (o) {
+        if (!o.isMesh || !o.material) return;
+        var mats = Array.isArray(o.material) ? o.material : [o.material];
+        for (var j = 0; j < mats.length; j++) {
+          var mm = mats[j];
+          if (!mm || mm === enemy.mat) continue;
+          var changed = false;
+          var slots = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap'];
+          for (var k = 0; k < slots.length; k++) {
+            if (mm[slots[k]]) { mm[slots[k]] = null; changed = true; }
+          }
+          if (changed) mm.needsUpdate = true;
+        }
+      });
+    }
+    if (tv.onMat) { tv.tex = null; tv.onMat.map = null; tv.onMat.needsUpdate = true; }
     if (enemy.mat && enemy.mat.uniforms) {
       enemy.mat.uniforms.tex.value = makeFallbackEnemyTexture();
       enemy.mat.needsUpdate = true;
@@ -136,7 +194,21 @@ CHLOE.engine = CHLOE.engine || {};
     var c = Math.abs(Math.cos(rotY || 0)), s = Math.abs(Math.sin(rotY || 0));
     var hx = c * w / 2 + s * d / 2;
     var hz = s * w / 2 + c * d / 2;
-    colliders.push({ kind: kind, minX: x - hx, maxX: x + hx, minZ: z - hz, maxZ: z + hz });
+    var col = { kind: kind, minX: x - hx, maxX: x + hx, minZ: z - hz, maxZ: z + hz };
+    colliders.push(col);
+    return col;
+  }
+
+  // Shadow flags for a furniture group: solid meshes cast+receive, wall-flush
+  // planes only receive (flush casters cause acne). castOK=false for the lamp:
+  // its own shade/pole surrounds the shadow light and would blacken the room.
+  function enableShadows(root, castOK) {
+    root.traverse(function (o) {
+      if (!o.isMesh) return;
+      var plane = o.geometry && /Plane/.test(o.geometry.type || '');
+      o.receiveShadow = true;
+      o.castShadow = !!castOK && !plane;
+    });
   }
 
   // -------------------------------------------------------- canvas textures
@@ -170,6 +242,55 @@ CHLOE.engine = CHLOE.engine || {};
     return new THREE.CanvasTexture(c);
   }
 
+  // ------------------------------------------------------- photoreal pipeline
+  function setupPipeline() {
+    try {
+      if (THREE.sRGBEncoding !== undefined) renderer.outputEncoding = THREE.sRGBEncoding;
+      if (THREE.ACESFilmicToneMapping !== undefined) {
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.1;
+      }
+      if ('physicallyCorrectLights' in renderer) {
+        renderer.physicallyCorrectLights = true;
+        LIGHT_SCALE = Math.PI;
+      }
+      if (renderer.shadowMap && THREE.PCFSoftShadowMap !== undefined) {
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      }
+      if (renderer.capabilities && renderer.capabilities.getMaxAnisotropy) {
+        maxAniso = Math.min(ANISO, renderer.capabilities.getMaxAnisotropy() || 1);
+      }
+    } catch (e) { console.warn('[world3d] pipeline setup partial: ' + e.message); }
+  }
+
+  // HDRI -> PMREM -> scene.environment (NOT background; the room is enclosed).
+  // Any failure leaves envMapOk=false and the room lit by the light rig alone.
+  function loadEnvironment() {
+    envMapOk = false;
+    var path = data && data.hdri;
+    if (!path || !THREE.RGBELoader || !THREE.PMREMGenerator) return;
+    var pmrem = null;
+    function bail() { if (pmrem) { try { pmrem.dispose(); } catch (e) {} pmrem = null; } }
+    try {
+      pmrem = new THREE.PMREMGenerator(renderer);
+      pmrem.compileEquirectangularShader();
+      new THREE.RGBELoader().load(path, function (hdrTex) {
+        try {
+          if (!pmrem || renderFailed) { bail(); return; }
+          var rt = pmrem.fromEquirectangular(hdrTex);
+          scene.environment = rt.texture;
+          envMapOk = true;
+        } catch (e) {
+          console.warn('[world3d] env map failed: ' + e.message);
+          envMapOk = false;
+        }
+        try { hdrTex.dispose(); } catch (e) {}
+        bail();
+      }, undefined, function () { bail(); }); // 404 / file:// — silent, envMap:false
+    } catch (e) { bail(); }
+  }
+
   // ---------------------------------------------------------------- build
   function buildRoom() {
     var sz = data.size;
@@ -185,6 +306,7 @@ CHLOE.engine = CHLOE.engine || {};
     for (var i = 0; i < mats.length; i++) mats[i].side = THREE.BackSide;
     var box = new THREE.Mesh(new THREE.BoxGeometry(sz.w, sz.h, sz.d), mats);
     box.position.set(0, sz.h / 2, 0);
+    box.receiveShadow = true; // floor (and walls) receive the lamp shadow
     scene.add(box);
 
     // wall colliders (thick AABBs just outside the shell — one code path for everything)
@@ -195,6 +317,8 @@ CHLOE.engine = CHLOE.engine || {};
     colliders.push({ kind: 'wall_s', minX: -hw - T, maxX: hw + T, minZ: hd, maxZ: hd + T });
   }
 
+  var COLLIDABLE = { vanity: 1, couch: 1, tv: 1, lamp: 1, chair: 1 };
+
   function buildFurniture() {
     var list = data.furniture || [];
     for (var i = 0; i < list.length; i++) {
@@ -202,12 +326,131 @@ CHLOE.engine = CHLOE.engine || {};
       var g = new THREE.Group();
       g.position.set(f.x, 0, f.z);
       g.rotation.y = f.rotY || 0;
-      buildPiece(g, f);
       scene.add(g);
-      if (f.kind === 'vanity' || f.kind === 'couch' || f.kind === 'tv' || f.kind === 'lamp') {
-        addCollider(f.kind, f.x, f.z, f.w, f.d, f.rotY);
+
+      var col = null;
+      if (COLLIDABLE[f.kind]) col = addCollider(f.kind, f.x, f.z, f.w, f.d, f.rotY);
+
+      // the lamp light lives on the group regardless of model vs fallback —
+      // it is the single shadow-casting light of the scene.
+      if (f.kind === 'lamp') addLampLight(g, f);
+
+      var modelPath = f.model && data.models && data.models[f.model];
+      if (modelPath && THREE.GLTFLoader) {
+        modelsLoaded[f.model] = false;
+        loadFurnitureModel(f, g, col, modelPath);
+      } else {
+        if (f.model) modelsLoaded[f.model] = false;
+        buildPiece(g, f);
+        enableShadows(g, f.kind !== 'lamp');
       }
     }
+  }
+
+  // GLTF path (section 14): uniform-scale to targetH, floor-drop + recenter via
+  // Box3, AABB collider from the scaled world Box3 (replaces the placeholder),
+  // per-item fallback to the textured-box builder on ANY failure.
+  function loadFurnitureModel(f, g, col, path) {
+    var done = false;
+    function fail() {
+      if (done) return; done = true;
+      modelsLoaded[f.model] = false;
+      buildPiece(g, f);
+      enableShadows(g, f.kind !== 'lamp');
+    }
+    try {
+      new THREE.GLTFLoader().load(path, function (gltf) {
+        if (done) return;
+        try {
+          var obj = (gltf && gltf.scene) || (gltf && gltf.scenes && gltf.scenes[0]);
+          if (!obj) { fail(); return; }
+          var box = new THREE.Box3().setFromObject(obj);
+          var size = box.getSize(new THREE.Vector3());
+          var s = (f.targetH || f.h || 1) / Math.max(size.y, 0.001);
+          obj.scale.setScalar(s);
+          box.setFromObject(obj);
+          obj.position.x -= (box.min.x + box.max.x) / 2;
+          obj.position.z -= (box.min.z + box.max.z) / 2;
+          obj.position.y -= box.min.y; // drop to floor
+          obj.traverse(function (o) {
+            if (!o.isMesh) return;
+            var mats = Array.isArray(o.material) ? o.material : [o.material];
+            for (var j = 0; j < mats.length; j++) {
+              var m = mats[j];
+              if (!m) continue;
+              if ('envMapIntensity' in m) m.envMapIntensity = ENV_INTENSITY;
+              if (m.map) m.map.anisotropy = maxAniso;
+            }
+          });
+          g.add(obj);
+          enableShadows(g, f.kind !== 'lamp');
+          // world AABB collider from the scaled Box3 (rotation baked in)
+          g.updateMatrixWorld(true);
+          var wb = new THREE.Box3().setFromObject(obj);
+          if (col && isFinite(wb.min.x)) {
+            col.minX = wb.min.x; col.maxX = wb.max.x;
+            col.minZ = wb.min.z; col.maxZ = wb.max.z;
+          }
+          if (f.kind === 'tv') {
+            addTvScreen(g, (data.tvScreen && data.tvScreen.model) || null, f);
+          }
+          done = true;
+          modelsLoaded[f.model] = true;
+        } catch (e) {
+          console.warn('[world3d] model "' + f.model + '" setup failed: ' + e.message);
+          fail();
+        }
+      }, undefined, fail); // 404 / file:// / parse error
+    } catch (e) { fail(); }
+  }
+
+  function addLampLight(g, f) {
+    var lc = (data.lights && data.lights.lamp) || {};
+    var lamp = new THREE.PointLight(lc.color != null ? lc.color : 0xffb37a,
+      (lc.intensity != null ? lc.intensity : 0.9) * LIGHT_SCALE,
+      lc.distance || 6, lc.decay || 1.8);
+    lamp.position.y = (f.targetH || f.h) * 0.9;
+    if (renderer.shadowMap && renderer.shadowMap.enabled) {
+      lamp.castShadow = true;
+      lamp.shadow.mapSize.set(1024, 1024);
+      lamp.shadow.bias = -0.005;
+      lamp.shadow.camera.near = 0.1;
+      lamp.shadow.camera.far = lc.distance || 6;
+    }
+    g.add(lamp);
+  }
+
+  // TV screen plane fitted over the tube face; cfg = {x,y,z,w,h} local to the
+  // TV group ({model} block for GLTF, {fallback} block for the box TV).
+  // Also creates the ON/OFF materials + the bluish flicker light. Default OFF.
+  function addTvScreen(g, cfg, f) {
+    cfg = cfg || { x: 0, y: (f.h || 1) * 0.7, z: (f.d || 0.5) / 2 + 0.01, w: (f.w || 1) * 0.6, h: (f.h || 1) * 0.36 };
+    tv.onMat = makeMat(f.tex || 'tv_static', {
+      basic: true, fallback: 0x2a3038,
+      onTex: function (t) { tv.tex = t; t.repeat.set(1, 1); }
+    });
+    tv.offMat = stdMat({ color: 0x050607, roughness: 0.08, metalness: 0.85 });
+    tv.offMat.envMapIntensity = 0.9; // glossy dead tube catches the env map
+    tv.screenMesh = new THREE.Mesh(new THREE.PlaneGeometry(cfg.w, cfg.h), tv.on ? tv.onMat : tv.offMat);
+    tv.screenMesh.position.set(cfg.x, cfg.y, cfg.z);
+    g.add(tv.screenMesh);
+
+    var tc = (data.lights && data.lights.tv) || {};
+    tv.lightBase = (tc.intensity != null ? tc.intensity : 0.6) * LIGHT_SCALE;
+    tv.light = new THREE.PointLight(tc.color != null ? tc.color : 0x86b6ff,
+      tv.lightBase, tc.distance || 4, tc.decay || 1.8);
+    tv.light.position.set(cfg.x, cfg.y, cfg.z + 0.35);
+    tv.light.visible = tv.on;
+    g.add(tv.light);
+  }
+
+  function toggleTv() {
+    if (!tv.screenMesh) return;
+    if (elapsed < tvCooldown) return;
+    tvCooldown = elapsed + 0.25;
+    tv.on = !tv.on;
+    tv.screenMesh.material = tv.on ? tv.onMat : tv.offMat;
+    if (tv.light) tv.light.visible = tv.on;
   }
 
   function buildPiece(g, f) {
@@ -219,7 +462,7 @@ CHLOE.engine = CHLOE.engine || {};
         mesh.position.y = f.h * 0.45;
         g.add(mesh);
         var top = new THREE.Mesh(new THREE.BoxGeometry(f.w * 1.04, f.h * 0.08, f.d * 1.08),
-          new THREE.MeshStandardMaterial({ color: 0x171012, roughness: 0.8, metalness: 0.1 }));
+          stdMat({ color: 0x171012, roughness: 0.8, metalness: 0.1 }));
         top.position.y = f.h * 0.94;
         g.add(top);
         break;
@@ -230,7 +473,7 @@ CHLOE.engine = CHLOE.engine || {};
         mesh.position.y = 1.55;
         g.add(mesh);
         var frame = new THREE.Mesh(new THREE.BoxGeometry(f.w + 0.1, f.h + 0.1, 0.03),
-          new THREE.MeshStandardMaterial({ color: 0x1c1216, roughness: 0.9 }));
+          stdMat({ color: 0x1c1216, roughness: 0.9 }));
         frame.position.set(0, 1.55, -0.02);
         g.add(frame);
         break;
@@ -251,20 +494,14 @@ CHLOE.engine = CHLOE.engine || {};
       case 'tv':
         var standH = f.h * 0.45, bodyH = f.h * 0.5;
         var stand = new THREE.Mesh(new THREE.BoxGeometry(f.w, standH, f.d),
-          new THREE.MeshStandardMaterial({ color: 0x1a1216, roughness: 0.9 }));
+          stdMat({ color: 0x1a1216, roughness: 0.9 }));
         stand.position.y = standH / 2;
         g.add(stand);
         var body = new THREE.Mesh(new THREE.BoxGeometry(f.w * 0.78, bodyH, f.d * 0.85),
-          new THREE.MeshStandardMaterial({ color: 0x232028, roughness: 0.7 }));
+          stdMat({ color: 0x232028, roughness: 0.7 }));
         body.position.y = standH + bodyH / 2;
         g.add(body);
-        tvScreen.mat = makeMat(f.tex, {
-          basic: true, fallback: 0x2a3038,
-          onTex: function (t) { tvScreen.tex = t; t.repeat.set(1, 1); }
-        });
-        var screen = new THREE.Mesh(new THREE.PlaneGeometry(f.w * 0.62, bodyH * 0.72), tvScreen.mat);
-        screen.position.set(0, standH + bodyH / 2, f.d * 0.85 / 2 + 0.005);
-        g.add(screen);
+        addTvScreen(g, (data.tvScreen && data.tvScreen.fallback) || null, f);
         break;
 
       case 'door':
@@ -275,22 +512,18 @@ CHLOE.engine = CHLOE.engine || {};
         break;
 
       case 'lamp':
-        var poleMat = new THREE.MeshStandardMaterial({ color: 0x141114, roughness: 0.6, metalness: 0.4 });
+        var poleMat = stdMat({ color: 0x141114, roughness: 0.6, metalness: 0.4 });
         var foot = new THREE.Mesh(new THREE.BoxGeometry(f.w, 0.05, f.d), poleMat);
         foot.position.y = 0.025; g.add(foot);
         var pole = new THREE.Mesh(new THREE.BoxGeometry(0.05, f.h * 0.85, 0.05), poleMat);
         pole.position.y = f.h * 0.45; g.add(pole);
         var shade = new THREE.Mesh(new THREE.BoxGeometry(f.w * 0.75, f.h * 0.2, f.d * 0.75),
-          new THREE.MeshStandardMaterial({
+          stdMat({
             color: 0x7a3520, roughness: 0.9,
             emissive: 0xff9a55, emissiveIntensity: 0.6
           }));
         shade.position.y = f.h * 0.88; g.add(shade);
-        var lc = (data.lights && data.lights.lamp) || {};
-        var lamp = new THREE.PointLight(lc.color != null ? lc.color : 0xffb37a,
-          lc.intensity != null ? lc.intensity : 0.9, lc.distance || 6, lc.decay || 1.8);
-        lamp.position.y = f.h * 0.9;
-        g.add(lamp);
+        // (the lamp point light is added by buildFurniture/addLampLight)
         break;
 
       case 'poster':
@@ -300,9 +533,9 @@ CHLOE.engine = CHLOE.engine || {};
         g.add(mesh);
         break;
 
-      default: // unknown kind -> plain dark box, still placed
+      default: // unknown kind (incl. chair fallback) -> plain dark box, still placed
         mesh = new THREE.Mesh(new THREE.BoxGeometry(f.w, f.h, f.d),
-          new THREE.MeshStandardMaterial({ color: 0x221a1e, roughness: 0.95 }));
+          stdMat({ color: 0x221a1e, roughness: 0.95 }));
         mesh.position.y = f.h / 2;
         g.add(mesh);
     }
@@ -312,9 +545,9 @@ CHLOE.engine = CHLOE.engine || {};
     var L = data.lights || {};
     var amb = L.ambient || {};
     scene.add(new THREE.AmbientLight(amb.color != null ? amb.color : 0x1a0a0d,
-      amb.intensity != null ? amb.intensity : 1.2));
+      (amb.intensity != null ? amb.intensity : 1.2) * LIGHT_SCALE));
     var pc = L.pointCeiling || {};
-    ceilBase = pc.intensity != null ? pc.intensity : 1.1;
+    ceilBase = (pc.intensity != null ? pc.intensity : 1.1) * LIGHT_SCALE;
     ceilLight = new THREE.PointLight(pc.color != null ? pc.color : 0xe5173f,
       ceilBase, pc.distance || 14, pc.decay || 1.6);
     ceilLight.position.set(pc.x || 0, pc.y || (data.size.h - 0.25), pc.z || 0);
@@ -379,74 +612,128 @@ CHLOE.engine = CHLOE.engine || {};
 
     var le = (data.lights && data.lights.enemy) || {};
     enemy.light = new THREE.PointLight(le.color != null ? le.color : 0xff2038,
-      le.intensity != null ? le.intensity : 0.7, le.distance || 5, le.decay || 1.8);
+      enemyLightBase(), le.distance || 5, le.decay || 1.8);
     enemy.light.position.set(sp.x, enemy.baseY + 0.3, sp.z);
     scene.add(enemy.light);
   }
 
-  // ------------------------------------------------------------- hands
-  function makeHand(side){
-    var g = new THREE.Group();
-    var skin = new THREE.MeshStandardMaterial({ color: 0xc9a08a, roughness: 0.85 });
-    var sleeve = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.09, 0.16),
-      new THREE.MeshStandardMaterial({ color: 0x1d1216, roughness: 0.9 }));
-    sleeve.position.set(0, -0.015, 0.1);
-    g.add(sleeve);
-    var palm = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.03, 0.1), skin);
-    g.add(palm);
-    var fingers = new THREE.Group();
-    fingers.position.set(0, 0, -0.05);
-    for (var i = 0; i < 4; i++) {
-      var f = new THREE.Mesh(new THREE.BoxGeometry(0.016, 0.02, 0.065), skin);
-      f.position.set(-0.031 + i * 0.021, 0, -0.032);
-      fingers.add(f);
+  function enemyLightBase() {
+    return ((data.lights && data.lights.enemy && data.lights.enemy.intensity) || 0.7) * LIGHT_SCALE;
+  }
+
+  // ------------------------------------------------------ first-person hands
+  // Primitive gloved hands (dark worn leather, subtle red rim) parented to the
+  // camera. renderOrder high + near plane 0.05 keep them on top of the room.
+  function buildHands() {
+    hands.group = new THREE.Group();
+    var glove = stdMat({
+      color: 0x201417, roughness: 0.58, metalness: 0.08,
+      emissive: 0x2a070c, emissiveIntensity: 0.22
+    });
+
+    // Fingers/thumb live in their own groups so they can curl closed (§16).
+    function fingerRow(hand, dir) {
+      var fingers = new THREE.Group();
+      for (var i = 0; i < 4; i++) {
+        var fx = -0.033 + i * 0.022;
+        for (var seg = 0; seg < 2; seg++) {
+          var fl = seg === 0 ? 0.045 : 0.032;
+          var fseg = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.018, fl), glove);
+          fseg.position.set(fx, seg * -0.006, -0.055 - seg * 0.038);
+          fseg.rotation.x = seg * 0.35;
+          fingers.add(fseg);
+        }
+      }
+      hand.add(fingers);
+      // thumb on the inner side
+      var thumb = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.02, 0.05), glove);
+      thumb.position.set(dir * 0.055, 0.005, -0.02);
+      thumb.rotation.y = dir * 0.7;
+      hand.add(thumb);
+      hand.userData.fingers = fingers;
+      hand.userData.thumb = thumb;
+      hand.userData.thumbYaw = dir * 0.7;
     }
-    fingers.rotation.x = -0.15;
-    g.add(fingers);
-    var thumb = new THREE.Mesh(new THREE.BoxGeometry(0.017, 0.02, 0.05), skin);
-    thumb.position.set(side === 'l' ? 0.05 : -0.05, 0, -0.01);
-    thumb.rotation.y = side === 'l' ? -0.7 : 0.7;
-    g.add(thumb);
-    g.userData.fingers = fingers;
-    g.userData.thumb = thumb;
-    return g;
+
+    function makeHand(side) { // side: -1 left, +1 right
+      var hand = new THREE.Group();
+      // rounded palm: squashed sphere
+      var palm = new THREE.Mesh(new THREE.SphereGeometry(0.055, 10, 8), glove);
+      palm.scale.set(0.95, 0.5, 1.1);
+      hand.add(palm);
+      // cuff / wrist
+      var cuff = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.05, 0.06), glove);
+      cuff.position.set(0, 0, 0.075);
+      hand.add(cuff);
+      fingerRow(hand, -side);
+      hand.position.set(side * 0.28, -0.25, -0.55);
+      hand.rotation.set(0.35, -side * 0.3, side * 0.12); // angled inward
+      hand.userData.home = hand.position.clone();
+      hand.userData.side = side;
+      return hand;
+    }
+
+    hands.l = makeHand(-1);
+    hands.r = makeHand(1);
+    hands.group.add(hands.l);
+    hands.group.add(hands.r);
+    hands.group.traverse(function (o) {
+      if (o.isMesh) { o.renderOrder = 999; o.frustumCulled = false; }
+    });
+    camera.add(hands.group);
+    scene.add(camera); // camera must be in the scene graph for its children to render
+    hands.lag = camera.quaternion.clone();
+    hands.tmpQ = new THREE.Quaternion();
+    hands.visible = true;
   }
 
-  function buildHands(){
-    if (hands.built) return;
-    scene.add(camera); // camera children only render when the camera is in the scene
-    hands.l = makeHand('l');
-    hands.l.position.set(-0.28, -0.26, -0.52);
-    hands.l.rotation.set(-0.5, 0.22, 0.08);
-    camera.add(hands.l);
-    hands.r = makeHand('r');
-    hands.r.position.set(0.28, -0.26, -0.52);
-    hands.r.rotation.set(-0.5, -0.22, -0.08);
-    camera.add(hands.r);
-    hands.built = true;
-  }
+  function updateHands(dt) {
+    if (!hands.group) return;
+    var speed = Math.sqrt(vel.x * vel.x + vel.z * vel.z);
+    var sprinting = (keys.ShiftLeft || keys.ShiftRight) && speed > WALK * 0.9;
+    var mul = sprinting ? 1.5 : 1;
+    var sx = 0, sy = 0;
+    if (grounded && speed > 0.15) {          // sway synced to the head-bob phase
+      sx = Math.sin(bobPhase) * 0.02 * mul;
+      sy = Math.abs(Math.cos(bobPhase)) * 0.015 * mul;
+    }
+    var breathe = Math.sin(elapsed * 1.7) * 0.004; // idle breath
+    // jump raise (lerped), landing dip shared with the camera
+    var raise = grounded ? 0 : 0.045;
+    hands.jumpY += (raise - hands.jumpY) * Math.min(1, 10 * dt);
+    var dip = dipTimer > 0 ? -DIP_AMP * Math.sin(Math.PI * (dipTimer / DIP_TIME)) : 0;
+    hands.group.position.set(sx, breathe + sy + hands.jumpY + dip, 0);
+    // rotational lag: a world-space quaternion chases the camera at ~12/s;
+    // the group's local rotation is the remaining delta.
+    hands.lag.slerp(camera.quaternion, Math.min(1, 12 * dt));
+    hands.tmpQ.copy(camera.quaternion).invert();
+    hands.group.quaternion.multiplyQuaternions(hands.tmpQ, hands.lag);
 
-  function updateHands(dt){
-    if (!hands.built) return;
+    // §16: fists close on mouse buttons; the grabbing hand reaches out
     var k = Math.min(1, 14 * dt);
     hands.closeL += (hands.targetL - hands.closeL) * k;
     hands.closeR += (hands.targetR - hands.closeR) * k;
-    var apply = function (hand, t, side) {
-      hand.userData.fingers.rotation.x = -0.15 - t * 1.25;
-      hand.userData.thumb.rotation.x = -t * 0.9;
-      // grabbing hand reaches forward + inward
-      var g = (grab && grab.hand === side) ? Math.min(1, grab.t * 2.2) : 0;
-      var baseX = side === 'l' ? -0.28 : 0.28;
-      hand.position.x = baseX + (side === 'l' ? 1 : -1) * 0.14 * g;
-      hand.position.z = -0.52 - 0.26 * g;
-      hand.position.y = -0.26 + 0.08 * g;
-    };
-    apply(hands.l, hands.closeL, 'l');
-    apply(hands.r, hands.closeR, 'r');
+    applyGrip(hands.l, hands.closeL, 'l');
+    applyGrip(hands.r, hands.closeR, 'r');
+  }
+
+  function applyGrip(hand, t, sideKey) {
+    if (!hand || !hand.userData.fingers) return;
+    hand.userData.fingers.rotation.x = t * 1.15;                 // curl closed
+    hand.userData.thumb.rotation.y = hand.userData.thumbYaw * (1 - t * 0.55);
+    var home = hand.userData.home;
+    var reach = (grab && grab.hand === sideKey) ? Math.min(1, grab.t * 2.2) : 0;
+    hand.position.set(
+      home.x - hand.userData.side * 0.14 * reach,  // inward toward center
+      home.y + 0.08 * reach,
+      home.z - 0.26 * reach                        // forward
+    );
   }
 
   // ------------------------------------------------------------- pickups
-  function disposePickup(p){
+  // Small glinting items you take with your hands (spec §16). Config lives in
+  // data/room3d.js `pickups:[{itemId,label,x,y,z}]`.
+  function disposePickup(p) {
     if (p.mesh) {
       if (p.mesh.parent) p.mesh.parent.remove(p.mesh);
       if (p.mesh.geometry) p.mesh.geometry.dispose();
@@ -461,23 +748,24 @@ CHLOE.engine = CHLOE.engine || {};
     }
   }
 
-  function clearPickups(){
+  function clearPickups() {
     for (var i = 0; i < pickups.length; i++) disposePickup(pickups[i]);
     pickups.length = 0;
     pickupHover = null;
     grab = null;
   }
 
-  function buildPickups(){
+  function buildPickups() {
     clearPickups();
     var list = (data && data.pickups) || [];
     for (var i = 0; i < list.length; i++) {
       var d = list[i];
       var mesh = new THREE.Mesh(
         new THREE.BoxGeometry(0.16, 0.1, 0.12),
-        new THREE.MeshStandardMaterial({ color: 0x7a1020, roughness: 0.6,
-          emissive: 0xe5173f, emissiveIntensity: 0.5 }));
+        stdMat({ color: 0x7a1020, roughness: 0.6,
+                 emissive: 0xe5173f, emissiveIntensity: 0.5 }));
       mesh.position.set(d.x, d.y, d.z);
+      mesh.castShadow = false;
       scene.add(mesh);
       var glow = new THREE.Sprite(new THREE.SpriteMaterial({
         map: makeGlowTexture(), transparent: true, opacity: 0.45,
@@ -485,13 +773,13 @@ CHLOE.engine = CHLOE.engine || {};
       glow.scale.set(0.55, 0.55, 1);
       glow.position.set(d.x, d.y, d.z);
       scene.add(glow);
-      pickups.push({ id: d.id || d.itemId, itemId: d.itemId, label: d.label || d.itemId,
+      pickups.push({ itemId: d.itemId, label: d.label || d.itemId,
         mesh: mesh, glow: glow, x: d.x, y: d.y, z: d.z, taken: false });
     }
   }
 
-  function pickupUnderCrosshair(){
-    if (!raycaster) return null;
+  function pickupUnderCrosshair() {
+    if (!raycaster || !pickups.length) return null;
     camera.updateMatrixWorld();
     raycaster.setFromCamera(ZERO2, camera);
     var best = null;
@@ -506,7 +794,7 @@ CHLOE.engine = CHLOE.engine || {};
     return best;
   }
 
-  function tryGrab(side){
+  function tryGrab(side) {
     if (grab) return false;
     var found = pickupUnderCrosshair();
     if (!found) return false;
@@ -515,8 +803,21 @@ CHLOE.engine = CHLOE.engine || {};
     return true;
   }
 
-  function updatePickups(dt){
-    // idle pulse
+  // Deliver the grabbed item (also called from stop(): a battle starting
+  // mid-grab must not eat the item).
+  function finishGrab() {
+    if (!grab) return;
+    var pk = grab.pk, done = grab;
+    grab = null;
+    disposePickup(pk);
+    if (done.hand === 'l') hands.targetL = 0; else hands.targetR = 0;
+    if (onPickupCb) {
+      try { onPickupCb(pk.itemId, pk.label); } catch (e) {}
+    }
+  }
+
+  var GRAB_TARGET = null;
+  function updatePickups(dt) {
     for (var i = 0; i < pickups.length; i++) {
       var p = pickups[i];
       if (p.taken) continue;
@@ -525,34 +826,19 @@ CHLOE.engine = CHLOE.engine || {};
       p.glow.scale.set(s, s, 1);
       p.mesh.rotation.y += dt * 0.8;
     }
-    if (grab) {
-      grab.t = Math.min(1, grab.t + dt / 0.45);
-      var pk = grab.pk;
-      // after the hand extends, the item flies into it
-      var f = Math.max(0, (grab.t - 0.35) / 0.65);
-      if (f > 0 && pk.mesh) {
-        var target = new THREE.Vector3(0, -0.2, -0.6).applyMatrix4(camera.matrixWorld);
-        pk.mesh.position.lerpVectors(new THREE.Vector3(pk.x, pk.y, pk.z), target, f);
-        var sc = 1 - f * 0.7;
-        pk.mesh.scale.set(sc, sc, sc);
-        if (pk.glow) pk.glow.material.opacity = 0.45 * (1 - f);
-      }
-      if (grab.t >= 1) finishGrab();
-    }
-  }
-
-  // Deliver the grabbed item (also called from stop(): a battle starting
-  // mid-grab must not eat the item).
-  function finishGrab(){
     if (!grab) return;
+    grab.t = Math.min(1, grab.t + dt / 0.45);
     var pk = grab.pk;
-    var done = grab;
-    grab = null;
-    disposePickup(pk);
-    if (done.hand === 'l') hands.targetL = 0; else hands.targetR = 0;
-    if (onPickupCb) {
-      try { onPickupCb(pk.itemId, pk.label); } catch (e) {}
+    var f = Math.max(0, (grab.t - 0.35) / 0.65); // item flies to the hand
+    if (f > 0 && pk.mesh) {
+      if (!GRAB_TARGET) GRAB_TARGET = new THREE.Vector3();
+      GRAB_TARGET.set(0, -0.2, -0.6).applyMatrix4(camera.matrixWorld);
+      pk.mesh.position.lerpVectors(new THREE.Vector3(pk.x, pk.y, pk.z), GRAB_TARGET, f);
+      var sc = 1 - f * 0.7;
+      pk.mesh.scale.set(sc, sc, sc);
+      if (pk.glow) pk.glow.material.opacity = 0.45 * (1 - f);
     }
+    if (grab.t >= 1) finishGrab();
   }
 
   // ---------------------------------------------------------------- init
@@ -574,6 +860,7 @@ CHLOE.engine = CHLOE.engine || {};
       disableAPI('WebGL unavailable: ' + e.message); disabled = true; return;
     }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    setupPipeline();
 
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
@@ -593,6 +880,7 @@ CHLOE.engine = CHLOE.engine || {};
     buildEnemy();
     buildHands();
     buildPickups();
+    loadEnvironment();
 
     resetPlayer();
     inited = true;
@@ -605,6 +893,7 @@ CHLOE.engine = CHLOE.engine || {};
     pos.x = sp.x; pos.z = sp.z;
     vel.x = 0; vel.z = 0;
     yaw = sp.yaw || 0; pitch = 0; bobPhase = 0;
+    yOff = 0; vy = 0; grounded = true; jumpQueued = false; dipTimer = 0;
     eyeH = EYE_HEIGHT;
     hands.targetL = 0; hands.targetR = 0;
     camera.position.set(pos.x, eyeH, pos.z);
@@ -615,6 +904,7 @@ CHLOE.engine = CHLOE.engine || {};
   var PREVENT = { ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1, Space: 1 };
 
   function onKeyDown(e) {
+    if (e.code === 'Space' && !keys.Space) jumpQueued = true; // edge, no auto-repeat hop
     keys[e.code] = true;
     if (PREVENT[e.code]) e.preventDefault();
   }
@@ -626,7 +916,22 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   function onMouseMove(e) {
-    if (!isLocked()) return;
+    if (!isLocked()) {
+      // unlocked: remember the mouse point so hover matches the unlocked-click
+      // raycast rule (spec: "on click, the mouse point if unlocked")
+      var r = canvas ? canvas.getBoundingClientRect() : null;
+      if (r && r.width > 0 && r.height > 0 &&
+          e.clientX >= r.left && e.clientX <= r.right &&
+          e.clientY >= r.top && e.clientY <= r.bottom) {
+        if (!mouseNdc) mouseNdc = new THREE.Vector2();
+        mouseNdc.set(((e.clientX - r.left) / r.width) * 2 - 1,
+                     -((e.clientY - r.top) / r.height) * 2 + 1);
+      } else {
+        mouseNdc = null;
+      }
+      return;
+    }
+    mouseNdc = null;
     yaw -= (e.movementX || 0) * SENS;
     pitch -= (e.movementY || 0) * SENS;
     if (pitch > PITCH_MAX) pitch = PITCH_MAX;
@@ -636,21 +941,34 @@ CHLOE.engine = CHLOE.engine || {};
   function onClick(e) {
     if (!running) return;
     if (isLocked()) {
-      if (hovered) fireEngage();
+      if (hovered) fireEngage();       // enemy engage takes priority
+      else if (tvHovered) toggleTv();
       return;
     }
-    // unlocked: allow direct click on the enemy mesh via raycast from the click point
+    // unlocked: allow direct clicks via raycast from the click point —
+    // enemy first (priority), then the TV screen, else request pointer lock
     var r = canvas.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0 && enemy.alive && !enemy.dissolving) {
+    if (r.width > 0 && r.height > 0) {
       ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
       ndc.y = -((e.clientY - r.top) / r.height) * 2 + 1;
       camera.updateMatrixWorld();
-      enemy.mesh.updateMatrixWorld();
       raycaster.setFromCamera(ndc, camera);
-      var hit = raycaster.intersectObject(enemy.mesh, false);
-      if (hit.length && hit[0].distance <= ENGAGE_DIST) { fireEngage(); return; }
+      if (enemy.alive && !enemy.dissolving) {
+        enemy.mesh.updateMatrixWorld();
+        var hit = raycaster.intersectObject(enemy.mesh, false);
+        if (hit.length && hit[0].distance <= ENGAGE_DIST) { fireEngage(); return; }
+      }
+      if (tv.screenMesh) {
+        tv.screenMesh.updateMatrixWorld();
+        var th = raycaster.intersectObject(tv.screenMesh, false);
+        if (th.length && th[0].distance <= TV_DIST) { toggleTv(); return; }
+      }
     }
-    try { canvas.requestPointerLock(); } catch (err) {}
+    try {
+      // modern Chrome returns a promise; swallow rejection (e.g. iframe/test docs)
+      var pl = canvas.requestPointerLock();
+      if (pl && typeof pl.catch === 'function') pl.catch(function () {});
+    } catch (err) {}
   }
 
   function fireEngage() {
@@ -660,17 +978,17 @@ CHLOE.engine = CHLOE.engine || {};
     if (engageCb) engageCb();
   }
 
-  /* LMB closes the left hand, RMB the right (spec §15). A grab starts when
-     the crosshair rests on a glinting item in reach — the item is taken in
-     the motion. The enemy keeps priority on plain left clicks (engage). */
+  /* §16: LMB closes the left hand, RMB the right. While pointer-locked, a
+     click with a glinting item under the crosshair reaches out and takes it —
+     the enemy and the TV keep priority on the left hand (handled in onClick). */
   function onMouseDown(e) {
     if (!running) return;
     var side = e.button === 2 ? 'r' : (e.button === 0 ? 'l' : null);
     if (!side) return;
     if (side === 'l') hands.targetL = 1; else hands.targetR = 1;
-    // grabs only while pointer-locked: unlocked clicks are aim-lock requests,
+    // grabs only while locked: unlocked clicks are aim-lock/raycast requests
     // and the crosshair ray would not match where the user actually clicked
-    if (isLocked() && !(hovered && side === 'l')) tryGrab(side); // engage wins the left hand
+    if (isLocked() && !(side === 'l' && (hovered || tvHovered))) tryGrab(side);
   }
   function onMouseUp(e) {
     var side = e.button === 2 ? 'r' : (e.button === 0 ? 'l' : null);
@@ -745,16 +1063,33 @@ CHLOE.engine = CHLOE.engine || {};
     }
     pos.z = nz;
 
-    // eye height (crouch lerp, spec §15) + head bob scaled by speed
-    var targetEye = crouch ? CROUCH_EYE : EYE_HEIGHT;
-    eyeH += (targetEye - eyeH) * Math.min(1, 10 * dt);
+    // jump / gravity (section 14): Space while grounded only, no double-jump
+    if (jumpQueued) {
+      jumpQueued = false;
+      if (grounded) { vy = JUMP_V; grounded = false; }
+    }
+    if (!grounded) {
+      vy += GRAVITY * dt;
+      yOff += vy * dt;
+      if (yOff <= 0) {                 // landed back at eye height
+        yOff = 0; vy = 0; grounded = true;
+        dipTimer = DIP_TIME;           // landing dip (camera + hands)
+      }
+    }
+    if (dipTimer > 0) dipTimer = Math.max(0, dipTimer - dt);
+
+    // head bob (eye 1.6, amp scales with speed) — only while grounded
     var speed = Math.sqrt(vel.x * vel.x + vel.z * vel.z);
     var bob = 0;
-    if (speed > 0.15) {
+    if (grounded && speed > 0.15) {
       bobPhase += dt * (6 + speed * 1.7);
       bob = Math.sin(bobPhase) * BOB_AMP * (crouch ? 0.5 : 1) * Math.min(1, speed / WALK);
     }
-    camera.position.set(pos.x, eyeH + bob, pos.z);
+    // §16 crouch: eye height lerps between standing and crouched
+    var targetEye = crouch ? CROUCH_EYE : EYE_HEIGHT;
+    eyeH += (targetEye - eyeH) * Math.min(1, 10 * dt);
+    var dip = dipTimer > 0 ? -DIP_AMP * Math.sin(Math.PI * (dipTimer / DIP_TIME)) : 0;
+    camera.position.set(pos.x, eyeH + yOff + bob + dip, pos.z);
     camera.rotation.set(pitch, yaw, 0);
   }
 
@@ -766,7 +1101,7 @@ CHLOE.engine = CHLOE.engine || {};
       enemy.mesh.scale.set(enemy.baseScaleX * (1 - 0.55 * t), enemy.baseScaleY * (1 - 0.35 * t), 1);
       enemy.mat.uniforms.flicker.value = (1 - t) * (0.7 + 0.3 * Math.random());
       enemy.glow.material.opacity = 0.5 * (1 - t);
-      enemy.light.intensity = ((data.lights && data.lights.enemy && data.lights.enemy.intensity) || 0.7) * (1 - t);
+      enemy.light.intensity = enemyLightBase() * (1 - t);
       if (t >= 1) {
         enemy.dissolving = false;
         enemy.mesh.visible = false; enemy.glow.visible = false; enemy.light.visible = false;
@@ -803,7 +1138,7 @@ CHLOE.engine = CHLOE.engine || {};
     enemy.mesh.scale.set(enemy.baseScaleX, enemy.baseScaleY, 1);
     enemy.mesh.position.set(sp.x, enemy.baseY, sp.z);
     enemy.glow.material.opacity = 0.5;
-    enemy.light.intensity = (data.lights && data.lights.enemy && data.lights.enemy.intensity) || 0.7;
+    enemy.light.intensity = enemyLightBase();
   }
 
   function currentEnemyDist() {
@@ -818,22 +1153,32 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   function updateHover() {
-    var was = hovered, wasDist = enemyDist;
+    var was = hovered, wasTv = tvHovered, wasDist = enemyDist;
     enemyDist = currentEnemyDist();
+    camera.updateMatrixWorld();
+    // locked: center crosshair ray; unlocked: the mouse point (same rule as
+    // unlocked clicks), falling back to center when the mouse is off-canvas
+    raycaster.setFromCamera(isLocked() ? ZERO2 : (mouseNdc || ZERO2), camera);
     if (enemy.alive && !enemy.dissolving) {
-      camera.updateMatrixWorld();
       enemy.mesh.updateMatrixWorld();
-      raycaster.setFromCamera(ZERO2, camera);
       var hit = raycaster.intersectObject(enemy.mesh, false);
       hovered = !!(hit.length && hit[0].distance <= ENGAGE_DIST);
     } else {
       hovered = false;
     }
-    if (hoverCb && (hovered !== was || (hovered && Math.abs(enemyDist - wasDist) > 0.05))) {
-      try { hoverCb(hovered, enemyDist); } catch (e) {}
+    // TV hover (section 14) — enemy hover always wins when both would hit
+    tvHovered = false;
+    if (!hovered && tv.screenMesh) {
+      tv.screenMesh.updateMatrixWorld();
+      var th = raycaster.intersectObject(tv.screenMesh, false);
+      tvHovered = !!(th.length && th[0].distance <= TV_DIST);
     }
-    // pickup hover (for the HUD "grab" hint) — enemy hover wins
-    if (!hovered && !grab) {
+    if (hoverCb && (hovered !== was || tvHovered !== wasTv ||
+        (hovered && Math.abs(enemyDist - wasDist) > 0.05))) {
+      try { hoverCb(hovered, enemyDist, tvHovered); } catch (e) {}
+    }
+    // §16 pickup hover for the HUD hint — enemy and TV win
+    if (!hovered && !tvHovered && !grab) {
       var found = pickupUnderCrosshair();
       pickupHover = found ? { itemId: found.pk.itemId, label: found.pk.label, dist: found.dist } : null;
     } else {
@@ -854,12 +1199,17 @@ CHLOE.engine = CHLOE.engine || {};
       }
       ceilLight.intensity += (ceilBase * ceilTarget - ceilLight.intensity) * Math.min(1, 12 * dt);
     }
-    // TV static: texture offset jitter each frame + brightness flicker
-    if (tvScreen.mat) {
-      if (tvScreen.tex) tvScreen.tex.offset.set(Math.random() * 0.5, Math.random() * 0.5);
+    // TV: animated static + bluish flicker + light flicker while ON;
+    // OFF is the static near-black glossy material (nothing to animate)
+    if (tv.on && tv.onMat) {
       var v = 0.75 + 0.35 * Math.random();
-      if (tvScreen.tex) tvScreen.mat.color.setScalar(v);
-      else tvScreen.mat.color.setRGB(0.16 * v, 0.19 * v, 0.22 * v);
+      if (tv.tex) {
+        tv.tex.offset.set(Math.random() * 0.5, Math.random() * 0.5);
+        tv.onMat.color.setRGB(0.8 * v, 0.88 * v, 1.0 * v);  // bluish cast over the static
+      } else {
+        tv.onMat.color.setRGB(0.16 * v, 0.19 * v, 0.24 * v); // no texture: bluish glow flicker
+      }
+      if (tv.light) tv.light.intensity = tv.lightBase * (0.65 + 0.55 * Math.random());
     }
   }
 
@@ -870,9 +1220,9 @@ CHLOE.engine = CHLOE.engine || {};
     lastTime = now;
     elapsed += dt;
     updatePlayer(dt);
+    updateHands(dt);
     updateEnemy(dt);
     updateHover();
-    updateHands(dt);
     updatePickups(dt);
     updateFx(dt);
     try {
@@ -889,6 +1239,7 @@ CHLOE.engine = CHLOE.engine || {};
     if (disabled || !inited || running) return;
     running = true;
     keys = {};
+    jumpQueued = false;
     vel.x = 0; vel.z = 0;
     addListeners();
     W.resize();
@@ -902,8 +1253,9 @@ CHLOE.engine = CHLOE.engine || {};
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     removeListeners();
     keys = {};
+    jumpQueued = false;
     vel.x = 0; vel.z = 0;
-    finishGrab();                       // an in-flight grab still delivers
+    finishGrab();                         // an in-flight grab still delivers
     hands.targetL = 0; hands.targetR = 0; // no fists frozen shut across battles
     if (isLocked()) { try { document.exitPointerLock(); } catch (e) {} }
   };
@@ -920,8 +1272,7 @@ CHLOE.engine = CHLOE.engine || {};
     }
   };
 
-  // Put the player back at the spawn point (used on new-run resets, spec §14).
-  // Pickups respawn with the run.
+  // Put the player back at the spawn point; pickups respawn with the run (§15).
   W.resetPlayer = function () {
     if (disabled || !inited) return;
     resetPlayer();
@@ -933,7 +1284,8 @@ CHLOE.engine = CHLOE.engine || {};
   // Fired when a hand finishes taking an item: cb(itemId, label).
   W.onPickup = function (cb) { onPickupCb = typeof cb === 'function' ? cb : null; };
 
-  // Optional hint hook for the UI ("click to engage" line): cb(hovering, dist)
+  // Optional hint hook for the UI: cb(enemyHovered, enemyDist, tvHovered).
+  // enemyHovered -> "click to engage"; tvHovered -> "TV — click to turn on/off".
   W.onHover = function (cb) { hoverCb = typeof cb === 'function' ? cb : null; };
 
   W.resize = function () {
@@ -953,17 +1305,27 @@ CHLOE.engine = CHLOE.engine || {};
       var c = colliders[i];
       out.push({ kind: c.kind, minX: c.minX, maxX: c.maxX, minZ: c.minZ, maxZ: c.maxZ });
     }
+    var ml = {};
+    for (var id in modelsLoaded) {
+      if (Object.prototype.hasOwnProperty.call(modelsLoaded, id)) ml[id] = modelsLoaded[id];
+    }
     return {
-      x: pos.x, z: pos.z, yaw: yaw, pitch: pitch,
+      x: pos.x, y: eyeH + yOff, z: pos.z, yaw: yaw, pitch: pitch,
       locked: isLocked(),
+      grounded: grounded,
       enemyDist: currentEnemyDist(),
       enemyAlive: enemy.alive,
       enemyHovered: hovered,
+      tvOn: tv.on,
+      tvHover: tvHovered,
+      envMap: envMapOk,
+      handsVisible: hands.visible,
       crouch: !!(keys.ControlLeft || keys.ControlRight || keys.KeyC),
       eye: eyeH,
       pickupHover: pickupHover,
       pickupsLeft: pickups.filter(function (p) { return !p.taken; }).length,
       hands: { l: hands.closeL, r: hands.closeR, grabbing: grab ? grab.hand : null },
+      modelsLoaded: ml,
       colliders: out
     };
   };

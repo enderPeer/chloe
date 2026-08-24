@@ -1,6 +1,7 @@
-/* CHLOE — ui/room3d.js  (Room3D — first-person mode, spec sec 13)
+/* CHLOE — ui/room3d.js  (Room3D — first-person mode, spec sec 13 + 14)
    Owns the #screen-room3d div + HUD: full-viewport canvas, center crosshair
-   (recolors + "click to engage" hint when the enemy is hovered in range),
+   (red + "CLICK TO ENGAGE" when the enemy is hovered in range; white +
+   "TV — click to turn on/off" when the TV is hovered — enemy wins if both),
    top bar (shards / active char level / Menu — reuses the .hud style),
    bottom control-hints line, and the lock overlay shown while the pointer
    is not locked. All Three.js logic lives in CHLOE.engine.world3d; this file
@@ -22,7 +23,9 @@ CHLOE.ui.room3d = (function(){
   var respawnTimer = null;
   var warned = false;
   var ENGAGE_RANGE = 3.5;    // meters (spec sec 13)
+  var TV_RANGE = 2.5;        // meters (spec sec 14)
   var RESPAWN_MS = 15000;
+  var cbHover = null;        // last hover kind from world3d.onHover: 'enemy'|'tv'|null
 
   function world(){ return (CHLOE.engine && CHLOE.engine.world3d) || null; }
   function enemyId(){
@@ -67,15 +70,15 @@ CHLOE.ui.room3d = (function(){
     hud.appendChild(right);
     r.appendChild(hud);
 
-    // center crosshair dot + engage hint
+    // center crosshair dot + interaction hint (enemy / TV)
     els.crosshair = ui.el('div', 'r3d-crosshair');
     r.appendChild(els.crosshair);
-    els.hint = ui.el('div', 'r3d-hint hidden', 'click to engage');
+    els.hint = ui.el('div', 'r3d-hint hidden', 'CLICK TO ENGAGE');
     r.appendChild(els.hint);
 
     // bottom control hints
     els.controls = ui.el('div', 'r3d-controls',
-      'WASD move · mouse look · Ctrl or C crouch · Shift sprint · clicks close your hands · M menu');
+      'WASD move · mouse look · Space jump · Ctrl or C crouch · clicks close your hands · M menu');
     r.appendChild(els.controls);
 
     // lock overlay (informational — clicks pass through to the canvas,
@@ -84,7 +87,7 @@ CHLOE.ui.room3d = (function(){
     var card = ui.el('div', 'r3d-lock-card');
     card.appendChild(ui.el('div', 'r3d-lock-title', 'The Dressing Room'));
     card.appendChild(ui.el('div', 'r3d-lock-line',
-      'Click to look around · WASD move · Ctrl or C crouch · Shift sprint · ESC release · M menu'));
+      'Click to look around · WASD move · Space jump · Ctrl or C crouch · ESC release · M menu'));
     els.overlayLine = card.lastChild;
     els.overlay.appendChild(card);
     r.appendChild(els.overlay);
@@ -116,8 +119,34 @@ CHLOE.ui.room3d = (function(){
   }
 
   /* ---------- HUD poll (crosshair, hint, overlay, HUD, screen watch) ---------- */
+  // world3d hover info distinguishes enemy vs TV (spec sec 14); the debug()
+  // fields and the onHover callback are both consulted so either engine
+  // shape works. Enemy takes priority when both are hovered.
+  function tvHovered(d){
+    if (cbHover === 'tv') return true;
+    if (!d) return false;
+    if (d.tvHover === true || d.hoverTv === true) return true;
+    if (d.hover === 'tv' || d.hoverTarget === 'tv') return true;
+    if (typeof d.tvDist === 'number' && d.tvDist <= TV_RANGE) return true;
+    return false;
+  }
+  function setHint(kind, label){ // 'enemy' | 'tv' | 'item' | null
+    if (els.crosshair) {
+      els.crosshair.classList.toggle('in-range', kind === 'enemy' || kind === 'item');
+      els.crosshair.classList.toggle('tv-range', kind === 'tv');
+    }
+    if (els.hint) {
+      els.hint.classList.toggle('hidden', !kind);
+      els.hint.classList.toggle('tv', kind === 'tv');
+      if (kind) {
+        var text = kind === 'tv' ? 'TV — click to turn on/off'
+                 : (kind === 'item' ? ('take the ' + (label || 'item')) : 'CLICK TO ENGAGE');
+        if (els.hint.textContent !== text) els.hint.textContent = text;
+      }
+    }
+  }
   function poll(){
-    // left the screen through a path we don't control — halt
+    // left the screen through a path we don't control (e.g. logout) — halt
     if (ui.current() !== 'room3d') { pause(); return; }
     if (inBattle) return;
 
@@ -126,17 +155,15 @@ CHLOE.ui.room3d = (function(){
     if (w && typeof w.debug === 'function') {
       try { d = w.debug(); } catch (e) {}
     }
-    // the engine engages on a crosshair raycast, not raw distance — mirror it
-    // (enemyHovered may be absent from older engines: fall back to distance)
-    var hover = !!(d && d.enemyAlive && (typeof d.enemyHovered === 'boolean'
-      ? d.enemyHovered
-      : (typeof d.enemyDist === 'number' && d.enemyDist <= ENGAGE_RANGE)));
-    var pkHover = !hover && d && d.pickupHover;
-    if (els.crosshair) els.crosshair.classList.toggle('in-range', hover || !!pkHover);
-    if (els.hint) {
-      els.hint.textContent = pkHover ? ('take the ' + (d.pickupHover.label || 'item')) : 'click to engage';
-      els.hint.classList.toggle('hidden', !(hover || pkHover));
-    }
+    // world3d only fires engage when the crosshair RAY hits the enemy mesh, so
+    // the hint must follow the real aim signal (cbHover), not distance alone —
+    // otherwise "CLICK TO ENGAGE" shows while clicks do nothing.
+    var enemyHover = cbHover === 'enemy' && !!(d && d.enemyAlive) &&
+                     !(typeof d.enemyDist === 'number' && d.enemyDist > ENGAGE_RANGE);
+    // §16: a glinting item under the crosshair — enemy and TV keep priority
+    var pk = (!enemyHover && !tvHovered(d) && d) ? d.pickupHover : null;
+    setHint(enemyHover ? 'enemy' : (tvHovered(d) ? 'tv' : (pk ? 'item' : null)),
+            pk && pk.label);
     if (els.overlay) els.overlay.classList.toggle('hidden', isLocked());
     refreshHud();
   }
@@ -156,6 +183,7 @@ CHLOE.ui.room3d = (function(){
       try {
         w.init(els.canvas);
         if (typeof w.onEngage === 'function') w.onEngage(engage);
+        if (typeof w.onHover === 'function') w.onHover(onWorldHover);
         if (typeof w.onPickup === 'function') {
           w.onPickup(function(itemId, label){
             var item = (CHLOE.data.items || {})[itemId];
@@ -171,6 +199,25 @@ CHLOE.ui.room3d = (function(){
       }
     }
     return true;
+  }
+
+  /* world3d hover callback — v2 passes a target kind ('enemy'|'tv') either as
+     an extra arg or an object; v1 passed (hovering, dist) for the enemy only.
+     Accept every shape, remember the kind, and refresh the HUD right away. */
+  function onWorldHover(a, b, c){
+    var hovering, kind = null;
+    if (a && typeof a === 'object') {
+      hovering = (a.hovering !== undefined) ? !!a.hovering : !!a.hover;
+      kind = a.kind || a.target || null;
+    } else {
+      hovering = !!a;
+      if (typeof c === 'string') kind = c;
+      else if (typeof b === 'string') kind = b;
+      // engine v2 shape: (enemyHovered:bool, enemyDist:number, tvHovered:bool)
+      else if (c === true && !hovering) { hovering = true; kind = 'tv'; }
+    }
+    cbHover = hovering ? (kind || 'enemy') : null;
+    if (ui && ui.current() === 'room3d' && !inBattle) poll();
   }
 
   function resume(){
@@ -191,6 +238,7 @@ CHLOE.ui.room3d = (function(){
       try { w.stop(); } catch (e) {}
     }
     running = false;
+    cbHover = null; // hover state can't survive a stopped loop
     if (pollTimer) { window.clearInterval(pollTimer); pollTimer = null; }
     releaseLock();
   }
@@ -222,7 +270,7 @@ CHLOE.ui.room3d = (function(){
     }
     inBattle = true;
     pause();
-    // §15: battles happen in the 3D church arena (fallback: 2D battle screen)
+    // §16: battles happen in the 3D church arena (fallback: 2D battle screen)
     if (CHLOE.ui.battle3d && typeof CHLOE.ui.battle3d.begin === 'function') {
       CHLOE.ui.battle3d.begin(id);
     } else {
@@ -242,8 +290,8 @@ CHLOE.ui.room3d = (function(){
     var w = world();
 
     if (result === 'defeat') {
-      // roguelike (spec §14): death ends the run. Reset the room (enemy back,
-      // player at spawn) and start a brand-new level-1 run.
+      // roguelike (spec §15): death ends the run. Reset the room (enemy back,
+      // player at spawn, pickups restored) and start a brand-new level-1 run.
       if (respawnTimer) { window.clearTimeout(respawnTimer); respawnTimer = null; }
       if (w) {
         try {
@@ -257,9 +305,8 @@ CHLOE.ui.room3d = (function(){
     }
 
     if (result === 'victory') {
-      // §11 via §13: beating the room's enemy clears the Room — setting the
-      // flag makes Ash join (party.setFlag hook). Run-scoped: flags reset on
-      // every newGame, so she must be re-earned each run (§14).
+      // §11 via §13: clearing the room's enemy sets roomCleared, which is the
+      // hook that brings Ash into the party. Run-scoped — re-earned each run.
       if (!party.getFlag('roomCleared')) party.setFlag('roomCleared');
       if (w) { try { if (typeof w.setEnemyAlive === 'function') w.setEnemyAlive(false); } catch (e) {} }
       if (respawnTimer) window.clearTimeout(respawnTimer);

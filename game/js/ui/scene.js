@@ -209,7 +209,7 @@ CHLOE.ui.scene = (function(){
     pendingBattleAction = null;
 
     if (result === 'defeat') {
-      // roguelike (spec §14): death ends the run — a fresh one begins
+      // roguelike (spec §15): death ends the run — a fresh one begins
       currentId = null;
       CHLOE.game.startNew();
       ui.toast('The night resets. Everything is gone.');

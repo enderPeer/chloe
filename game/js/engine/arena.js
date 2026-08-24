@@ -1,4 +1,4 @@
-/* CHLOE — engine/arena.js  (Arena battles, spec §15)
+/* CHLOE — engine/arena.js  (Arena battles, spec §16)
    Round-based rules for the 3D church battles. Owns ALL battle math; the 3D
    layer (engine/arena3d.js) only plays visuals and answers "did the strike
    land?", the HUD (ui/battle3d.js) only renders.
@@ -12,8 +12,8 @@
 
    The player's BODY is the active party member: enemy hits land on them.
    When the body falls, the next living member becomes the body. All down ->
-   defeat (roguelike §14: the run ends).
-   Statuses/buildup (§12) do not run in the arena (v1) — documented in §15. */
+   defeat (roguelike §15: the run ends).
+   Statuses/buildup (§12) do not run in the arena (v1) — documented in §16. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.engine = CHLOE.engine || {};
 

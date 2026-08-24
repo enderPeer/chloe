@@ -1,7 +1,7 @@
 /* CHLOE — engine/party.js
    Runtime party state: members, active member, shards, story flags, current
    scene, per-character move loadouts (Combat v2, spec §10.3).
-   Roguelike (spec §14): this state IS the run — nothing is persisted, and
+   Roguelike (spec §15): this state IS the run — nothing is persisted, and
    newGame() is the only way it gets (re)built.
    §11: a new game starts SOLO Chloe. Ash joins when the 'roomCleared' flag is
    set (hooked in setFlag — the battle-end path sets that flag) and, defensively,
@@ -24,7 +24,7 @@ CHLOE.engine.party = (function(){
     loadouts: {},  // charId -> { phaseId: [<=5 moveIds] }  (Combat v2)
     skillPoints: {}, // charId -> unspent skill points        (Progression v3)
     tree: {},        // charId -> [owned nodeIds]             (Progression v3)
-    runStats: { kills: 0 } // this run only — shown on the death panel (§14)
+    runStats: { kills: 0 } // this run only — shown on the death panel (§15)
   };
 
   // scene.js assigns `party.state.scene = id` directly — intercept it so Ash

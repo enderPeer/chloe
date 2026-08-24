@@ -582,11 +582,15 @@ CHLOE.ui.battle = (function(){
       b.appendChild(ui.el('span', null, (def.icon ? def.icon + ' ' : '') + def.name));
       b.appendChild(ui.el('span', 'cost free', 'x' + entry.count));
       b.title = def.desc || '';
+      // revive items must target a FALLEN member — the engine defaults to the
+      // (alive) active member when no target is passed, which can never revive
+      var targetId = null;
       if (def.effect && def.effect.revivePct) {
         var fallen = party.state.members.filter(function(mm){ return mm.hp <= 0; });
         if (!fallen.length) b.disabled = true;
+        else targetId = fallen[0].id;
       }
-      b.addEventListener('click', function(){ if (!playing) doItem(def.id); });
+      b.addEventListener('click', function(){ if (!playing) doItem(def.id, targetId); });
       list.appendChild(b);
     });
     panel.appendChild(list);
@@ -632,9 +636,14 @@ CHLOE.ui.battle = (function(){
     if (playing || isOver()) return;
     play(runEngine('act', moveId));
   }
-  function doItem(itemId){
+  function doItem(itemId, targetId){
     if (playing || isOver()) return;
-    play(runEngine('item', itemId, { type: 'item', id: itemId }));
+    var events = null;
+    try {
+      if (engine && typeof engine.item === 'function') events = engine.item(itemId, targetId);
+      else if (engine && typeof engine.act === 'function') events = engine.act({ type: 'item', id: itemId, targetId: targetId });
+    } catch (e) { console.warn('[CHLOE] battle action failed', e); }
+    play(Array.isArray(events) ? events : []);
   }
   function doSwitch(charId){
     if (playing || isOver()) return;
@@ -657,6 +666,7 @@ CHLOE.ui.battle = (function(){
       playing = false;
       renderMember();
       refreshBars();
+      refreshEnemyBar();
       updatePhaseBadges();
       refreshStatusRows();
       renderCommands();
@@ -716,9 +726,13 @@ CHLOE.ui.battle = (function(){
       }
 
       case 'block': {
+        // kind 'set' = a defense move REGISTERED a block (the engine already
+        // logged the move line) — no "blocked" cue. kind 'hit' = an attack was
+        // actually blocked: float the label; the engine logs 'blocks it!' itself.
+        if (ev.kind === 'set') return 160;
         var anchor = side === 'e' ? els.enemyBox : (els.portrait || els.memberPanel);
         floatLabel(anchor, 'BLOCKED', 'blocked');
-        logLine(ev.text || ((side === 'e' ? enemyName() : activeName()) + ' blocks it!'), 'hot');
+        if (ev.text) logLine(ev.text, 'hot');
         return STEP_MS;
       }
 
@@ -777,9 +791,14 @@ CHLOE.ui.battle = (function(){
       }
 
       case 'heal': { // legacy shape kept working
-        refreshBars();
-        if (side === 'p' && els.portrait) {
-          popNumber(els.portrait, '+' + ev.amount, ev.kind === 'mp' ? 'mp' : 'heal');
+        if (side === 'e') {
+          if (ev.kind !== 'mp') refreshEnemyBar(ev.hpAfter);
+          if (ev.amount) popNumber(els.enemyBox, '+' + ev.amount, ev.kind === 'mp' ? 'mp' : 'heal');
+        } else {
+          refreshBars();
+          if (els.portrait && ev.amount) {
+            popNumber(els.portrait, '+' + ev.amount, ev.kind === 'mp' ? 'mp' : 'heal');
+          }
         }
         return STEP_MS;
       }
@@ -787,11 +806,15 @@ CHLOE.ui.battle = (function(){
       case 'switch':
         renderMember();
         refreshBars();
-        logLine(ev.text || (activeName() + ' steps up!'), 'hot');
+        // the engine already logs 'steps up!' / 'rushes in!' — no fallback line
+        if (ev.text) logLine(ev.text, 'hot');
         return 380;
 
       case 'ko':
-        logLine(ev.text || ((side === 'e' ? enemyName() : activeName()) + ' goes down!'), 'sys');
+        // Player-side KOs are logged by the engine with the RIGHT name (state
+        // has already force-switched, so activeName() here would be wrong).
+        if (ev.text) logLine(ev.text, 'sys');
+        else if (side === 'e') logLine(enemyName() + ' goes down!', 'sys');
         return 300;
 
       case 'end':
@@ -887,7 +910,7 @@ CHLOE.ui.battle = (function(){
       });
       card.appendChild(cont);
     } else {
-      // roguelike (spec §14): death ends the run — show the run summary
+      // roguelike (spec §15): death ends the run — show the run summary
       card.appendChild(ui.el('h2', null, 'The Night Wins'));
       var dl = ui.el('div', 'result-lines');
       dl.appendChild(ui.el('div', null, 'The Backstage Between swallows the stage...'));

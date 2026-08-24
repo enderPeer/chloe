@@ -1,4 +1,4 @@
-/* CHLOE — engine/arena3d.js  (Arena battles, spec §15 — the 3D layer)
+/* CHLOE — engine/arena3d.js  (Arena battles, spec §16 — the 3D layer)
    Owns all Three.js for the church battle arena: loads the church + knight
    GLBs (graceful fallback to procedural geometry when loading fails, e.g.
    over file://), runs the first-person controller (WASD + mouse-look +
@@ -670,7 +670,7 @@ CHLOE.engine = CHLOE.engine || {};
     };
   };
 
-  /* test hooks (spec §13/§15: keyboard-free automated verification) */
+  /* test hooks (spec §13/§16: keyboard-free automated verification) */
   A._teleport = function (x, z) { pos.x = x; pos.z = z; vel.x = 0; vel.z = 0; };
   A._setCrouch = function (b) { crouchForced = !!b; };
 })();

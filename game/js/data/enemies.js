@@ -28,13 +28,14 @@ CHLOE.data.enemies = {
     statusImmune: ['haunt', 'bleed'],         // can't haunt an absence; nothing in it bleeds
     moveset: ['shade_touch', 'dead_air', 'hollow_stare'],
     ai: 'phased',
-    rewards: { xp: 10, shards: 6, drops: [ { itemId: 'bandage', chance: 0.5 } ] },
+    // sage_smoke cures the curse its own shade_touch builds up
+    rewards: { xp: 10, shards: 6, drops: [ { itemId: 'bandage', chance: 0.5 }, { itemId: 'sage_smoke', chance: 0.25 } ] },
     desc: 'A stagehand-shaped absence. It still remembers how to reach for you.'
   },
   hollow_black_knight: {
     id: 'hollow_black_knight', name: 'Hollow Black Knight', image: 'assets/gen/enemy-the-hollow.jpg',
     type: 'occult', element: 'shadow', level: 2, boss: false,
-    /* §15 balance: the chart makes occult take 2x physical — but the black
+    /* §16 balance: the chart makes occult take 2x physical — but the black
        plate blunts that back to neutral (resists override the chart), so a
        solo lvl-1 Chloe who dodges kills it in 4-5 rounds (life 48 / ~12 per
        dead_string); face-tanking its 10-atk patterns (110-170% power) loses.
@@ -44,7 +45,7 @@ CHLOE.data.enemies = {
     statusImmune: ['bleed', 'poisoned'],      // there is nothing inside the armor
     moveset: ['shade_touch', 'dead_air', 'hollow_stare'], // legacy 2D-battle compat
     ai: 'phased',
-    /* §15: in the arena its real offense is the pattern set in data/arena3d.js
+    /* §16: in the arena its real offense is the pattern set in data/arena3d.js
        (slash/overhead/charge) — dodge or eat pattern.power% of atk. */
     rewards: { xp: 16, shards: 12, drops: [ { itemId: 'bandage', chance: 0.5 }, { itemId: 'tourniquet', chance: 0.25 } ] },
     desc: 'Empty plate armor that still keeps its vigil. The church remembers who it buried.'

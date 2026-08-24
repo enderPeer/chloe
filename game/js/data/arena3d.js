@@ -1,5 +1,5 @@
 /* CHLOE — data/arena3d.js
-   Config for the 3D battle arena (spec §15): the old church where every
+   Config for the 3D battle arena (spec §16): the old church where every
    battle happens. Pure data: model paths, spawns, bounds, light rig, and the
    knight's attack patterns (telegraph time + hit volume + how to evade).
    Consumed by engine/arena3d.js (visuals/hit tests) and ui/battle3d.js
