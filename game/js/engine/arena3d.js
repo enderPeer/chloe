@@ -46,20 +46,30 @@ CHLOE.engine = CHLOE.engine || {};
     A.spawnSquad = noop; A.squadSize = function () { return 1; };
     A.abilityTargets = function () { return [0]; };   // headless: always connect
     A.abilityHits = function () { return true; };
-    A.abilityHitsBench = function () { return false; };
-    A.benchDebug = function () { return []; };
     A.nearestKnightDist = function () { return 2; };
     A.releaseLock = noop; A.allowLock = noop; A.isLocked = function () { return false; };
     A.assetsReady = function () { return true; };     // nothing to wait for
     A.assetProgress = function () { return { done: 1, total: 1, warm: true }; };
     A._renderOnce = function () { return false; };
     A._look = noop; A._tick = noop;
+    A._simKnight = function () { return null; };   // §22 headless AI probe
+    /* §22 stagger surface. `staggerMult` is read by the damage side to price
+       a punish window, so the dead API must answer 1 — a missing multiplier
+       that comes back undefined multiplies damage into NaN. */
+    A.staggerMult = function () { return 1; };
+    A.isStaggered = function () { return false; };
+    A.taunt = noop;
   }
 
   if (!window.THREE) { disableAPI('THREE not found'); return; }
 
   // ---------------------------------------------------------------- constants
   var RADIUS = 0.35;
+  /* §22: the knight is a 2.15m armoured body, not a camera. He probes the
+     navgrid with his OWN footprint so he cannot thread a gap the player
+     barely fits through. Overridable from data (`knight.bodyRadius`) if the
+     model is ever swapped; keep it under 0.6 — see navFree for why. */
+  var KNIGHT_RADIUS = 0.55;
   var WALK = 3.2, SPRINT = 5.4, CROUCH_SPEED = 0.55;
   var ACCEL_LERP = 10;
   var TURN_RATE = 100 * Math.PI / 180;
@@ -114,10 +124,24 @@ CHLOE.engine = CHLOE.engine || {};
          wind-up. Routine once a squad is 3+. Explicit arming replaces it. */
       swinging: false, swingT: 0, swingDur: 1, recoverDur: 1,
       swingKind: 'overhead',
+      /* §22: a pattern can land SEVERAL hits (thrust_combo) and can LIE about
+         when (feint). `sched` is every hit time in seconds off atk.t0 on the
+         UN-HELD clock, so the pose reads one window at a time and the impact
+         frame of each stays p = 1.0; `feintHold` is the apex pause the strike
+         timers were pushed back by. Single-hit patterns keep sched = [swingDur]
+         and behave exactly as they did in §21. */
+      sched: null, feintHold: 0,
+      turnErr: 0,                // yaw error, for the planted turnInPlace pose
       dash: 0, dashCd: 0, dashDir: { x: 0, z: 1 }
     },
+    /* §22 brain: the movement state machine, its timers and this knight's
+       personality. Built lazily by brainOf() because the leader is on the
+       floor and walking before spawnSquad ever runs. */
+    brain: null,
+    staggerMeter: 0,     // §22 buildup; decays at brain.staggerDecay per second
+    dropped: null,       // §22 death: sword pieces taken out of his hand
     // §20 per-knight attack window (battle3d schedules these staggered)
-    atk: { mode: 'idle', pattern: null, cb: null, t0: 0, strikeTimer: null,
+    atk: { mode: 'idle', pattern: null, cb: null, t0: 0, timers: [], hits: null,
            lockDir: { x: 0, z: 1 }, lunge: 0 }
   }; }
   var knight = makeKnightState();
@@ -294,6 +318,10 @@ CHLOE.engine = CHLOE.engine || {};
         nav = loadShippedNav();
         if (!nav) console.warn('[arena3d] no baked navgrid for this church — ' +
                                'falling back to the bounds rectangle. Re-run A._bakeExport().');
+        /* §22: measure the open floor the moment the grid lands. One console
+           line, so a bake or a probe change that shrinks the nave shows up in
+           the log of the very next run instead of as "it feels cramped". */
+        measureArena();
       } catch (e) {
         console.warn('[arena3d] church setup failed — fallback nave', e);
         if (!churchFallback) churchFallback = buildFallbackChurch();
@@ -618,6 +646,11 @@ CHLOE.engine = CHLOE.engine || {};
         knights.push(k);
       }
       k.alive = true;
+      /* §22: a fresh brain per knight, per round — the personality is dealt
+         HERE, so a squad is a mix of fighters rather than one temperament
+         wearing N bodies, and last round's stagger meter never carries over. */
+      initBrain(k, i);
+      restoreSword(k);
       k.anim.dashCd = i * 1.2;          // stagger their dashes
       // fan them out across the nave in front of the altar
       /* Fan the squad ACROSS the approach, not along a fixed axis, so the
@@ -629,7 +662,7 @@ CHLOE.engine = CHLOE.engine || {};
       var off = (i - (n - 1) / 2) * spread;
       var sx = bx + px2 * off + (ax / al) * -Math.abs(off) * 0.35;
       var sz = bz + pz2 * off + (az / al) * -Math.abs(off) * 0.35;
-      var spot = navNearest(sx, sz);
+      var spot = navNearest(sx, sz, KNIGHT_RADIUS);
       k.group.position.set(spot.x, 0, spot.z);
       k.group.visible = true;
       faceKnightTo(k, pos.x, pos.z);
@@ -671,12 +704,16 @@ CHLOE.engine = CHLOE.engine || {};
      hard-assigned every frame, so strafing around him snapped his whole body
      — sword mid-flight included — from one heading to the next. Shortest-angle
      wrap, or crossing +/-PI spins him the long way round. */
-  function easeYaw(k, target, dt) {
+  /* §22: `rate` is the brain's turnRate — an exponential approach rate, not a
+     hard angular cap. A cap would put a constant angular velocity back on the
+     body and undo exactly what §21 bought; easing at a LOWER rate is what
+     makes `recover` read as "he cannot get round in time". */
+  function easeYaw(k, target, dt, rate) {
     if (!k || !k.group) return;
     var d = target - k.group.rotation.y;
     while (d > Math.PI) d -= Math.PI * 2;
     while (d < -Math.PI) d += Math.PI * 2;
-    k.group.rotation.y += d * alpha(9, dt);
+    k.group.rotation.y += d * alpha(rate == null ? 9 : rate, dt);
     k.baseRot = target;
   }
 
@@ -880,170 +917,6 @@ CHLOE.engine = CHLOE.engine || {};
       console.warn('[arena3d] punch.glb failed to load — no first-person arms');
     });
   }
-
-  // ------------------------------------------------------- §19 church benches
-  var benches = [];   // [{group, x, z, rotY, alive, vx, vz, hp}]
-
-  /* Dark oak with real grain. A FLAT matte colour does not survive this
-     scene: between the ambient, the hemisphere, two directionals and the
-     candle points, the combined irradiance drives any untextured diffuse
-     surface to near-white after tone mapping - dark brown benches came out
-     the colour of cream. Grain gives the eye detail to read and keeps the
-     average albedo low enough to stay wood. */
-  var woodTex = null;
-  function woodTexture() {
-    if (woodTex) return woodTex;
-    var c = document.createElement('canvas');
-    c.width = 256; c.height = 256;
-    var g = c.getContext('2d');
-    g.fillStyle = '#231810';
-    g.fillRect(0, 0, 256, 256);
-    for (var i = 0; i < 220; i++) {
-      var y = Math.random() * 256;
-      var dark = Math.random() < 0.5;
-      g.strokeStyle = dark ? 'rgba(10,6,4,0.55)' : 'rgba(64,45,30,0.35)';
-      g.lineWidth = 0.6 + Math.random() * 2.2;
-      g.beginPath();
-      g.moveTo(0, y);
-      // gently wandering grain lines rather than dead-straight stripes
-      for (var x = 0; x <= 256; x += 32) {
-        g.lineTo(x, y + Math.sin((x + i * 13) * 0.03) * 3.5);
-      }
-      g.stroke();
-    }
-    for (var k = 0; k < 9; k++) {           // knots
-      var kx = Math.random() * 256, ky = Math.random() * 256;
-      var r = 3 + Math.random() * 7;
-      var rg = g.createRadialGradient(kx, ky, 1, kx, ky, r);
-      rg.addColorStop(0, 'rgba(8,5,3,0.85)');
-      rg.addColorStop(1, 'rgba(8,5,3,0)');
-      g.fillStyle = rg;
-      g.beginPath(); g.arc(kx, ky, r, 0, Math.PI * 2); g.fill();
-    }
-    woodTex = new THREE.CanvasTexture(c);
-    if (THREE.sRGBEncoding !== undefined) woodTex.encoding = THREE.sRGBEncoding;
-    woodTex.wrapS = woodTex.wrapT = THREE.RepeatWrapping;
-    woodTex.repeat.set(2, 1);
-    return woodTex;
-  }
-
-  function woodMat() {
-    var m = new THREE.MeshStandardMaterial({
-      color: 0x6a6a6a,          // tints the map down; the grain carries the hue
-      map: woodTexture(),
-      roughness: 0.98,
-      metalness: 0
-    });
-    // the arena keys are bright; unclamped IBL turns dark oak into white plastic
-    m.envMapIntensity = 0.08;
-    m.userData.envClamp = 0.08;   // survives applyEnvIntensity when the HDRI lands
-    return m;
-  }
-
-  function buildBenches() {
-    var list = D().benches || [];
-    var b = D().bench || { w: 2.0, h: 0.85, d: 0.55 };
-    for (var i = 0; i < list.length; i++) {
-      var d = list[i];
-      var g = new THREE.Group();
-      var mat = woodMat();
-      // seat + back + two legs — reads as a pew at fight distance
-      var seat = new THREE.Mesh(new THREE.BoxGeometry(b.w, 0.1, b.d), mat);
-      seat.position.y = b.h * 0.55;
-      g.add(seat);
-      var back = new THREE.Mesh(new THREE.BoxGeometry(b.w, b.h * 0.5, 0.08), mat);
-      back.position.set(0, b.h * 0.8, -b.d * 0.45);
-      g.add(back);
-      var legGeo = new THREE.BoxGeometry(0.12, b.h * 0.55, b.d * 0.9);
-      var l1 = new THREE.Mesh(legGeo, mat); l1.position.set(-b.w * 0.42, b.h * 0.27, 0); g.add(l1);
-      var l2 = new THREE.Mesh(legGeo, mat); l2.position.set(b.w * 0.42, b.h * 0.27, 0); g.add(l2);
-      g.traverse(function (o) { if (o.isMesh) { o.castShadow = false; o.receiveShadow = true; } });
-      g.position.set(d.x, 0, d.z);
-      g.rotation.y = d.rotY || 0;
-      scene.add(g);
-      benches.push({ group: g, mat: mat, x: d.x, z: d.z, rotY: d.rotY || 0,
-                     alive: true, vx: 0, vz: 0, hp: (D().bench || {}).hp || 1,
-                     debris: null });
-    }
-  }
-
-  /* Break a bench: it collapses into a flat wood pile that stays on the floor. */
-  function breakBench(bn) {
-    if (!bn.alive) return;
-    bn.alive = false;
-    var b = D().bench || { w: 2.0, d: 0.55 };
-    var pile = new THREE.Group();
-    var mat = woodMat();
-    for (var i = 0; i < 7; i++) {
-      var len = (0.5 + Math.random() * 0.8) * (b.w / 2);
-      var plank = new THREE.Mesh(new THREE.BoxGeometry(len, 0.07, 0.14), mat);
-      plank.position.set((Math.random() - 0.5) * b.w * 0.7, 0.035 + Math.random() * 0.06,
-                         (Math.random() - 0.5) * b.d * 1.4);
-      plank.rotation.y = Math.random() * Math.PI;
-      plank.rotation.z = (Math.random() - 0.5) * 0.25;
-      pile.add(plank);
-    }
-    pile.position.set(bn.group.position.x, 0, bn.group.position.z);
-    pile.rotation.y = bn.group.rotation.y;
-    scene.add(pile);
-    bn.debris = pile;
-    scene.remove(bn.group);
-  }
-
-  /* Standing benches are soft obstacles: they slow you and slide away. Returns
-     the speed multiplier to apply this frame. */
-  function benchPush(nx, nz, dt) {
-    var cfgB = D().bench || {};
-    var b = { w: cfgB.w || 2.0, d: cfgB.d || 0.55 };
-    var slow = 1;
-    for (var i = 0; i < benches.length; i++) {
-      var bn = benches[i];
-      if (!bn.alive) continue;
-      var dx = nx - bn.group.position.x, dz = nz - bn.group.position.z;
-      var reach = Math.max(b.w, b.d) * 0.5 + RADIUS;
-      var dist = Math.sqrt(dx * dx + dz * dz);
-      if (dist < reach && dist > 0.0001) {
-        slow = Math.min(slow, cfgB.slowFactor || 0.45);
-        // shove it along the contact normal
-        var push = (cfgB.pushSpeed || 1.9) * dt * (1 - dist / reach);
-        bn.group.position.x += (dx / dist) * push;
-        bn.group.position.z += (dz / dist) * push;
-        bn.group.rotation.y += push * 0.35;
-        // keep shoved benches inside the nave
-        var bd = D().arena && D().arena.bounds;
-        if (bd) {
-          bn.group.position.x = Math.max(bd.minX, Math.min(bd.maxX, bn.group.position.x));
-          bn.group.position.z = Math.max(bd.minZ, Math.min(bd.maxZ, bn.group.position.z));
-        }
-      }
-    }
-    return slow;
-  }
-
-  /* Did this ability's swing catch a bench? Called alongside the knight test
-     so a wild swing still breaks the furniture. */
-  A.abilityHitsBench = function (ability) {
-    var broke = [];
-    var fx = -Math.sin(yaw), fz = -Math.cos(yaw);
-    var halfArc = Math.cos(((ability.arc || 60) / 2) * Math.PI / 180);
-    for (var i = 0; i < benches.length; i++) {
-      var bn = benches[i];
-      if (!bn.alive) continue;
-      var dx = bn.group.position.x - pos.x, dz = bn.group.position.z - pos.z;
-      var dist = Math.sqrt(dx * dx + dz * dz);
-      if (dist > (ability.range || 2.5) + 0.6 || dist < 0.0001) continue;
-      if ((dx * fx + dz * fz) / dist < halfArc) continue;
-      bn.hp -= 1;
-      if (bn.hp <= 0) { breakBench(bn); broke.push(i); }
-    }
-    return broke.length;
-  };
-
-  A.benchDebug = function () {
-    return benches.map(function (b) {
-      return { alive: b.alive, x: +b.group.position.x.toFixed(2), z: +b.group.position.z.toFixed(2) };
-    });
-  };
 
   // --------------------------------------------- §18 hand sign + fire tornado
   var sign = { hand: null, rune: null, t: 0, active: false };
@@ -1546,6 +1419,15 @@ CHLOE.engine = CHLOE.engine || {};
       if (dist > (ability.range || 2.5) || dist < 0.0001) continue;
       if ((dx * fx + dz * fz) / dist >= halfArc) out.push(i);
     }
+    /* §22: a swing that catches nobody is the other thing he taunts at. This
+       is a query with a side effect, which is not free — but the alternative
+       is every caller of a hit test remembering to report the whiff, and the
+       whiff is exactly what the engine already knows and the caller does not.
+       The roll is brain.tauntChance and only a free knight takes it. */
+    if (!out.length) {
+      var near = nearestKnight();
+      if (near) A.taunt(knights.indexOf(near));
+    }
     return out;
   };
   A.abilityHits = function (ability) { return A.abilityTargets(ability).length > 0; };
@@ -1577,6 +1459,7 @@ CHLOE.engine = CHLOE.engine || {};
     if (!canvasEl) { disableAPI('init without canvas'); disabled = true; return; }
     canvas = canvasEl;
     cfg = D();
+    if (cfg.knight && cfg.knight.bodyRadius) KNIGHT_RADIUS = cfg.knight.bodyRadius;
 
     try {
       renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
@@ -1607,11 +1490,15 @@ CHLOE.engine = CHLOE.engine || {};
     camera.rotation.order = 'YXZ';
 
     buildLights();
+    /* One shockwave ring up front so the §21 warm-up pass actually draws it.
+       Built lazily it would be a new material compiled and uploaded on the
+       frame of the first ground_slam, which is the exact hitch §21 exists to
+       kill; the pool grows from here if two knights slam at once. */
+    makeShock();
     loadEnvironment();
     loadChurch();
     loadKnight();
     loadFirstPerson();
-    buildBenches();
     loadHandSign();
     loadTornado();
     loadAsteroid();
@@ -1643,10 +1530,23 @@ CHLOE.engine = CHLOE.engine || {};
       kk.anim.swingT = 0;
       kk.anim.dash = 0;
       kk.anim.dashCd = ki * 1.2;
+      kk.anim.sched = null;
+      kk.anim.feintHold = 0;
       kk.bob = 0;
+      /* §22: everything death touched has to come back too — the blade out of
+         his hand, the transparency the fade left on his plate, and the brain
+         itself (a knight who reset while staggered would spawn reeling). */
+      restoreSword(kk);
+      for (var mi = 0; mi < kk.mats.length; mi++) {
+        kk.mats[mi].opacity = 1;
+        kk.mats[mi].transparent = false;
+        kk.mats[mi].depthWrite = true;
+      }
+      initBrain(kk, ki);
       // put every pivot back at rest, or last round's chop comes back with him
       if (kk.rig) { for (var rk in kk.rig) kk.rig[rk].rotation.set(0, 0, 0); }
     }
+    for (var sh = 0; sh < shocks.length; sh++) shocks[sh].mesh.visible = false;
     if (camera) {
       camera.position.set(pos.x, eyeH, pos.z);
       camera.rotation.set(pitch, yaw, 0);
@@ -1718,11 +1618,11 @@ CHLOE.engine = CHLOE.engine || {};
      stone instead of stopping you dead. */
   var nav = null;   // {cell,minX,minZ,nx,nz,data:Uint8Array}
 
-  /* The model's pews are baked into merged meshes and cannot be split
-     (§19), so they are scenery, not collision - the interactive benches in
-     data/arena3d.js are the gameplay stand-in. Left in the navgrid they
-     also break it: the rows are thinner than the 0.4m grid, so cell centres
-     land half on seat and half on aisle and the floor comes out speckled. */
+  /* The model's pews are baked into merged meshes and cannot be split,
+     so they stay pure scenery - after §22 nothing in the nave is solid but
+     stone. Left in the navgrid they also break it: the rows are thinner
+     than the 0.4m grid, so cell centres land half on seat and half on aisle
+     and the floor comes out speckled. */
   function isPew(o) {
     var m = o.material;
     if (!m) return false;
@@ -1812,41 +1712,142 @@ CHLOE.engine = CHLOE.engine || {};
     for (var m = 0; m < g.data.length; m++) g.data[m] = (g.data[m] === 2) ? 1 : 0;
   }
 
-  /* Can a body of RADIUS stand centred here? Samples the disc, not a point,
-     so you cannot clip a shoulder through a corner. */
-  function navFree(x, z) {
+  /* Is one grid point open? The rounding IS containment: the grid points are
+     the cell centres, so nearest-centre and "which cell am I in" agree. */
+  function navPoint(g, x, z) {
+    var i = Math.round((x - g.minX) / g.cell);
+    var j = Math.round((z - g.minZ) / g.cell);
+    if (i < 0 || i >= g.nx || j < 0 || j >= g.nz) return false;
+    return !!g.data[i * g.nz + j];
+  }
+
+  /* Can a body of `radius` stand centred here? Centre must be open, plus at
+     least 3 of the 4 rim points.
+     §22, and the reason the nave felt like a corridor: this used to probe
+     RADIUS*0.8 for EVERY body and demand all five points, so a single
+     blocked rim sample - the far side of a pillar, one speckled cell in a
+     doorway, the lip of the altar step - read as a wall. Doorway-width gaps
+     came out impassable and a knight who brushed stone could wedge. Measured
+     on the shipped grid: all-5 leaves 1319 reachable cells (211 m²),
+     centre+3-of-4 leaves 1539 (246.2 m²) of the 1563 the bake found.
+     Each body now passes its OWN radius, because the knight is wider than
+     the player and must not squeeze through gaps he visibly cannot.
+     Watch the resolution: the baked cell is 0.4m, so any radius from ~0.2 to
+     ~0.59 samples the IMMEDIATE neighbour cell and the two bodies test the
+     same footprint. Past 0.6 the rim rounds two cells out and would skip the
+     neighbour entirely - if a body ever needs a radius that big, probe the
+     intermediate ring too rather than just raising the number. */
+  function navFree(x, z, radius) {
     if (!nav) return true;
-    var g = nav, r = RADIUS * 0.8;
-    var pts = [[0, 0], [r, 0], [-r, 0], [0, r], [0, -r]];
-    for (var p = 0; p < pts.length; p++) {
-      var i = Math.round((x + pts[p][0] - g.minX) / g.cell);
-      var j = Math.round((z + pts[p][1] - g.minZ) / g.cell);
-      if (i < 0 || i >= g.nx || j < 0 || j >= g.nz) return false;
-      if (!g.data[i * g.nz + j]) return false;
-    }
-    return true;
+    var g = nav, r = (radius == null ? RADIUS : radius);
+    if (!navPoint(g, x, z)) return false;
+    var open = 0;
+    if (navPoint(g, x + r, z)) open++;
+    if (navPoint(g, x - r, z)) open++;
+    if (navPoint(g, x, z + r)) open++;
+    if (navPoint(g, x, z - r)) open++;
+    return open >= 3;
   }
 
   /* Nearest cell a body can actually stand in, searched outward in rings.
      Spawn points in data/ were authored against the old rectangle, so some
      of them sit inside the rood screen; this walks them out to real floor. */
-  function navNearest(x, z) {
-    if (!nav || navFree(x, z)) return { x: x, z: z };
+  function navNearest(x, z, radius) {
+    if (!nav || navFree(x, z, radius)) return { x: x, z: z };
     var step = nav.cell;
     for (var r = 1; r <= 30; r++) {
       for (var a = -r; a <= r; a++) {
         for (var b = -r; b <= r; b++) {
           if (Math.abs(a) !== r && Math.abs(b) !== r) continue;   // ring only
           var nx2 = x + a * step, nz2 = z + b * step;
-          if (navFree(nx2, nz2)) return { x: nx2, z: nz2 };
+          if (navFree(nx2, nz2, radius)) return { x: nx2, z: nz2 };
         }
       }
     }
     return { x: x, z: z };
   }
 
+  /* §22 verification: flood the walkable region that actually contains the
+     player spawn and keep the measurement, so "the nave is open" is a number
+     in debug() instead of an opinion. Two readings, because they answer
+     different questions:
+       cells/m2/bbox - the raw baked floor connected to the spawn. This is
+         what `arena.bounds` in data was authored from; if it drifts, the
+         church or the bake moved and the data box is stale.
+       stand{} - the cells a BODY of that radius can legally occupy under
+         navFree. Always smaller than the raw region (a body cannot stand in
+         a one-cell doorway spur), and it is the number that regresses if
+         someone tightens the probe again. */
+  var arenaArea = null;
 
-  var benchSlow = 1;   // §19: set by benchPush each frame
+  function floodMeasure(test) {
+    var g = nav;
+    var sp = cfgSpawn();
+    var si = Math.round((sp.x - g.minX) / g.cell), sj = Math.round((sp.z - g.minZ) / g.cell);
+    var seed = -1, r, a, b, i, j;
+    for (r = 0; r < 8 && seed < 0; r++) {
+      for (a = -r; a <= r && seed < 0; a++) {
+        for (b = -r; b <= r && seed < 0; b++) {
+          i = si + a; j = sj + b;
+          if (i >= 0 && i < g.nx && j >= 0 && j < g.nz && test(i, j)) seed = i * g.nz + j;
+        }
+      }
+    }
+    if (seed < 0) return null;
+    var seen = new Uint8Array(g.nx * g.nz);
+    var stack = [seed];
+    seen[seed] = 1;
+    var cells = 0, minI = g.nx, maxI = -1, minJ = g.nz, maxJ = -1;
+    var nb = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    while (stack.length) {
+      var k = stack.pop(), ci = (k / g.nz) | 0, cj = k % g.nz;
+      cells++;
+      if (ci < minI) minI = ci;
+      if (ci > maxI) maxI = ci;
+      if (cj < minJ) minJ = cj;
+      if (cj > maxJ) maxJ = cj;
+      for (var n = 0; n < 4; n++) {
+        var ai = ci + nb[n][0], aj = cj + nb[n][1];
+        if (ai < 0 || ai >= g.nx || aj < 0 || aj >= g.nz) continue;
+        var idx = ai * g.nz + aj;
+        if (seen[idx]) continue;
+        if (!test(ai, aj)) continue;
+        seen[idx] = 1;
+        stack.push(idx);
+      }
+    }
+    return { cells: cells, m2: +(cells * g.cell * g.cell).toFixed(1),
+             minX: +(g.minX + minI * g.cell).toFixed(2),
+             maxX: +(g.minX + maxI * g.cell).toFixed(2),
+             minZ: +(g.minZ + minJ * g.cell).toFixed(2),
+             maxZ: +(g.minZ + maxJ * g.cell).toFixed(2) };
+  }
+
+  function measureArena() {
+    arenaArea = null;
+    if (!nav) return null;
+    var g = nav;
+    function wx(i) { return g.minX + i * g.cell; }
+    function wz(j) { return g.minZ + j * g.cell; }
+    var raw = floodMeasure(function (i, j) { return !!g.data[i * g.nz + j]; });
+    if (!raw) {
+      console.warn('[arena3d] player spawn is not on the navgrid — arenaArea unmeasured');
+      return null;
+    }
+    raw.stand = {
+      player: floodMeasure(function (i, j) { return navFree(wx(i), wz(j), RADIUS); }),
+      knight: floodMeasure(function (i, j) { return navFree(wx(i), wz(j), KNIGHT_RADIUS); })
+    };
+    arenaArea = raw;
+    var ps = raw.stand.player, ks = raw.stand.knight;
+    console.info('[arena3d] arenaArea ' + raw.cells + ' cells / ' + raw.m2 + ' m²' +
+                 ' x[' + raw.minX + ',' + raw.maxX + '] z[' + raw.minZ + ',' + raw.maxZ + ']' +
+                 ' — standable player ' + (ps ? ps.cells + '/' + ps.m2 + ' m²' : 'none') +
+                 ', knight ' + (ks ? ks.cells + '/' + ks.m2 + ' m²' : 'none'));
+    return arenaArea;
+  }
+
+
   function updatePlayer(dt) {
     var f = ((keys.KeyW || keys.ArrowUp) ? 1 : 0) - ((keys.KeyS || keys.ArrowDown) ? 1 : 0);
     var s = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
@@ -1863,7 +1864,6 @@ CHLOE.engine = CHLOE.engine || {};
     }
     var spd = sprinting ? SPRINT : WALK;
     if (crouch) spd *= CROUCH_SPEED;
-    spd *= benchSlow;
     var tx = 0, tz = 0;
     if (f || s) {
       var len = Math.sqrt(f * f + s * s); f /= len; s /= len;
@@ -1916,9 +1916,21 @@ CHLOE.engine = CHLOE.engine || {};
     if (nav) {
       /* §20: the baked stone is the arena. Resolving one axis at a time
          lets you slide along a wall or the altar instead of sticking. */
-      if (!navFree(pos.x, prevZ)) pos.x = prevX;
-      if (!navFree(pos.x, pos.z)) pos.z = prevZ;
-      if (!navFree(pos.x, pos.z)) { pos.x = prevX; pos.z = prevZ; }
+      if (!navFree(pos.x, prevZ, RADIUS)) pos.x = prevX;
+      if (!navFree(pos.x, pos.z, RADIUS)) pos.z = prevZ;
+      if (!navFree(pos.x, pos.z, RADIUS)) {
+        /* Both axes blocked. Falling back to where you stood is only a fix
+           when THAT was legal — and it often is not: the knight personal-space
+           push below runs AFTER this clamp and can shove you into stone, and a
+           test hook can teleport you anywhere. Then every later frame reverts
+           to the same illegal cell and you are wedged for the rest of the
+           fight. §22: walk out to real floor instead of freezing. */
+        if (navFree(prevX, prevZ, RADIUS)) { pos.x = prevX; pos.z = prevZ; }
+        else {
+          var pOut = navNearest(pos.x, pos.z, RADIUS);
+          pos.x = pOut.x; pos.z = pOut.z;
+        }
+      }
     } else if (ar.bounds) {
       pos.x = Math.max(ar.bounds.minX + RADIUS, Math.min(ar.bounds.maxX - RADIUS, pos.x));
       pos.z = Math.max(ar.bounds.minZ + RADIUS, Math.min(ar.bounds.maxZ - RADIUS, pos.z));
@@ -1931,8 +1943,6 @@ CHLOE.engine = CHLOE.engine || {};
         pos.z = (ar.cz || 0) + dz / d * maxR;
       }
     }
-    // benches are soft: pushing through one slows you and shoves it aside
-    benchSlow = benchPush(pos.x, pos.z, dt);
     /* §20: every living knight has personal space, so a squad cannot be
        walked through and cannot all stack on the same tile. */
     var minD = (ar.knightMinDist || 1.3);
@@ -1964,7 +1974,13 @@ CHLOE.engine = CHLOE.engine || {};
   function clearAttack(k) {
     if (!k) { for (var i = 0; i < knights.length; i++) clearAttack(knights[i]); return; }
     var atk = k.atk;
-    if (atk.strikeTimer) { window.clearTimeout(atk.strikeTimer); atk.strikeTimer = null; }
+    /* §22: a pattern can own SEVERAL strike timers now (thrust_combo's three
+       windows). Dropping one and leaving the rest armed is how a knight who
+       has been killed, or staggered out of his swing, still stabs you twice. */
+    for (var ti = 0; ti < atk.timers.length; ti++) window.clearTimeout(atk.timers[ti]);
+    atk.timers.length = 0;
+    atk.hits = null;
+    atk.lunge = 0;
     atk.mode = 'idle'; atk.pattern = null; atk.cb = null;
     /* Release the RIG too. This used to clear model.rotation.x/z - which
        nothing has written since the tilts moved onto the pivots - and leave
@@ -1977,16 +1993,46 @@ CHLOE.engine = CHLOE.engine || {};
 
   /* Play one telegraphed attack. cb({hit, pattern}) fires at the strike
      moment (setTimeout — deterministic even when rAF is throttled). */
+  /* §22: one pattern can land several hits, and can LIE about when.
+     `hits` is the schedule in data (thrust_combo: two jabs then a step-through
+     at 1100/1400/1850ms off atk.t0); a `feint` roll stops the wind-up at the
+     apex for holdMs and pushes every strike time back by it, which is what
+     makes "a feint must never damage during the hold" true BY CONSTRUCTION
+     rather than by a guard someone can forget to write.
+     Times come back in seconds, on the un-held clock, plus the hold to add. */
+  function hitSchedule(pattern, holdS) {
+    var out = [], i, h;
+    if (pattern.hits && pattern.hits.length) {
+      for (i = 0; i < pattern.hits.length; i++) {
+        h = pattern.hits[i];
+        out.push({ at: (h.atMs != null ? h.atMs : (pattern.telegraphMs || 1500)) / 1000,
+                   power: h.power != null ? h.power : pattern.power,
+                   lunge: h.lunge || 0 });
+      }
+    } else {
+      out.push({ at: (pattern.telegraphMs || 1500) / 1000,
+                 power: pattern.power, lunge: 0 });
+    }
+    for (i = 0; i < out.length; i++) out[i].fireAt = out[i].at + holdS;
+    return out;
+  }
+
   A.telegraph = function (pattern, cb, index) {
     if (disabled || !inited || !pattern) { if (cb) cb({ hit: false, pattern: pattern }); return; }
     var k = knights[index || 0];
     if (!k || !k.alive) { if (cb) cb({ hit: false, pattern: pattern }); return; }
+    /* §22: a reeling knight cannot attack — that is what the punish window IS.
+       The miss goes back immediately so ui/battle3d.js retires its warning
+       instead of leaving a prompt up for a swing that will never come. */
+    var bs = brainOf(k);
+    if (bs.staggerT > 0) { if (cb) cb({ hit: false, pattern: pattern, staggered: true }); return; }
     var atk = k.atk;
     clearAttack(k);
     atk.mode = 'telegraph';
     atk.pattern = pattern;
     atk.cb = cb || null;
     atk.t0 = performance.now();
+    bs.atkCd = bs.tune.attackCooldownMs / 1000;
     /* Arm the pose HERE rather than leaving it to a latch the frame loop
        notices. swingDur is telegraphMs EXACTLY - no 1.25 multiplier - which is
        what puts the visual impact on the damage frame. recoverDur folds in the
@@ -1996,9 +2042,19 @@ CHLOE.engine = CHLOE.engine || {};
     stA.swingT = 0;
     stA.swingDur = (pattern.telegraphMs || 1500) / 1000;
     stA.recoverDur = ((pattern.recoverMs || 800) + 220) / 1000;
-    /* charge is a lunging THRUST, not a chop. It and overhead share
-       evade:'sidestep', so evade alone cannot tell them apart. */
-    stA.swingKind = (pattern.id === 'charge') ? 'thrust'
+    var fe = pattern.feint;
+    var holdS = (fe && fe.chance > 0 && Math.random() < fe.chance) ? (fe.holdMs || 0) / 1000 : 0;
+    var sched = hitSchedule(pattern, holdS);
+    stA.feintHold = holdS;
+    stA.sched = [];
+    for (var hi = 0; hi < sched.length; hi++) stA.sched.push(sched[hi].at);
+    atk.hits = sched;
+    /* Each pattern gets its own curve. charge is a lunging THRUST, not a chop
+       (it and overhead share evade:'sidestep', so evade alone cannot tell them
+       apart), and §22's two additions are named outright — falling back to the
+       evade kind would have played ground_slam as an overhead chop. */
+    stA.swingKind = SWINGS[pattern.id] ? pattern.id
+                  : (pattern.id === 'charge') ? 'thrust'
                   : (pattern.evade === 'crouch' ? 'sweep' : 'overhead');
     // aim locked at windup start: dodge by MOVING after the windup begins
     var kx = k.group ? k.group.position.x : 0;
@@ -2010,29 +2066,60 @@ CHLOE.engine = CHLOE.engine || {};
     atk.lockYaw = k.baseRot;          // the lane is locked, and so is he
     faceKnightTo(k, pos.x, pos.z);
 
-    atk.strikeTimer = window.setTimeout(function () {
-      atk.strikeTimer = null;
-      strikeNow(k);
-    }, pattern.telegraphMs || 1500);
+    /* One timer per hit window. They are held in atk.timers so clearAttack can
+       disarm ALL of them — a knight killed after the first jab must not land
+       the second. */
+    for (var si = 0; si < sched.length; si++) {
+      (function (idx) {
+        atk.timers.push(window.setTimeout(function () { strikeNow(k, idx); },
+                                          sched[idx].fireAt * 1000));
+      })(si);
+    }
   };
 
-  function strikeNow(k) {
+  function strikeNow(k, idx) {
     var atk = k.atk;
-    if (atk.mode !== 'telegraph') return;
+    if (atk.mode !== 'telegraph' || !atk.hits) return;
     atk.mode = 'strike';
     var pattern = atk.pattern;
+    var win = atk.hits[idx] || {};
+    var last = (idx >= atk.hits.length - 1);
     // hidden tab: the player physically cannot dodge (rAF frozen) — mercy miss
     var hit = document.hidden ? false : hitTest(k, pattern);
+    /* §22 ground_slam: the shockwave you can SEE, thrown from his boots at the
+       instant the hit test measures from them. Same frame, same origin — a
+       ring that lags the damage is worse than no ring at all. */
+    if (pattern && pattern.radius) spawnShock(k, pattern.radius, pattern.recoverMs || 800);
+    // the step-through is paid out over the following frames, not teleported
+    if (win.lunge) atk.lunge = win.lunge;
     var cb = atk.cb;
-    atk.cb = null;
-    // brief recover, then idle
-    window.setTimeout(function () {
-      if (atk.mode === 'strike') { atk.mode = 'recover'; }
-      window.setTimeout(function () { if (atk.mode === 'recover') clearAttack(k); },
-        (pattern && pattern.recoverMs) || 800);
-    }, 220);
+    if (last) {
+      atk.cb = null;
+      if (atk.hits.length > 1 && k.brain) k.brain.comboDone = true;   // §22: back off after a combo
+      // brief recover, then idle
+      window.setTimeout(function () {
+        if (atk.mode === 'strike') { atk.mode = 'recover'; }
+        window.setTimeout(function () { if (atk.mode === 'recover') clearAttack(k); },
+          (pattern && pattern.recoverMs) || 800);
+      }, 220);
+    } else {
+      /* Back to winding for the next stab, and the lane is re-taken from where
+         you are NOW: a combo you can dodge by stepping aside once is one
+         attack with three animations, not a combo. Each stab keeps §18's
+         rule — facing locked for the window it belongs to. */
+      atk.mode = 'telegraph';
+      var kx2 = k.group ? k.group.position.x : 0, kz2 = k.group ? k.group.position.z : 0;
+      var ldx = pos.x - kx2, ldz = pos.z - kz2;
+      var ld = Math.sqrt(ldx * ldx + ldz * ldz) || 1;
+      atk.lockDir = { x: ldx / ld, z: ldz / ld };
+      faceKnightTo(k, pos.x, pos.z);
+      atk.lockYaw = k.baseRot;
+    }
     if (cb) {
-      try { cb({ hit: hit, pattern: pattern }); } catch (e) { console.warn('[arena3d] telegraph cb failed', e); }
+      try {
+        cb({ hit: hit, pattern: pattern, window: idx, windows: atk.hits.length,
+             power: win.power, feint: !!k.anim.feintHold });
+      } catch (e) { console.warn('[arena3d] telegraph cb failed', e); }
     }
   }
 
@@ -2042,6 +2129,11 @@ CHLOE.engine = CHLOE.engine || {};
     var kx = k.group.position.x, kz = k.group.position.z;
     var dx = pos.x - kx, dz = pos.z - kz;
     var dist = Math.sqrt(dx * dx + dz * dz);
+    /* §22 ground_slam: a RADIAL shockwave off his boots. Facing does not save
+       you and neither does crouching — only distance does, measured from his
+       FEET at the strike frame, which is why its evade is 'backoff'. It is the
+       first pattern that punishes living inside his guard. */
+    if (pattern.radius) return dist <= pattern.radius;
     if (pattern.evade === 'crouch') {
       // horizontal arc at chest height: duck under it or be out of reach
       return dist <= (pattern.reach || 3.4) && !isCrouching();
@@ -2054,23 +2146,68 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   A.flinch = function (dmg, killed, index) {
-    var knight = knights[index || 0];
-    if (!knight || !knight.group) return;
+    var k = knights[index || 0];
+    if (!k || !k.group) return;
+    var b = brainOf(k), t = b.tune;
+    dmg = dmg || 0;
     if (killed) {
-      knight.alive = false;
-      clearAttack(knight);
+      k.alive = false;
+      b.deathT = 0;
+      b.state = 'death';
+      b.staggerT = 0;
+      k.staggerMeter = 0;
+      clearAttack(k);
+      k.anim.state = 'death';
+    } else if (dmg > 0) {
+      /* §22 the punish window the fight has never had. One heavy hit staggers
+         outright; otherwise damage banks into a meter that bleeds staggerDecay
+         a second, so chip damage never accumulates into a free stun and a
+         charged move always buys you one. */
+      b.hitFlash = t.hitFlashMs / 1000;
+      k.staggerMeter += dmg;
+      if (dmg >= t.staggerDamage || k.staggerMeter >= t.staggerBuildup) {
+        k.staggerMeter = 0;
+        b.staggerT = t.staggerMs / 1000;
+        clearAttack(k);        // a reeling knight drops the swing he was winding
+      }
     }
     // quick emissive flash
-    for (var i = 0; i < knight.mats.length; i++) {
-      var m = knight.mats[i];
+    for (var i = 0; i < k.mats.length; i++) {
+      var m = k.mats[i];
       if (m.emissive) { m.emissive.setHex(killed ? 0xe5173f : 0x881122); m.emissiveIntensity = 1.6; }
     }
     window.setTimeout(function () {
-      for (var j = 0; j < knight.mats.length; j++) {
-        var mm = knight.mats[j];
+      for (var j = 0; j < k.mats.length; j++) {
+        var mm = k.mats[j];
         if (mm.emissive) { mm.emissive.setHex(0x000000); mm.emissiveIntensity = 1.0; }
       }
     }, killed ? 900 : 180);
+  };
+
+  /* §22: what a hit is worth right now. The damage sum lives in combat3, not
+     here, so the engine can only publish the multiplier its own state implies
+     — ui/battle3d.js passes it into C3.hitEnemy as the hit's mult. */
+  A.staggerMult = function (index) {
+    var k = knights[index || 0];
+    if (!k || !k.brain || k.brain.staggerT <= 0) return 1;
+    return k.brain.tune.staggerTakeMult;
+  };
+  A.isStaggered = function (index) {
+    var k = knights[index || 0];
+    return !!(k && k.brain && k.brain.staggerT > 0);
+  };
+
+  /* §22: roll a taunt. Called on a kill from ui/battle3d.js, and internally
+     whenever a player ability catches nobody. He only gloats if he is
+     otherwise free — a taunt that interrupts his own wind-up is a bug. */
+  A.taunt = function (index) {
+    var k = knights[index == null ? 0 : index];
+    if (!k || !k.alive || !k.group) return false;
+    var b = brainOf(k);
+    if (b.staggerT > 0 || k.anim.swinging || b.state === 'coil' || b.state === 'dash') return false;
+    if (Math.random() >= b.tune.tauntChance) return false;
+    setState(k, b, 'taunt');
+    return true;
   };
 
   A.setKnightAlive = function (alive, index) {
@@ -2114,7 +2251,55 @@ CHLOE.engine = CHLOE.engine || {};
     if (p < 1.06) return -1 - 0.15 * seg(p, 1.00, 1.06);             // overshoot
     return -1.15;                                                     // follow-through
   }
-  function swingCh(mix, w, st2, name) { return mix >= 0 ? mix * w[name] : -mix * st2[name]; }
+  /* Where the envelope reaches its apex. This is a property of the CURVE
+     above, not a tunable: it is the frame a feint freezes on, so if the shape
+     is ever retimed this moves with it or the lie stops reading as a wind-up. */
+  var SWING_APEX_P = 0.78;
+  /* Amplitudes may omit a channel (nothing but ground_slam uses `bY`), and an
+     undefined channel used to arrive as NaN and poison the whole pivot. */
+  function swingCh(mix, w, st2, name) {
+    var v = (mix >= 0) ? w[name] : st2[name];
+    if (v == null) return 0;
+    return mix >= 0 ? mix * v : -mix * v;
+  }
+
+  /* ---- §22 multi-window swings and feints -------------------------------
+     A pattern's `hits` schedule is stored on the anim as `sched`, in seconds
+     off atk.t0 on the UN-HELD clock. The pose walks it one window at a time,
+     so each stab replays the whole envelope inside its own slice and IMPACT
+     STAYS p = 1.0 PER WINDOW — the §21 guarantee, generalised. A single-hit
+     pattern has sched = [swingDur] and reduces exactly to the old maths.
+
+     A feint freezes the clock at the apex for feintHold, then lets it run on.
+     The strike timers were pushed back by the same hold, so the blade cannot
+     land during the pause by construction — no guard to forget. */
+  function swingEnd(st) {
+    return (st.sched && st.sched.length) ? st.sched[st.sched.length - 1]
+                                         : Math.max(0.05, st.swingDur);
+  }
+  function swingTotal(st) {
+    return swingEnd(st) * 1.06 + st.recoverDur + (st.feintHold || 0);
+  }
+  // the swing clock with the feint's apex pause taken back out of it
+  function swingClock(st) {
+    var t = st.swingT;
+    if (!st.feintHold) return t;
+    var apex = Math.max(0.05, st.swingDur) * SWING_APEX_P;
+    if (t <= apex) return t;
+    return (t < apex + st.feintHold) ? apex : t - st.feintHold;
+  }
+  // phase INSIDE the current hit window: 1.0 is its impact frame
+  function swingLocalP(st) {
+    var t = swingClock(st);
+    var s = st.sched;
+    if (!s || !s.length) return t / Math.max(0.05, st.swingDur);
+    var prev = 0;
+    for (var i = 0; i < s.length; i++) {
+      if (t <= s[i] || i === s.length - 1) return (t - prev) / Math.max(0.05, s[i] - prev);
+      prev = s[i];
+    }
+    return 1;
+  }
 
   /* {wound} is the apex the telegraph holds, {struck} is where the blade is on
      the damage frame; the envelope owns everything between. Channels: aX/aY/aZ
@@ -2134,6 +2319,26 @@ CHLOE.engine = CHLOE.engine || {};
     thrust: {     // charge: arm cocked like a piston, body drives over the front foot
       wound:  { aX:  0.55, aY: -0.20, aZ: -0.10, eX:  1.45, lX: -0.40, tX: -0.22, tY: -0.30, hX: -0.06, hY:  0.12, gL:  0.14, gR: -0.22 },
       struck: { aX: -0.45, aY:  0.10, aZ: -0.05, eX: -0.05, lX:  0.45, tX:  0.50, tY:  0.15, hX:  0.08, hY: -0.05, gL: -0.22, gR:  0.34 }
+    },
+    /* §22 thrust_combo: two jabs and a step-through, ALL ON ONE CURVE — each
+       hit window replays this shape inside its own slice of the schedule, so
+       the jabs are the same stab played fast (300ms) and the third is the same
+       stab played long. Deliberately tighter than `thrust`: a jab that winds
+       up as far as a charge is not a jab, and the elbow does most of the work
+       so the blade travels without the shoulder having to wheel. */
+    thrust_combo: {
+      wound:  { aX:  0.34, aY: -0.14, aZ: -0.06, eX:  1.60, lX: -0.20, tX: -0.14, tY: -0.24, hX: -0.03, hY:  0.09, gL:  0.10, gR: -0.15 },
+      struck: { aX: -0.28, aY:  0.06, aZ: -0.03, eX: -0.12, lX:  0.28, tX:  0.36, tY:  0.12, hX:  0.05, hY: -0.03, gL: -0.18, gR:  0.28 }
+    },
+    /* §22 ground_slam: both hands go up on the hilt — the off-arm MIRRORS the
+       sword arm (same sign, unlike every other swing here, where lX is a
+       counterweight) — and the whole body comes down with it. `bY` drops the
+       body itself, and both legs folding forward together is the only knee
+       bend a rig with one hinge per leg can give you; without the drop he
+       reads as bowing rather than smashing the floor. */
+    ground_slam: {
+      wound:  { aX:  1.72, aY:  0.04, aZ: -0.08, eX:  0.50, lX:  1.58, tX: -0.32, tY:  0.00, hX: -0.18, hY:  0.00, gL:  0.08, gR:  0.08, bY:  0.09 },
+      struck: { aX: -1.10, aY:  0.00, aZ:  0.04, eX:  0.08, lX: -1.00, tX:  0.60, tY:  0.00, hX:  0.24, hY:  0.00, gL:  0.34, gR:  0.34, bY: -0.22 }
     }
   };
   /* Where he settles after a swing: blade up, weight back, still watching you.
@@ -2149,11 +2354,13 @@ CHLOE.engine = CHLOE.engine || {};
     var st = k.anim;
     var t = elapsed + st.phase;
 
+    var b = k.brain;
+
     // ---- targets, rebuilt each frame from the current state ----
-    var armLx = 0, armRx = 0, armRy = 0, armRz = 0;
+    var armLx = 0, armLz = 0, armRx = 0, armRy = 0, armRz = 0;
     var elbowLx = 0.18, elbowRx = 0.18;      // arms are never dead straight
     var legLx = 0, legRx = 0;
-    var torsoX = 0, torsoY = 0, headX = 0, headY = 0, bob = 0;
+    var torsoX = 0, torsoY = 0, headX = 0, headY = 0, headZ = 0, bob = 0;
 
     var breathe = Math.sin(t * 1.6) * 0.03;
     armLx = breathe; armRx = -breathe;
@@ -2178,15 +2385,126 @@ CHLOE.engine = CHLOE.engine || {};
       /* headX stays 0: the pivots are SIBLINGS under `model`, not a chain, so
          the head never inherited the torso lean - the old -torsoX*0.5 was not
          counter-rotating anything, it just tipped him back while walking. */
+    } else if (st.state === 'strafe') {
+      /* §22 CROSSOVER SIDE GAIT. The feet go sideways and cross; the torso
+         stays OPEN to you and the blade tracks you the whole way round, which
+         is the difference between circling a fight and wandering off. */
+      var dirS = b ? b.strafeSign : 1;
+      st.stride += dt * 6;
+      var sws = Math.sin(st.stride);
+      legLx = sws * 0.22 + dirS * 0.10;      // the crossing foot leads
+      legRx = -sws * 0.22 - dirS * 0.10;
+      torsoY = -dirS * 0.26;
+      torsoX = 0.04;
+      armRx = 0.52 + sws * 0.06;
+      armRy = -0.30 * dirS;
+      armRz = -0.30;
+      elbowRx = 0.85;
+      armLx = 0.16; armLz = -0.12 * dirS;
+      headY = dirS * 0.12;
+      bob = Math.abs(Math.cos(st.stride)) * 0.03;
+    } else if (st.state === 'backpedal') {
+      /* §22 HEEL-FIRST RETREAT, guard high. He is giving ground on purpose,
+         so the blade never leaves the space between you — a retreat with the
+         sword down reads as a rout, and he is not routing. */
+      st.stride += dt * 5;
+      var swb = Math.sin(st.stride);
+      legLx = -swb * 0.24;
+      legRx = swb * 0.24;
+      torsoX = -0.10;                        // weight back over the heels
+      armRx = GUARD.aX + 0.35; armRy = GUARD.aY; armRz = GUARD.aZ;
+      elbowRx = GUARD.eX + 0.35;
+      armLx = GUARD.lX + 0.25;
+      headX = -0.04;
+      bob = Math.abs(Math.cos(st.stride)) * 0.025;
+    } else if (st.state === 'turnInPlace') {
+      /* §22 PLANT AND PIVOT past brain.turnThreshold: the feet split, the
+         shoulders lead the hips round. Before this he could rotate 180° with
+         his boots welded facing forward, which is why big yaw changes read as
+         the whole model being spun by a hand rather than a man turning. */
+      var ts = (st.turnErr > 0) ? 1 : -1;
+      legLx = 0.20 * ts;
+      legRx = -0.20 * ts;
+      torsoY = 0.22 * ts;
+      torsoX = 0.03;
+      armRx = 0.40; armRz = -0.28; elbowRx = 0.70;
+      armLx = 0.14;
+      headY = 0.18 * ts;
+    } else if (st.state === 'coil') {
+      /* §22 the DASH TELL. dashTellMs of this before he launches: he drops,
+         both knees fold, the blade cocks behind him — a silhouette that says
+         "he is about to cross the room" from anywhere in the nave. */
+      legLx = 0.30; legRx = 0.30;
+      torsoX = 0.28;
+      bob = -0.10;
+      armRx = 0.95; armRz = -0.45; elbowRx = 1.25;
+      armLx = -0.35;
+      headX = -0.14;                         // eyes still up, on you
+    } else if (st.state === 'taunt') {
+      // §22: blade raised, off-hand open, head cocked. A beat of contempt.
+      armRx = 1.45; armRy = 0.10; armRz = -0.22; elbowRx = 0.30;
+      armLx = -0.28; armLz = 0.30;
+      torsoX = -0.14; torsoY = 0.10;
+      headX = -0.12; headZ = 0.26;
+      bob = Math.sin(t * 3.1) * 0.012;
+    } else if (st.state === 'idle' && b && b.state === 'press') {
+      /* §22: waiting is not standing still. He shifts his weight foot to foot
+         over pressSwayMs — the cheapest possible signal that he is choosing a
+         moment rather than buffering. */
+      var per = Math.max(0.1, b.tune.pressSwayMs / 1000);
+      var sy = Math.sin(b.t * Math.PI * 2 / per);
+      legLx = sy * 0.09; legRx = -sy * 0.09;
+      torsoY = sy * 0.10;
+      armRx = GUARD.aX * 0.6; armRz = GUARD.aZ * 0.6; elbowRx = GUARD.eX * 0.7;
+      armLx = GUARD.lX;
+      headY = sy * 0.06;
+      bob = Math.abs(sy) * 0.012;
     }
 
-    if (st.swinging) {
+    if (st.state === 'death' && b) {
+      /* §22 DEATH, replacing the sink through the floor — which read as a
+         collision bug every single time, because a body falling through stone
+         is exactly what a collision bug looks like. Knees buckle, the torso
+         pitches over them, the body settles; updateDeath drops the sword and
+         only then starts the fade. */
+      var df = Math.min(1, b.deathT / Math.max(0.1, b.tune.deathMs / 1000));
+      var buckle = easeOut(seg(df, 0.00, 0.30));
+      var pitchF = easeIn(seg(df, 0.22, 0.62));
+      var settle = seg(df, 0.62, 0.80);
+      legLx = 0.95 * buckle; legRx = 1.05 * buckle;
+      torsoX = 0.55 * buckle + 0.85 * pitchF;
+      torsoY = 0.12 * pitchF;
+      armRx = -0.55 * buckle - 0.55 * pitchF; armRz = 0.30 * pitchF;
+      elbowRx = 0.10;
+      armLx = -0.30 * buckle - 0.45 * pitchF; armLz = 0.35 * pitchF;
+      headX = 0.30 * buckle + 0.55 * pitchF;
+      headZ = 0.18 * pitchF;
+      bob = -(0.55 * buckle + 0.30 * pitchF) + 0.03 * settle;
+    } else if (st.state === 'stagger' && b) {
+      /* §22 STAGGER: head snapped back, arms flung wide, weight on the back
+         foot. The amplitude decays with the timer so the recoil eases out
+         instead of releasing him in one frame — and while this pose is up he
+         is not turning, which is the whole punish window. */
+      var sf = Math.max(0, Math.min(1, b.staggerT / Math.max(0.1, b.tune.staggerMs / 1000)));
+      var wob = Math.sin((1 - sf) * Math.PI * 3) * 0.10 * sf;   // still finding his feet
+      armLx = -0.85 * sf; armLz = 0.55 * sf;
+      armRx = -0.70 * sf; armRy = 0.35 * sf; armRz = 0.60 * sf;
+      elbowLx = 0.10; elbowRx = 0.15;
+      torsoX = -0.42 * sf + wob;
+      torsoY = 0.18 * sf;
+      headX = -0.55 * sf; headZ = 0.20 * sf;
+      legLx = -0.26 * sf; legRx = 0.30 * sf;
+      bob = -0.05 * sf;
+    } else if (st.swinging) {
       var sp = SWINGS[st.swingKind] || SWINGS.overhead;
       var w = sp.wound, sk = sp.struck;
-      var mix = swingEnvelope(st.swingT / Math.max(0.05, st.swingDur));
+      var mix = swingEnvelope(swingLocalP(st));
       /* recoverMs finally drives something: once the follow-through has
-         landed, settle into GUARD across the pattern's own recover window. */
-      var gu = seg(st.swingT, st.swingDur * 1.06, st.swingDur * 1.06 + st.recoverDur);
+         landed, settle into GUARD across the pattern's own recover window.
+         §22: measured off the LAST hit window, not the first, or a combo
+         starts settling into guard between its own stabs. */
+      var swEnd = swingEnd(st) * 1.06;
+      var gu = seg(swingClock(st), swEnd, swEnd + st.recoverDur);
       armRx   = lerpN(swingCh(mix, w, sk, 'aX'), GUARD.aX, gu);
       armRy   = lerpN(swingCh(mix, w, sk, 'aY'), GUARD.aY, gu);
       armRz   = lerpN(swingCh(mix, w, sk, 'aZ'), GUARD.aZ, gu);
@@ -2203,6 +2521,24 @@ CHLOE.engine = CHLOE.engine || {};
          thing there is that gives a swing mass. */
       legLx   = lerpN(swingCh(mix, w, sk, 'gL'), GUARD.gL, gu);
       legRx   = lerpN(swingCh(mix, w, sk, 'gR'), GUARD.gR, gu);
+      /* `bY` is the body itself dropping. Only ground_slam uses it — a rig
+         with one hinge per leg cannot bend a knee, so the smash gets its
+         weight from the whole silhouette going down with the blade. */
+      bob     = lerpN(swingCh(mix, w, sk, 'bY'), 0, gu);
+    }
+
+    /* §22 HIT FLASH. Every damaging blow reads, stagger or not — a hit that
+       changes nothing but a number is a hit the player is not sure they
+       landed. Laid OVER whatever he was doing rather than replacing it, so a
+       flinch never eats a swing that is already in flight. */
+    if (b && b.hitFlash > 0 && st.state !== 'stagger' && st.state !== 'death') {
+      var hf = b.hitFlash / Math.max(0.02, b.tune.hitFlashMs / 1000);
+      var kick = hf * hf;             // sharp on the impact frame, gone fast
+      torsoX -= 0.20 * kick;
+      headX -= 0.26 * kick;
+      armLx -= 0.16 * kick;
+      armRx -= 0.10 * kick;
+      bob -= 0.03 * kick;
     }
 
     /* A swing curve is already shaped on a wall clock; running it through a
@@ -2216,6 +2552,7 @@ CHLOE.engine = CHLOE.engine || {};
     var aTr = Math.max(alpha(RATE_TORSO, dt), take);
     var aHd = Math.max(alpha(RATE_HEAD, dt), take);
     blend(r.armL.rotation, 'x', armLx, aUp);
+    blend(r.armL.rotation, 'z', armLz, aUp);   // §22: the off-arm flings wide
     blend(r.armR.rotation, 'x', armRx, aUp);
     blend(r.armR.rotation, 'y', armRy, aUp);
     blend(r.armR.rotation, 'z', armRz, aUp);
@@ -2227,81 +2564,418 @@ CHLOE.engine = CHLOE.engine || {};
     blend(r.torso.rotation, 'y', torsoY, aTr);
     blend(r.head.rotation, 'x', headX, aHd);
     blend(r.head.rotation, 'y', headY, aHd);
+    blend(r.head.rotation, 'z', headZ, aHd);   // §22: the taunt's tilt, the stagger's snap
     /* bob was assigned raw, so the frame he stopped walking - or a telegraph
        forced state='idle' - the whole body dropped up to 10cm in one frame. */
     k.bob += (bob - k.bob) * alpha(RATE_BOB, dt);
   }
 
-  /* §18 knight brain: always face the player, close the distance on foot,
-     dash when it is off cooldown and the player is far, and swing when in
-     reach. The telegraph/strike windows still come from ui/battle3d.js so
-     the dodge rules of §16 are untouched. */
+  /* ------------------------------------------------------- §22 the brain
+
+     §18's knight walked a straight line at you and dashed when the line got
+     long, which reads as a homing missile rather than a fighter — and a squad
+     of them read as ONE organism wearing N bodies. The state machine that
+     replaces it:
+
+       stalk       out of range: closes, but on an ARC, not down a rail
+       press       in range and ready: holds keepDistance, waits, sways
+       strafe      circles at the current range, reversing when stone stops him
+       reposition  backs off after a combo, when crowded, or when hugged
+       coil        the dash TELL — planted, winding up, readable
+       dash        the committed lunge, aimed where you were when he launched
+       attack      a telegraph is in flight (ui/battle3d.js still owns cadence)
+       recover     the post-swing window: rooted, and slow to turn
+       stagger     reeling: cannot attack, cannot turn, takes extra damage
+
+     EVERY number comes from data/arena3d.js `knight.brain`. The table below is
+     the floor under a stripped or half-written data file — the engine must
+     degrade, not NaN its way across the nave — and it doubles as the complete
+     list of keys a personality may override, because a personality is a
+     SHALLOW merge (which is why the data keys are flat). */
+  var BRAIN_DEFAULTS = {
+    walkSpeed: 1.6, strafeSpeed: 1.35, backpedalSpeed: 1.1, dashSpeed: 9.5,
+    turnRate: 3.4, recoverTurnRate: 1.1,
+    keepDistance: 2.0, dashRange: 5.0, repositionDist: 4.5,
+    tooCloseDist: 1.4, crowdDist: 1.8,
+    arcHoldMs: 1400, arcBias: 0.55, strafeHoldMs: 1100, repositionMs: 900,
+    dashTellMs: 380, dashCooldownMs: 6000, attackCooldownMs: 900,
+    pressSwayMs: 800, turnThreshold: 0.7, tauntChance: 0.22,
+    deathMs: 1600, hitFlashMs: 160,
+    pressWeight: 4, strafeWeight: 2, repositionWeight: 1, stalkWeight: 2,
+    staggerDamage: 90, staggerBuildup: 210, staggerDecay: 55,
+    staggerMs: 1200, staggerTakeMult: 1.5
+  };
+  function brainCfg() { return (D().knight && D().knight.brain) || {}; }
+
+  /* Resolve one knight's tuning ONCE, at spawn. A per-frame merge of two
+     objects for every knight in a round-6 squad is pure garbage collection. */
+  function buildTune(personality) {
+    var src = brainCfg(), t = {}, key;
+    for (key in BRAIN_DEFAULTS) t[key] = BRAIN_DEFAULTS[key];
+    for (key in src) if (typeof src[key] === 'number') t[key] = src[key];
+    var p = (src.personalities || {})[personality];
+    for (key in p) if (typeof p[key] === 'number') t[key] = p[key];
+    return t;
+  }
+
+  /* Personalities are DEALT, not rolled: round-robin from a random start, so a
+     squad of three is three different fighters instead of three coin flips
+     that can all land the same way. */
+  var personaSeed = Math.floor(Math.random() * 997);
+  function personaFor(i) {
+    var ps = brainCfg().personalities, names = [], n;
+    for (n in ps) names.push(n);
+    if (!names.length) return '';
+    return names[(personaSeed + Math.max(0, i)) % names.length];
+  }
+
+  function initBrain(k, i) {
+    var name = personaFor(i);
+    k.brain = {
+      state: 'stalk', prev: '', personality: name, tune: buildTune(name),
+      t: 0, hold: 0, entered: 0,
+      /* Neighbours arc opposite ways, so a line of them folds around you
+         instead of converging on one point. */
+      arcSign: (i % 2) ? 1 : -1, arcT: 0,
+      strafeSign: (Math.random() < 0.5) ? 1 : -1,
+      atkCd: 0, repCd: 0, staggerT: 0, hitFlash: 0, deathT: 0,
+      repFrom: 0, repStuck: false, comboDone: false, wantsAttack: false
+    };
+    k.staggerMeter = 0;
+    return k.brain;
+  }
+  function brainOf(k) {
+    if (k.brain) return k.brain;
+    var i = 0;
+    for (var n = 0; n < knights.length; n++) if (knights[n] === k) i = n;
+    return initBrain(k, i);
+  }
+
+  /* States he does not CHOOSE to be in. The frame one of them releases him he
+     re-decides immediately, rather than serving out a hold he never picked. */
+  var UNCHOSEN = { stagger: 1, attack: 1, recover: 1, death: 1 };
+
+  /* How long a chosen state is committed for — all of it from data, so
+     retuning the fight never means editing this file. `recover` and `stagger`
+     are absent on purpose: their clocks are the pattern's recoverMs and the
+     brain's staggerMs, both counted elsewhere. */
+  function stateHold(b, s) {
+    var t = b.tune;
+    if (s === 'strafe') return t.strafeHoldMs / 1000;
+    if (s === 'reposition') return t.repositionMs / 1000;
+    if (s === 'press') return t.pressSwayMs / 1000;
+    if (s === 'stalk') return t.arcHoldMs / 1000;
+    if (s === 'coil') return t.dashTellMs / 1000;
+    if (s === 'dash') return (D().knight || {}).dashTime || 0.42;
+    if (s === 'taunt') return t.attackCooldownMs / 1000;  // one swing's worth of contempt
+    return 0;
+  }
+  function distToPlayer(k) {
+    var dx = pos.x - k.group.position.x, dz = pos.z - k.group.position.z;
+    return Math.sqrt(dx * dx + dz * dz);
+  }
+  function onEnterState(k, b, s) {
+    if (s === 'strafe') b.strafeSign = (Math.random() < 0.5) ? 1 : -1;
+    else if (s === 'reposition') b.repFrom = distToPlayer(k);
+    else if (s === 'dash') {
+      /* The lunge is COMMITTED: the heading is taken once, at launch, and he
+         wears the consequence if you step off it. Aiming it every frame is
+         what made §18's dash unloseable. */
+      var g = k.group;
+      var dx = pos.x - g.position.x, dz = pos.z - g.position.z;
+      var d = Math.sqrt(dx * dx + dz * dz) || 1;
+      k.anim.dashDir = { x: dx / d, z: dz / d };
+      k.anim.dash = b.hold;
+      k.anim.dashCd = b.tune.dashCooldownMs / 1000;
+    }
+  }
+  /* Enter a DIFFERENT state. Called every frame by the owning-state cascade,
+     so it must be a no-op when the name has not changed or `t` never grows. */
+  function setState(k, b, s) {
+    if (b.state === s) return;
+    // he owes himself one attack window before he may give ground again
+    if (b.state === 'reposition') b.repCd = b.tune.attackCooldownMs / 1000;
+    b.prev = b.state;
+    b.state = s;
+    b.t = 0;
+    b.hold = stateHold(b, s);
+    b.entered++;
+    onEnterState(k, b, s);
+  }
+  /* Re-decide. Unlike setState, picking the same name again is a fresh
+     decision and restarts its clock (another lap of the circle, another arc). */
+  function restate(k, b, s) {
+    if (b.state !== s) { setState(k, b, s); return; }
+    b.t = 0;
+    b.hold = stateHold(b, s);
+    onEnterState(k, b, s);
+  }
+
+  /* Is a squadmate close enough that these two are fighting each other for
+     the same metre of floor? */
+  function crowdedBy(k, d) {
+    for (var i = 0; i < knights.length; i++) {
+      var o = knights[i];
+      if (o === k || !o.alive || !o.group) continue;
+      var dx = o.group.position.x - k.group.position.x;
+      var dz = o.group.position.z - k.group.position.z;
+      if (dx * dx + dz * dz < d * d) return true;
+    }
+    return false;
+  }
+
+  /* What he does next, when he is free to choose. The weights are relative
+     pulls, not probabilities (the engine normalises), so data can read as
+     "presses forward twice as often as he circles" and a personality can lean
+     the whole fighter by moving one number. */
+  function chooseState(k, b, dist) {
+    var t = b.tune;
+    /* Settle whether the retreat he is being released from actually GAINED
+       anything, before he is asked whether to do it again. One body radius is
+       the smallest gain worth calling a retreat.
+       This has to live here, at the decision point, not in setState: picking
+       `reposition` a second time goes through restate(), which never changes
+       the name and so never ran a leave hook — a knight re-choosing it every
+       0.9s was therefore never once judged, and stayed pinned. */
+    if (b.state === 'reposition') b.repStuck = (dist - b.repFrom) < KNIGHT_RADIUS;
+    /* Two answers are forced, and both are about SPACE, not preference: a
+       player hugging him cannot be swung at, and a combo just ended with him
+       over-committed and inside your reach. */
+    if (b.comboDone) { b.comboDone = false; return 'reposition'; }
+    /* Two reasons to give ground, and both mean "there is no room to swing
+       here": the player is hugging him, or a squadmate is fighting him for the
+       same pocket. Crowding only counts INSIDE that pocket — a mate 1.7m away
+       while he circles at four metres is a formation, not a jam — and `repCd`
+       (one attack cooldown, set when the last retreat ended) is what stops a
+       squad oscillating between backpedal and re-approach for a whole round. */
+    var jam = (dist < t.tooCloseDist) ||
+              (b.repCd <= 0 && crowdedBy(k, t.crowdDist) &&
+               dist < t.keepDistance + t.tooCloseDist);
+    if (!jam) b.repStuck = false;
+    /* Backing off is only an answer if it WORKS. arena.knightMinDist (1.3)
+       sits INSIDE brain.tooCloseDist (1.4), so a knight held at the minimum by
+       five squadmates is permanently "too close" and can never retreat out of
+       it — measured at squad 6, one knight spent 100% of a 60s run walking
+       backwards. A retreat that gained nothing sets repStuck and he fights his
+       way out instead: press pushes him back to keepDistance at walkSpeed,
+       which is half a metre a second faster than the backpedal ever was. */
+    if (jam && !b.repStuck) return 'reposition';
+    // the lunge is only worth its tell across a real gap
+    if (dist > t.dashRange && k.anim.dashCd <= 0) return 'coil';
+
+    var opts = [], total = 0;
+    function add(name, w) { if (w > 0) { opts.push(name); opts.push(w); total += w; } }
+    if (dist > t.keepDistance) add('stalk', t.stalkWeight);
+    if (dist <= t.dashRange) add('press', t.pressWeight);
+    add('strafe', t.strafeWeight);
+    if (dist < t.repositionDist && !b.repStuck) add('reposition', t.repositionWeight);
+    if (!total) return dist > t.keepDistance ? 'stalk' : 'press';
+    var r = Math.random() * total;
+    for (var i = 0; i < opts.length; i += 2) {
+      r -= opts[i + 1];
+      if (r <= 0) return opts[i];
+    }
+    return 'press';
+  }
+
+  /* Take the blade out of his hand. Re-parented to his GROUP, not the scene:
+     the group's floor is still y = 0 there, and reset() can put every piece
+     back exactly where it was. A sword left loose in the scene would outlive
+     the round it was dropped in. */
+  function dropSword(k) {
+    if (k.dropped || !k.rig || !k.rig.elbowR || !k.group) return;
+    var list = [];
+    k.rig.elbowR.traverse(function (o) { if (o.isMesh && /Sword/i.test(o.name || '')) list.push(o); });
+    k.dropped = [];
+    for (var i = 0; i < list.length; i++) {
+      var o = list[i];
+      k.dropped.push({ obj: o, parent: o.parent, pos: o.position.clone(),
+                       quat: o.quaternion.clone() });
+      k.group.attach(o);
+    }
+  }
+  function restoreSword(k) {
+    if (!k.dropped) return;
+    for (var i = 0; i < k.dropped.length; i++) {
+      var rec = k.dropped[i];
+      rec.parent.add(rec.obj);
+      rec.obj.position.copy(rec.pos);
+      rec.obj.quaternion.copy(rec.quat);
+    }
+    k.dropped = null;
+  }
+
+  /* §22 DEATH — replacing the sink through the floor, which read as a
+     collision bug every single time, because a body falling through stone is
+     exactly what a collision bug looks like. Over brain.deathMs: knees buckle,
+     the torso pitches over them, the sword leaves his hand, the body settles,
+     and ONLY then does it fade. The pose itself is in poseKnight; what lives
+     here is everything that is not a joint angle. */
+  function updateDeath(k, dt) {
+    var b = brainOf(k);
+    var life = Math.max(0.1, b.tune.deathMs / 1000);
+    b.deathT += dt;
+    b.state = 'death';
+    var f = Math.min(1, b.deathT / life);
+    k.anim.state = 'death';
+    k.anim.swinging = false;
+    if (f > 0.30) dropSword(k);
+    if (k.dropped) {
+      for (var i = 0; i < k.dropped.length; i++) {
+        var o = k.dropped[i].obj;
+        /* It falls, it does not teleport. The blade is held near-vertical, so
+           easing z round to a quarter turn lays it on the flags — an
+           approximation, but one nobody has ever caught at fight distance. */
+        o.position.y += (0.06 - o.position.y) * alpha(6, dt);
+        o.rotation.z += (Math.PI / 2 - o.rotation.z) * alpha(4, dt);
+      }
+    }
+    if (k.light) k.light.intensity = k.light.intensity * (1 - alpha(2.2, dt));
+    poseKnight(k, dt);
+    k.group.position.y = (k.bob || 0);
+    /* Fade LAST, and only once he has settled: a corpse that starts
+       dissolving while it is still falling reads as a despawn, not a death. */
+    var fade = seg(f, 0.80, 1.00);
+    if (fade > 0) {
+      for (var m = 0; m < k.mats.length; m++) {
+        var mm = k.mats[m];
+        mm.transparent = true;
+        mm.opacity = 1 - fade;
+        mm.depthWrite = false;
+      }
+    }
+    if (f >= 1) k.group.visible = false;
+  }
+
+  /* §22 knight brain: the state machine above drives where he stands; the
+     telegraph/strike windows still come from ui/battle3d.js, so the dodge
+     rules of §16 are untouched. Facing rules are §18's: locked to the lane
+     mid-swing, tracking you otherwise — and, now, genuinely sluggish while he
+     recovers and frozen while he reels. */
   function updateOneKnight(k, dt) {
     var atk = k.atk;
     if (!k.group) return;
     /* Rescue: a knight that somehow starts off the navgrid can never move,
        because every candidate step reverts to an illegal position. Snap it
        back onto real floor before anything else runs. */
-    if (k.alive && nav && !navFree(k.group.position.x, k.group.position.z)) {
-      var fix = navNearest(k.group.position.x, k.group.position.z);
+    if (k.alive && nav && !navFree(k.group.position.x, k.group.position.z, KNIGHT_RADIUS)) {
+      var fix = navNearest(k.group.position.x, k.group.position.z, KNIGHT_RADIUS);
       k.group.position.x = fix.x;
       k.group.position.z = fix.z;
     }
-    if (!k.alive) {
-      k.group.position.y = Math.max(-2.6, k.group.position.y - dt * 0.9);
-      if (k.light) k.light.intensity = Math.max(0, k.light.intensity - dt * 0.8);
-      if (k.group.position.y <= -2.55) k.group.visible = false;
-      return;
-    }
+    if (!k.alive) { updateDeath(k, dt); return; }
 
-    var st = k.anim;
+    var st = k.anim, b = brainOf(k), t = b.tune;
     var kx = k.group.position.x, kz = k.group.position.z;
     var dx = pos.x - kx, dz = pos.z - kz;
     var dist = Math.sqrt(dx * dx + dz * dz) || 0.001;
     var ux = dx / dist, uz = dz / dist;
+    var px = -uz, pz = ux;              // his right-hand side, for circling
 
-    // ---- always focus the player (except mid-swing, when the lane is locked) ----
-    if (atk.mode === 'telegraph' || atk.mode === 'strike') {
-      easeYaw(k, atk.lockYaw, dt);           // lane locked at wind-up start
-    } else {
-      easeYaw(k, yawTo(k, pos.x, pos.z), dt);
-    }
-
+    // ---- timers ----
+    b.t += dt;
+    b.arcT += dt;
     st.dashCd = Math.max(0, st.dashCd - dt);
+    b.atkCd = Math.max(0, b.atkCd - dt);
+    b.repCd = Math.max(0, b.repCd - dt);
+    b.hitFlash = Math.max(0, b.hitFlash - dt);
+    /* Chip damage must never bank into a stagger, or the punish window stops
+       being something you EARN with a heavy hit and becomes a metronome. */
+    if (k.staggerMeter > 0) k.staggerMeter = Math.max(0, k.staggerMeter - t.staggerDecay * dt);
+    if (b.arcT >= t.arcHoldMs / 1000) { b.arcSign = -b.arcSign; b.arcT = 0; }
 
-    // ---- movement ----
-    var cfgK = D().knight || {};
-    var keep = cfgK.keepDistance || 2.0;
-    var moving = false;
-
-    if (st.dash > 0) {
-      st.dash = Math.max(0, st.dash - dt);
-      var dspeed = cfgK.dashSpeed || 9.5;
-      kx += st.dashDir.x * dspeed * dt;
-      kz += st.dashDir.z * dspeed * dt;
-      st.state = 'dash';
-      moving = true;
-    } else if (atk.mode === 'idle' || atk.mode === 'recover') {
-      if (dist > keep) {
-        // dash to close a big gap, otherwise walk
-        if (dist > (cfgK.dashRange || 5.0) && st.dashCd <= 0) {
-          st.dash = cfgK.dashTime || 0.42;
-          st.dashCd = cfgK.dashCooldown || 6.0;
-          st.dashDir = { x: ux, z: uz };
-          st.state = 'dash';
-        } else {
-          var sp = cfgK.walkSpeed || 1.5;
-          kx += ux * sp * dt;
-          kz += uz * sp * dt;
-          st.state = 'walk';
-          moving = true;
-        }
-      } else {
-        st.state = 'idle';
-      }
-    } else {
-      st.state = 'idle';
+    /* Safety net: `swinging` is cleared by clearAttack, which rides on the
+       strike timer's setTimeout. A callback path that dies — or a headless
+       test that steps dt with no timers running at all — used to leave him
+       frozen in guard forever, which is also a knight who never moves again. */
+    if (st.swinging && atk.mode === 'idle' && st.swingT > swingTotal(st)) {
+      st.swinging = false;
+      st.swingT = 0;
     }
+
+    // ---- which state owns him this frame ----
+    var swingLive = (atk.mode === 'telegraph' || atk.mode === 'strike');
+    if (b.staggerT > 0) {
+      b.staggerT = Math.max(0, b.staggerT - dt);
+      setState(k, b, 'stagger');
+    } else if (swingLive) {
+      setState(k, b, 'attack');
+    } else if (st.swinging) {
+      setState(k, b, 'recover');        // follow-through and the settle to guard
+    } else if (b.state === 'coil') {
+      if (b.t >= b.hold) setState(k, b, 'dash');       // the tell is spent: he commits
+    } else if (b.state === 'taunt' && b.t < b.hold) {
+      /* A beat of contempt is COMMITTED, like the coil. Left interruptible it
+         was cut short on its first frame every time a squadmate wandered
+         inside crowdDist, so the pose existed and was never once seen. */
+    } else if (b.state === 'reposition' && dist >= t.repositionDist) {
+      restate(k, b, chooseState(k, b, dist));          // far enough — turn and face him again
+    } else if (UNCHOSEN[b.state] || b.t >= b.hold ||
+               (b.state !== 'reposition' && b.state !== 'dash' &&
+                crowdedBy(k, t.crowdDist))) {
+      restate(k, b, chooseState(k, b, dist));
+    }
+    b.wantsAttack = (b.state === 'press' && b.atkCd <= 0 && dist <= t.keepDistance + t.tooCloseDist);
+
+    // ---- movement: one step, in this state's own direction ----
+    var mvx = 0, mvz = 0, radial;
+    if (b.state === 'stalk') {
+      /* ARC-BIASED APPROACH. Rotating the player vector by arcBias (sign held
+         for arcHoldMs, and opposite for his neighbour) is the whole
+         difference between closing and homing: he arrives off your centre
+         line, from a side you have to turn to meet. */
+      var a = t.arcBias * b.arcSign;
+      var ca = Math.cos(a), sa = Math.sin(a);
+      mvx = (ux * ca - uz * sa) * t.walkSpeed;
+      mvz = (ux * sa + uz * ca) * t.walkSpeed;
+      st.state = 'walk';
+    } else if (b.state === 'press') {
+      /* Hold the range and wait. A P term with a gain of 1/s, clamped to his
+         own pace: metres of error in, metres per second out. */
+      radial = Math.max(-t.walkSpeed, Math.min(t.walkSpeed, dist - t.keepDistance));
+      mvx = ux * radial; mvz = uz * radial;
+      st.state = (Math.abs(radial) > 0.06) ? 'walk' : 'idle';
+    } else if (b.state === 'strafe') {
+      radial = Math.max(-t.strafeSpeed, Math.min(t.strafeSpeed, dist - t.keepDistance));
+      mvx = px * b.strafeSign * t.strafeSpeed + ux * radial;
+      mvz = pz * b.strafeSign * t.strafeSpeed + uz * radial;
+      st.state = 'strafe';
+    } else if (b.state === 'reposition') {
+      mvx = -ux * t.backpedalSpeed; mvz = -uz * t.backpedalSpeed;
+      st.state = 'backpedal';
+    } else if (b.state === 'dash') {
+      st.dash = Math.max(0, st.dash - dt);
+      mvx = st.dashDir.x * t.dashSpeed; mvz = st.dashDir.z * t.dashSpeed;
+      st.state = 'dash';
+    } else if (b.state === 'stagger') {
+      // reeling back off the blow, decaying to a stop as he gets his feet
+      var reel = t.staggerMs > 0 ? (b.staggerT / (t.staggerMs / 1000)) : 0;
+      mvx = -ux * t.backpedalSpeed * reel; mvz = -uz * t.backpedalSpeed * reel;
+      st.state = 'stagger';
+    } else if (b.state === 'coil') {
+      st.state = 'coil';                // planted: the crouch IS the warning
+    } else if (b.state === 'taunt') {
+      st.state = 'taunt';
+    } else {
+      st.state = 'idle';                // attack / recover: the swing owns him
+    }
+
+    var nx = kx + mvx * dt, nz = kz + mvz * dt;
+    /* Circling into stone REVERSES the orbit. Without this the axis slide
+       below walks him sideways into the pillar and holds him there for the
+       whole strafeHoldMs, which looks exactly like a stuck AI. */
+    if (b.state === 'strafe' && nav && !navFree(nx, nz, KNIGHT_RADIUS)) {
+      b.strafeSign = -b.strafeSign;
+      b.t = 0;
+      nx = kx - mvx * dt; nz = kz - mvz * dt;
+    }
+    kx = nx; kz = nz;
+    /* Is he TRAVELLING, or just adjusting? Anything slower than his slowest
+       deliberate gait (the backpedal) is a shuffle, and a shuffle is exactly
+       when a big yaw change has to come from the feet. Testing "moving at all"
+       instead meant press — which drifts a few cm/s holding its range — never
+       once planted a pivot. */
+    var travelling = (mvx * mvx + mvz * mvz) >= t.backpedalSpeed * t.backpedalSpeed;
 
     // §20 keep the squad from stacking into one silhouette
     for (var oi = 0; oi < knights.length; oi++) {
@@ -2309,7 +2983,14 @@ CHLOE.engine = CHLOE.engine || {};
       if (other === k || !other.alive || !other.group) continue;
       var sx = kx - other.group.position.x, sz = kz - other.group.position.z;
       var sd = Math.sqrt(sx * sx + sz * sz);
-      var want = 1.5;
+      /* §22: the push target is the brain's OWN crowdDist. It used to be a
+         hard 1.5 while the brain called anything under 1.8 "crowded", so the
+         two rules fought each other forever: separation settled them at 1.5,
+         the brain read that as crowded and ordered a reposition, and a squad
+         spent half the fight backpedalling. Measured before the fix: 52% of a
+         60s run in `reposition`. Push them to the distance the brain is
+         actually happy with and the loop closes. */
+      var want = t.crowdDist;
       if (sd < want && sd > 0.001) {
         kx += (sx / sd) * (want - sd) * 0.5;
         kz += (sz / sd) * (want - sd) * 0.5;
@@ -2327,11 +3008,23 @@ CHLOE.engine = CHLOE.engine || {};
     }
     if (nav) {
       /* §20: the knight obeys the same baked stone the player does, so it
-         cannot walk through the rood screen to reach you. */
+         cannot walk through the rood screen to reach you — but with his own,
+         wider footprint (§22), so he does not thread gaps he plainly fills. */
       var okx = k.group.position.x, okz = k.group.position.z;
-      if (!navFree(kx, okz)) kx = okx;
-      if (!navFree(kx, kz)) kz = okz;
-      if (!navFree(kx, kz)) { kx = okx; kz = okz; }
+      if (!navFree(kx, okz, KNIGHT_RADIUS)) kx = okx;
+      if (!navFree(kx, kz, KNIGHT_RADIUS)) kz = okz;
+      if (!navFree(kx, kz, KNIGHT_RADIUS)) {
+        /* §22: the old triple-revert put him back on (okx,okz) unconditionally.
+           When that cell was itself illegal — squad separation shoved him into
+           a pillar, the minDist push backed him into the altar — he reverted to
+           it forever and stood in the wall for the rest of the fight. Revert
+           only to a LEGAL previous cell; otherwise walk him out. */
+        if (navFree(okx, okz, KNIGHT_RADIUS)) { kx = okx; kz = okz; }
+        else {
+          var kOut = navNearest(kx, kz, KNIGHT_RADIUS);
+          kx = kOut.x; kz = kOut.z;
+        }
+      }
     } else if (ar.bounds) {
       kx = Math.max(ar.bounds.minX + 0.5, Math.min(ar.bounds.maxX - 0.5, kx));
       kz = Math.max(ar.bounds.minZ + 0.5, Math.min(ar.bounds.maxZ - 0.5, kz));
@@ -2355,9 +3048,39 @@ CHLOE.engine = CHLOE.engine || {};
       }
     }
     if (lungeV > 0) { kx += atk.lockDir.x * dt * lungeV; kz += atk.lockDir.z * dt * lungeV; }
+    /* §22 thrust_combo: the third stab STEPS THROUGH. `atk.lunge` is metres
+       still owed, paid off at his lunge speed, and it is spent here rather
+       than teleported at the strike so the stone below still stops him. */
+    if (atk.lunge > 0) {
+      var step = Math.min(atk.lunge, t.dashSpeed * dt);
+      kx += atk.lockDir.x * step; kz += atk.lockDir.z * step;
+      atk.lunge -= step;
+    }
 
     k.group.position.x = kx;
     k.group.position.z = kz;
+
+    /* ---- facing (§18's rules, with §22's costs) ----
+       Locked to the lane mid-swing so the telegraph never lies about where the
+       strike lands; tracking you otherwise — but at recoverTurnRate while he
+       settles, and not at all while he reels. Being slow to come round IS the
+       punish window; a knight who snaps back to face you the instant his blade
+       passes has no back to get behind. */
+    var wantYaw = yawTo(k, pos.x, pos.z);
+    var yerr = wantYaw - k.group.rotation.y;
+    while (yerr > Math.PI) yerr -= Math.PI * 2;
+    while (yerr < -Math.PI) yerr += Math.PI * 2;
+    st.turnErr = yerr;
+    if (b.state !== 'stagger') {
+      var turnRate = (b.state === 'recover') ? t.recoverTurnRate : t.turnRate;
+      if (swingLive) easeYaw(k, atk.lockYaw, dt, turnRate);
+      else easeYaw(k, wantYaw, dt, turnRate);
+    }
+    /* Planted pivot: past turnThreshold he stops pretending his feet are not
+       there and turns with them. Only when he is not already travelling —
+       a strafe is a turn with somewhere to be. */
+    if (!travelling && !st.swinging && b.state !== 'stagger' && b.state !== 'taunt' &&
+        Math.abs(yerr) > t.turnThreshold) st.state = 'turnInPlace';
 
     /* ---- swing + glow ----
        ONE clock for the picture and the damage. atk.t0 is the same
@@ -2372,7 +3095,8 @@ CHLOE.engine = CHLOE.engine || {};
     if (atk.mode === 'telegraph' && atk.pattern) {
       var wall = (performance.now() - atk.t0) / 1000;
       st.swingT = (wall > st.swingT) ? wall : st.swingT + dt;
-      var p = Math.min(1, st.swingT / Math.max(0.05, st.swingDur));
+      // the glow rides the CURRENT window's phase, so a combo pulses per stab
+      var p = Math.min(1, swingLocalP(st));
       if (k.light) k.light.intensity = (0.9 + p * 2.6) * LIGHT_SCALE;
     } else if (st.swinging) {
       st.swingT += dt;                 // follow-through, then the settle to guard
@@ -2391,11 +3115,68 @@ CHLOE.engine = CHLOE.engine || {};
     for (var i = 0; i < knights.length; i++) updateOneKnight(knights[i], dt);
   }
 
+  /* §22 ground_slam's shockwave, made visible: a flat ring thrown from his
+     boots on the strike frame, expanding to exactly the pattern's `radius`.
+     The ring IS the hit test drawn, so a player who learns its edge has
+     learned the rule — which is the only reason a radial attack is fair.
+     Pooled and pre-built at init: §21 measured what a hidden object costs the
+     first frame it is really drawn (444ms for the tornado), and a ring created
+     on the first slam would pay exactly that, mid-fight. */
+  var shocks = [];
+  function makeShock() {
+    // unit ring, scaled to the pattern radius — one mesh serves every slam
+    var geo = new THREE.RingGeometry(0.80, 1.0, 40);
+    geo.rotateX(-Math.PI / 2);
+    var lc = (D().lights || {}).knight || {};
+    var mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      color: lc.color != null ? lc.color : 0xff2038,
+      transparent: true, opacity: 0, blending: THREE.AdditiveBlending,
+      depthWrite: false, side: THREE.DoubleSide
+    }));
+    mesh.visible = false;
+    var s = { mesh: mesh, t: 0, life: 1, r: 1 };
+    shocks.push(s);
+    if (scene) scene.add(mesh);
+    return s;
+  }
+  function spawnShock(k, radius, lifeMs) {
+    if (!scene || !k.group) return;
+    var s = null;
+    for (var i = 0; i < shocks.length; i++) {
+      if (!shocks[i].mesh.visible) { s = shocks[i]; break; }
+    }
+    if (!s) s = makeShock();
+    s.t = 0;
+    /* The ring lives as long as he is on the floor recovering from it: the
+       dust settling and the punish window closing are the same beat. */
+    s.life = Math.max(0.15, (lifeMs || 800) / 1000);
+    s.r = radius;
+    s.mesh.position.set(k.group.position.x, 0.05, k.group.position.z);
+    s.mesh.scale.setScalar(0.05);
+    s.mesh.material.opacity = 0.95;
+    s.mesh.visible = true;
+  }
+  function updateShocks(dt) {
+    for (var i = 0; i < shocks.length; i++) {
+      var s = shocks[i];
+      if (!s.mesh.visible) continue;
+      s.t += dt;
+      var f = Math.min(1, s.t / s.life);
+      /* Out fast, then linger. The wave reaches full radius in the first
+         third — that is the part which has to agree with the damage — and
+         everything after it is dust. */
+      s.mesh.scale.setScalar(Math.max(0.05, s.r * easeOut(Math.min(1, f * 3))));
+      s.mesh.material.opacity = 0.95 * (1 - f) * (1 - f);
+      if (f >= 1) s.mesh.visible = false;
+    }
+  }
+
   function updateFx(dt) {
     for (var i = 0; i < candleLights.length; i++) {
       var c = candleLights[i];
       c.intensity = c.userData.baseI * (0.75 + 0.25 * Math.sin(elapsed * 7 + c.userData.phase) + 0.1 * Math.random());
     }
+    updateShocks(dt);
   }
 
   function loop(now) {
@@ -2492,6 +3273,37 @@ CHLOE.engine = CHLOE.engine || {};
       knightState: knight.anim ? knight.anim.state : null,
       knightDashCd: knight.anim ? +knight.anim.dashCd.toFixed(2) : null,
       knightPos: knight.group ? [+knight.group.position.x.toFixed(2), +knight.group.position.z.toFixed(2)] : null,
+      /* §22 per-knight brain: which state he is in, whose temperament he is
+         fighting with, and every timer that decides what he does next. Squad
+         order, so knightBrain[i] and staggerMeter[i] line up with the indices
+         ui/battle3d.js addresses knights by. */
+      knightBrain: knights.map(function (k) {
+        var b = k.brain;
+        if (!b) return { state: k.anim ? k.anim.state : null, personality: null };
+        return {
+          state: b.state, anim: k.anim.state, personality: b.personality,
+          alive: k.alive,
+          t: +b.t.toFixed(2), hold: +b.hold.toFixed(2), entered: b.entered,
+          dashCd: +k.anim.dashCd.toFixed(2), atkCd: +b.atkCd.toFixed(2),
+          staggerT: +b.staggerT.toFixed(2), hitFlash: +b.hitFlash.toFixed(2),
+          arcSign: b.arcSign, strafeSign: b.strafeSign,
+          wantsAttack: !!b.wantsAttack
+        };
+      }),
+      /* The buildup meter itself, with the thresholds it is racing, because
+         "why did he not stagger" is otherwise unanswerable from outside. */
+      staggerMeter: knights.map(function (k) {
+        var b = k.brain;
+        return { meter: +(k.staggerMeter || 0).toFixed(1),
+                 needs: b ? b.tune.staggerBuildup : null,
+                 oneHit: b ? b.tune.staggerDamage : null,
+                 staggered: !!(b && b.staggerT > 0),
+                 takeMult: A.staggerMult(knights.indexOf(k)) };
+      }),
+      /* §22: the measured open floor. null means the navgrid never loaded and
+         the fight is running on the fallback `arena.bounds` rectangle — which
+         is the only state in which that rectangle matters. */
+      arenaArea: arenaArea,
       locked: isLocked()
     };
   };
@@ -2513,6 +3325,123 @@ CHLOE.engine = CHLOE.engine || {};
     updateFx(dt);
     return A.debug();
   };
+
+  /* Where a knight's current state name lives. The BRAIN state
+     (stalk | press | strafe | reposition | coil | dash | attack | recover |
+     stagger | death) is the decision he made; k.anim.state is only the pose
+     that decision picked, and two different decisions can wear the same pose
+     — which is why the measurement counts this one. */
+  function knightStateName(k) {
+    if (k.brain && k.brain.state) return k.brain.state;
+    return (k.anim && k.anim.state) || 'none';
+  }
+
+  /* §22 verification hook — drive the knight AI headless and MEASURE it.
+     Steps `seconds` of simulated time at a fixed `dt` with no rendering and
+     no player input, then reports what he actually did:
+       statesEntered  {state: entries} — counted on TRANSITION, not per frame,
+                      because 600 frames of 'walk' and one entry of 'walk' are
+                      the same fact and only the entry count tells you whether
+                      the machine is switching at all.
+       stateFrames    {state: frames} — the dwell side of the same story: a
+                      state entered 40 times for one frame each is a flicker
+                      bug, not variety.
+       distances      {min,max,avg} to the player over the run. A beeline
+                      collapses min≈max≈keepDistance; a fighter's spread is
+                      wide because he circles and backs off.
+       positions      [[x,z],...] sampled every `sampleMs` (default 100),
+                      so a caller can measure path straightness or draw it.
+     NOT a dry run: it advances the real world state, exactly like _tick.
+     The player does not move, which is the point — every metre of movement in
+     the result is the knight's own decision. */
+  A._simKnight = function (seconds, dt, opts) {
+    if (!inited) return null;
+    opts = opts || {};
+    dt = dt || 1 / 60;
+    seconds = seconds || 6;
+    var k = knights[opts.index || 0];
+    if (!k || !k.group) return null;
+    var sampleEvery = Math.max(1, Math.round(((opts.sampleMs || 100) / 1000) / dt));
+    var steps = Math.max(1, Math.round(seconds / dt));
+    /* Disarm every swing still in flight before the first step, or the
+       measurement is a lottery on WHEN it was called.
+       A telegraph ends on a setTimeout (§16 keeps damage off rAF). This loop
+       is synchronous, so no timer can possibly fire inside it — a knight who
+       was mid-wind-up when the probe started stays in `attack`, rooted, for
+       the entire run. Measured: a 60s call landed on a 1.5s telegraph and came
+       back {attack: 1.0}, pathLength 0, which is exactly the reading this hook
+       exists to DISPROVE. Whether he swings is ui/battle3d.js's business and
+       is tested there; this hook measures where he puts his feet.
+       Not `opts.index` only: a squadmate frozen mid-swing is a body that never
+       crowds or gives ground, which quietly changes what the probed knight
+       decides. */
+    clearAttack();
+    var entered = {}, frames = {}, animFrames = {}, positions = [];
+    var last = null, dmin = Infinity, dmax = 0, dsum = 0, moved = 0;
+    var px0 = k.group.position.x, pz0 = k.group.position.z;
+    /* Optional: land a hit every `hitEveryMs` for `hitDamage`, through the
+       REAL A.flinch, so the stagger meter, the buildup threshold and the
+       flinch are measured rather than asserted. Nothing is faked — this is
+       the same call ui/battle3d.js makes when an ability connects. */
+    var hitEvery = opts.hitEveryMs ? Math.max(1, Math.round((opts.hitEveryMs / 1000) / dt)) : 0;
+    var hitDmg = opts.hitDamage || 0;
+    var hits = 0, staggers = 0, wasStaggered = false;
+    for (var s = 0; s < steps; s++) {
+      elapsed += dt;
+      if (hitEvery && s > 0 && s % hitEvery === 0 && k.alive) {
+        A.flinch(hitDmg, false, opts.index || 0);
+        hits++;
+      }
+      updateKnight(dt);
+      var name = knightStateName(k);
+      if (name !== last) { entered[name] = (entered[name] || 0) + 1; last = name; }
+      frames[name] = (frames[name] || 0) + 1;
+      var an = (k.anim && k.anim.state) || 'none';
+      animFrames[an] = (animFrames[an] || 0) + 1;
+      var nowStag = !!(k.brain && k.brain.staggerT > 0);
+      if (nowStag && !wasStaggered) staggers++;
+      wasStaggered = nowStag;
+      var dx = k.group.position.x - pos.x, dz = k.group.position.z - pos.z;
+      var d = Math.sqrt(dx * dx + dz * dz);
+      if (d < dmin) dmin = d;
+      if (d > dmax) dmax = d;
+      dsum += d;
+      var sx = k.group.position.x - px0, sz = k.group.position.z - pz0;
+      moved += Math.sqrt(sx * sx + sz * sz);
+      px0 = k.group.position.x; pz0 = k.group.position.z;
+      if (s % sampleEvery === 0) {
+        positions.push([+k.group.position.x.toFixed(2), +k.group.position.z.toFixed(2)]);
+      }
+    }
+    /* The headline the spec asks for: how many DISTINCT states he visited and
+       what share of the run the busiest one took. "He no longer only walks
+       straight at you" is those two numbers, not an opinion. */
+    var share = {}, distinct = 0, topState = null, topShare = 0, nm;
+    for (nm in frames) {
+      distinct++;
+      share[nm] = +(frames[nm] / steps).toFixed(3);
+      if (share[nm] > topShare) { topShare = share[nm]; topState = nm; }
+    }
+    var b = k.brain;
+    return {
+      seconds: seconds, dt: dt, steps: steps, index: opts.index || 0,
+      personality: b ? b.personality : null,
+      statesEntered: entered,
+      stateFrames: frames,
+      stateShare: share,
+      distinctStates: distinct,
+      topState: topState, topShare: +topShare.toFixed(3),
+      animFrames: animFrames,
+      transitions: b ? b.entered : 0,
+      hitsApplied: hits, staggers: staggers,
+      staggerMeter: +(k.staggerMeter || 0).toFixed(1),
+      pathLength: +moved.toFixed(2),
+      distances: { min: +dmin.toFixed(2), max: +dmax.toFixed(2), avg: +(dsum / steps).toFixed(2) },
+      positions: positions,
+      playerAt: [+pos.x.toFixed(2), +pos.z.toFixed(2)]
+    };
+  };
+
   /* Geometry probe: world bounds of the loaded church and what is directly
      under/ahead of the camera. Used to verify placement without eyeballing. */
   /* Walk-probe: raycast the real church interior so `arena.bounds` can be
@@ -2623,7 +3552,8 @@ CHLOE.engine = CHLOE.engine || {};
     var fy = down.length ? +(2.6 - down[0].dist).toFixed(2) : null;
     rc.set(new THREE.Vector3(x, (fy || 0) + 0.15, z), new THREE.Vector3(0, 1, 0)); rc.far = 1.7;
     var up = rc.intersectObjects(solids, true).slice(0, 4).map(describe);
-    return { x: x, z: z, floorY: fy, down: down, up: up, navFree: navFree(x, z) };
+    return { x: x, z: z, floorY: fy, down: down, up: up,
+             navFree: navFree(x, z, RADIUS), navFreeKnight: navFree(x, z, KNIGHT_RADIUS) };
   };
 
   A._nav = function () {
@@ -2631,8 +3561,8 @@ CHLOE.engine = CHLOE.engine || {};
     var open = 0;
     for (var q = 0; q < nav.data.length; q++) open += nav.data[q];
     return { cell: nav.cell, nx: nav.nx, nz: nav.nz, minX: nav.minX, minZ: nav.minZ,
-             walkable: open, total: nav.data.length,
-             free: function (x, z) { return navFree(x, z); } };
+             walkable: open, total: nav.data.length, area: arenaArea,
+             free: function (x, z, r) { return navFree(x, z, r); } };
   };
 
   /* Rig geometry check: where each pivot actually sits in the world versus
@@ -2647,24 +3577,36 @@ CHLOE.engine = CHLOE.engine || {};
       counts: k.rigInfo || null, mode: k.atk.mode, kind: k.anim.swingKind,
       swinging: k.anim.swinging, swingT: r3(k.anim.swingT),
       swingDur: r3(k.anim.swingDur), recoverDur: r3(k.anim.recoverDur),
-      swingP: r3(k.anim.swingT / Math.max(0.05, k.anim.swingDur)),
+      /* §22: swingP is the phase inside the CURRENT hit window (1.0 is its
+         impact frame), not a phase over the whole pattern — a combo has three
+         of them. `sched` and `feintHold` are the schedule it is walking. */
+      swingP: r3(swingLocalP(k.anim)),
+      sched: k.anim.sched ? k.anim.sched.map(r3) : null,
+      feintHold: r3(k.anim.feintHold || 0),
       knightAt: k.group ? [r3(k.group.position.x), r3(k.group.position.z)] : null,
       yaw: k.group ? r3(k.group.rotation.y) : null,
-      pivots: {}, rot: {}, lever: {}
+      /* §22: whether the blade has left his hand yet. `lever` cannot answer
+         that — it is measured inside the pivot's own subtree and is therefore
+         rotation-invariant, so it reads the same before and after the drop.
+         The mesh COUNT is what moves. */
+      dropped: k.dropped ? k.dropped.length : 0,
+      pivots: {}, rot: {}, lever: {}, meshes: {}
     };
     for (var key in k.rig) {
       var g = k.rig[key];
       out.pivots[key] = [r3(g.position.x), r3(g.position.y), r3(g.position.z)];
       out.rot[key] = [r3(g.rotation.x), r3(g.rotation.y), r3(g.rotation.z)];
       g.getWorldPosition(v);
-      var far = 0;
+      var far = 0, n = 0;
       g.traverse(function (o) {
         if (!o.isMesh) return;
+        n++;
         o.getWorldPosition(cv);
         var d = cv.distanceTo(v);
         if (d > far) far = d;
       });
       out.lever[key] = r3(far);
+      out.meshes[key] = n;
     }
     return out;
   };

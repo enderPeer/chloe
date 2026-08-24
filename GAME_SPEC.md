@@ -380,7 +380,7 @@ Three canvas surfaces painted onto existing props, repainted whenever the room s
 
 ### The nave is the arena
 Arena bounds are now a **rectangle matching the church walls** (`arena.bounds`), not a small circle — you and the knight both roam the whole crossing. The circle is kept as a fallback for configs without bounds.
-**Benches** (`data/arena3d.js` `benches`/`bench`): the model's pews are baked into merged meshes and cannot be split, so the interactive ones are loose benches shoved out of the rows into the fight area. Walking into one **slows you to `slowFactor`** and **shunts it aside** at `pushSpeed` (clamped to stay inside the nave). An ability whose reach/arc catches one **breaks it into a wood pile** of scattered planks that stays on the floor.
+**Benches** — SUPERSEDED by §22 (removed entirely; the nave is open floor). Kept for history: the model's pews are baked into merged meshes and cannot be split, so the interactive ones are loose benches shoved out of the rows into the fight area. Walking into one **slows you to `slowFactor`** and **shunts it aside** at `pushSpeed` (clamped to stay inside the nave). An ability whose reach/arc catches one **breaks it into a wood pile** of scattered planks that stays on the floor.
 
 ### Lighting note
 Anything new in the arena must clamp `envMapIntensity` (~0.1). The keys are bright enough that unclamped IBL renders dark oak, dark leather and skin as white plastic — this has now bitten the room hands, the first-person arms and the benches.
@@ -475,3 +475,43 @@ Also fixed here: the midline is taken from the **body only** (the drawn sword dr
 
 ### A note on `disableAPI`
 `arena3d`'s no-WebGL fallback had drifted badly — `stopAbility` alone was already being called unguarded, so a machine without WebGL threw its way through the fight instead of degrading. It now covers the whole public surface. **Keep it in step whenever the API grows.**
+
+## 22. The knight moves like a fighter, and the nave is open floor (supersedes the knight movement of §18, the bench props of §19, and the arena bounds of §20)
+
+### The benches are gone
+`benches`/`bench` leave `data/arena3d.js`; `buildBenches`, `breakBench`, `benchPush`, `benchHit`, `benchDebug`, the `benchSlow` multiplier and every call site leave `engine/arena3d.js`. No soft obstacles, no wood piles, no push-slow. The model's baked pews stay as scenery exactly as they are. `A.benchDebug` is removed from the public surface (delete it, do not stub it). Ability hit tests keep only the knight test. README/§19 references to benches are corrected.
+
+### The nave is open and walkable
+The fight area is the largest contiguous walkable region the baked navgrid (`data/arena-nav.js`) actually reports — not a hand-authored rectangle inside it. At load the engine measures the free region around the player spawn by flood fill and exposes it as `debug().arenaArea = {cells, m2, minX, maxX, minZ, maxZ}`. `arena.bounds` in data is widened to that measured region (author it from the flood fill, do not guess) and is used only as a fallback clamp; the navgrid stays the real constraint so stone still stops you.
+Walkability fixes required: `navFree`'s 5-point probe uses `RADIUS * 0.8` for BOTH bodies, which makes doorway-width gaps impassable and lets a knight get wedged; probe with the body's own radius and allow a cell that is free at the centre plus 3 of 4 rim points, so brushing a pillar no longer reads as a wall. A body that ends a frame illegal is walked out with `navNearest` (already exists) instead of being frozen. Target: **no reachable pocket of floor smaller than 2m across is left cut off**, and the player can walk the full transept and both aisles.
+
+### Movement patterns — a state machine, not a beeline (`knight.brain` in data)
+States: `stalk` · `press` · `strafe` · `reposition` · `recover` · `stagger`. One `brain` block in `data/arena3d.js` holds every tunable (speeds, ranges, durations, cooldowns, weights) — no magic numbers in the engine.
+- **stalk** (out of range): closes, but on an ARC — the approach vector is the player direction rotated by `arcBias` (sign flips per knight, held for `arcHoldMs`) so he comes in off-line instead of down a rail.
+- **press** (in range, ready): holds `keepDistance` and picks an attack; while waiting he sways weight side to side.
+- **strafe**: circles the player at current range at `strafeSpeed`, direction held `strafeHoldMs`, reversing on nav blocks; entered on `strafeWeight` after a recover or when an attack is on cooldown.
+- **reposition**: after a combo or when crowded by a squadmate, backs off to `repositionDist` (backpedal, facing you, guard up) then re-engages.
+- **recover**: the post-swing window (`recoverMs`), open to punishment — he is slow and cannot turn fast.
+- **stagger**: entered when damage in one hit exceeds `staggerDamage` or a `staggerBuildup` meter fills (meter decays `staggerDecay`/s); he reels for `staggerMs`, cannot attack, and takes `staggerTakeMult` damage. This is the punish window the fight has never had.
+- **dash** stays but becomes a *committed lunge with a wind-up*: `dashTellMs` of a crouch-and-coil before he launches, so it can be read and dodged.
+Per-knight **personality** picked at spawn from `brain.personalities` (e.g. `aggressive` shorter cooldowns/longer presses, `cautious` more strafe/reposition, `brute` slower but dashes further): a squad must not move as one organism. `debug()` exposes `knightState`, `knightBrain` (state, personality, timers) per knight.
+
+### Attacks — five patterns
+Keep `slash` / `overhead` / `charge` and ADD:
+- **`thrust_combo`** — two fast stabs then a lunge; each stab is its own hit window; evade `sidestep`; medium reach, lower per-hit power.
+- **`ground_slam`** — he raises the sword two-handed and smashes the floor: a **radial shockwave** expanding from his feet; evade `backoff` (be outside `radius` at the strike frame) — the first pattern that punishes standing on top of him. Add its HUD hint ("GET BACK!") and, if `ui/battle3d.js` maps evade→prompt, extend that map.
+Patterns gain optional `feint: {chance, holdMs}` — the wind-up stops at the apex, holds, then continues, so telegraph-reading alone is not enough. A feinted swing must never damage during the hold.
+
+### Animations — the pose library grows
+`SWINGS` gains `thrust_combo` (two short jabs sharing one curve segment) and `ground_slam` (both arms overhead, hard drop, knee bend on impact). New non-swing poses in `poseKnight`, all built from the existing 103-piece limb rig (no new assets, no bones):
+- **strafe** — crossover side gait, torso open to the player, blade tracking.
+- **backpedal** — heel-first retreat, guard high.
+- **turnInPlace** — plants and pivots when yaw error exceeds `turnThreshold`.
+- **stagger** — head snapped back, arms flung wide, weight on the back foot, a short recoil that eases out.
+- **taunt** — on `tauntChance` after a kill or a whiffed player attack: blade raised, head tilt, a beat of contempt.
+- **death** — REPLACES the sink-through-floor: knees buckle, torso pitches forward, sword drops from the hand, body settles and only then fades. `deathMs` in data.
+- **hitFlash** — every damaging hit shows a short flinch even when it does not stagger, so blows always read.
+Existing cross-fade discipline holds: build a target pose each frame, ease at the `RATE_*` rates, and never let a state change snap the body.
+
+### Verification hooks (mandatory)
+`debug()` gains `arenaArea`, `knightBrain[]`, `staggerMeter[]`, `tvOn`-style booleans where relevant. A headless hook must let a test drive N seconds of knight AI and report the distribution of states entered, so "he no longer only walks straight at you" is a measurement, not an opinion.

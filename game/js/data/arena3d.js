@@ -43,37 +43,28 @@ CHLOE.data.arena3d = {
   hdri: 'assets/hdri/afrikaans_church_interior_1k.hdr',
 
   /* The fight happens in the crossing before the altar steps. The player is
-     clamped inside a circle plus pew colliders, and can never leave or clip
+     clamped by the baked navgrid (§20) and can never leave the stone or clip
      through the knight.
      Measured placement (blender probe): nave floor z=-34.04, nave strip
      y ±5, altar chancel toward +X, door at x=-55, center aisle |y|<1.2,
      pew rows from x<=-9. World transform: rotY 90° + offset below maps the
      crossing (blender -7.5,0) onto the world origin. */
-  /* §19: the NAVE WALLS are the arena now — a rectangle matching the stone,
-     not a small circle in the middle of it. You and the knight both roam the
-     whole crossing. `radius` is kept as a fallback for older code paths. */
+  /* §22: `bounds` is MEASURED, not guessed. Flood-filling the baked navgrid
+     (data/arena-nav.js, 0.4m cells) from playerSpawn gives ONE connected
+     region — all 1563 walkable cells, 250.1 m², no orphan pockets at all —
+     whose bounding box is the rectangle below. The old hand-authored box
+     (±8.0 / -7.4..7.0) clipped 1.7m off the west aisle and 0.7m off the
+     south end of floor you can actually stand on.
+     Note the -9.1..-8.3 tail is a 1-2 cell doorway spur: a 0.35m body cannot
+     enter it, so the *standable* region really stops at minZ -7.9. The extra
+     0.8m is harmless because the navgrid, not this box, is the real
+     constraint — `bounds` only clamps on the fallback path where the church
+     (and therefore the grid) failed to load.
+     `radius` is kept for older code paths that predate bounds entirely. */
   arena: {
     cx: 0, cz: 0, radius: 9.0, knightMinDist: 1.3,
-    bounds: { minX: -8.0, maxX: 8.0, minZ: -7.4, maxZ: 7.0 },
-    colliders: []      // the baked pews are scenery; loose benches are below
-  },
-
-  /* Benches shoved out of the rows and left in the fight area. Each one is a
-     real prop: walking into it SLOWS you and shunts it aside, and an ability
-     that connects with it breaks it into a wood pile (§19). */
-  benches: [
-    { x: -2.6, z: 3.0, rotY: 0.12 },
-    { x:  2.7, z: 2.4, rotY: -0.20 },
-    { x: -3.1, z: -1.4, rotY: 0.35 },
-    { x:  3.0, z: -2.2, rotY: -0.10 },
-    { x: -1.9, z: -5.2, rotY: 0.05 },
-    { x:  2.2, z: -5.8, rotY: 0.28 }
-  ],
-  bench: {
-    w: 2.0, h: 0.85, d: 0.55,
-    slowFactor: 0.45,     // your speed while pushing through one
-    pushSpeed: 1.9,       // how fast it slides out of the way
-    hp: 1                 // ability hits needed to break it
+    bounds: { minX: -9.7, maxX: 7.9, minZ: -9.1, maxZ: 7.7 },
+    colliders: []      // the baked pews are scenery, and nothing else is solid
   },
 
   // In the aisle facing the altar (and the knight at z -1.8). Camera forward is
@@ -83,21 +74,107 @@ CHLOE.data.arena3d = {
      both sides standing inside solid stone. The arena is really a ring
      around that block, and the fight now happens in its north transept:
      ~15m of clear floor, no pew rows in the way, stained glass down one
-     side. yaw -PI/2 looks toward +X, which is where the knights come from. */
+     side. yaw -PI/2 looks toward +X, which is where the knights come from.
+     §22 re-checked both against the flood fill: each sits on a free cell of
+     the one connected region, each is legal under the body probe, and they
+     are 11.00m apart (well over the 8m minimum), so neither moved. The band
+     they stand in runs clear from z -7.9 to z -1.2, which is what lets
+     spawnSquad fan a round-6 line perpendicular to the approach without
+     putting the outer knights in stone. */
   playerSpawn: { x: -6.0, z: -5.4, yaw: -Math.PI / 2 },
   knight: {
     x: 5.0, z: -5.4,        // 11m across the transept, closing on foot
     targetHeight: 2.15,     // model is bbox-normalized to this height
     name: 'Hollow Black Knight',
-    /* §18 movement: he hunts you. Walks to close, dashes across the nave on
-       a cooldown, and stops at keepDistance so he is always in swinging
-       range without standing inside you. */
+    /* §18 movement, kept as the FALLBACK numbers: any engine path that has
+       not moved onto the §22 state machine still reads these. `brain` below
+       is the real tuning surface and repeats them — if you retune, retune
+       both or the two paths disagree about how fast he walks. */
     walkSpeed: 1.6,
     keepDistance: 2.0,
     dashSpeed: 9.5,
     dashTime: 0.42,
     dashCooldown: 6.0,
-    dashRange: 5.0
+    dashRange: 5.0,
+
+    /* §22 THE BRAIN — every tunable of the state machine
+       (stalk · press · strafe · reposition · recover · stagger), so the
+       engine carries no magic numbers. Keys are deliberately FLAT: a
+       personality is applied as a shallow copy over this object, and a
+       nested group would need a deep merge nobody would remember to write.
+       Ranges in the comments are the band that still feels like a fight;
+       outside them he reads as either a statue or a homing missile. */
+    brain: {
+      /* --- speeds, m/s ------------------------------------------------ */
+      walkSpeed: 1.6,        // stalk/press closing pace (1.2-2.0; >2.4 he outruns you)
+      strafeSpeed: 1.35,     // circling pace, must be < walkSpeed or he orbits faster than he closes (1.0-1.7)
+      backpedalSpeed: 1.1,   // reposition retreat, facing you the whole way (0.8-1.4)
+      dashSpeed: 9.5,        // the committed lunge (8-11; below 8 the tell outlasts the dash)
+      turnRate: 3.4,         // rad/s of body yaw while free (2.5-4.5)
+      recoverTurnRate: 1.1,  // rad/s during `recover` — being slow to turn IS the punish window
+
+      /* --- ranges, m -------------------------------------------------- */
+      keepDistance: 2.0,     // press holds here: inside his reach, outside your body (1.8-2.4)
+      dashRange: 5.0,        // further than this and the lunge is worth its wind-up (4.5-7.0)
+      repositionDist: 4.5,   // how far he backs off after a combo or when crowded (3.5-5.5)
+      tooCloseDist: 1.4,     // hugging him: he disengages instead of flailing (1.2-1.6)
+      crowdDist: 1.8,        // squadmate this close -> reposition, so a squad fans out (1.5-2.5)
+
+      /* --- timings, ms unless noted ----------------------------------- */
+      arcHoldMs: 1400,       // how long one approach arc is held before the bias flips (900-2000)
+      arcBias: 0.55,         // rad the approach vector is rotated by; SIGN FLIPS PER KNIGHT (0.35-0.8)
+      strafeHoldMs: 1100,    // one circling direction; short = twitchy, long = predictable (700-1800)
+      repositionMs: 900,     // cap on the backpedal so he cannot retreat forever (600-1400)
+      dashTellMs: 380,       // crouch-and-coil BEFORE the lunge — this is what makes it dodgeable (300-500)
+      dashCooldownMs: 6000,  // per knight, staggered at spawn so a squad never lunges in unison
+      attackCooldownMs: 900, // floor between his own swings; battle3d still owns squad cadence (700-1400)
+      pressSwayMs: 800,      // period of the weight shift while he waits in press (600-1100)
+      turnThreshold: 0.7,    // rad of yaw error that triggers a planted turnInPlace (0.5-1.0)
+      tauntChance: 0.22,     // 0-1, rolled after a kill or a whiffed player attack (0.1-0.35)
+      deathMs: 1600,         // buckle -> pitch -> sword drops -> settle -> fade (1200-2200)
+      hitFlashMs: 160,       // flinch on ANY damaging hit, so blows always read (120-220)
+
+      /* --- state weights ---------------------------------------------- */
+      /* Relative pull when he is free to choose (after a recover, or with the
+         attack on cooldown). Not probabilities — the engine normalises. The
+         intended read is "presses forward twice as often as he circles". */
+      pressWeight: 4,
+      strafeWeight: 2,
+      repositionWeight: 1,
+      stalkWeight: 2,        // only consulted when he is already out of range
+
+      /* --- stagger: the punish window the fight has never had ---------- */
+      staggerDamage: 90,     // one hit above this staggers outright (70-120: a charged move, not a jab)
+      staggerBuildup: 210,   // or this much accumulated damage fills the meter (150-300)
+      staggerDecay: 55,      // meter points bled per second, so chip damage never banks (40-90)
+      staggerMs: 1200,       // reeling: cannot attack, cannot turn (900-1600)
+      staggerTakeMult: 1.5,  // damage multiplier while reeling (1.35-1.8; 2.0 makes stunlock the only tactic)
+
+      /* --- personalities ---------------------------------------------- */
+      /* Picked per knight at spawn and shallow-merged over the defaults, so
+         each entry lists ONLY what it changes. A squad that shares one brain
+         moves as one organism, which is the thing §22 exists to kill. */
+      personalities: {
+        // in your face: short cooldowns, long presses, barely circles
+        aggressive: {
+          walkSpeed: 1.85, attackCooldownMs: 700, dashCooldownMs: 4500,
+          keepDistance: 1.8, pressWeight: 6, strafeWeight: 1,
+          repositionWeight: 0.5, tauntChance: 0.3
+        },
+        // fights at the edge of your reach: circles, backs off, waits you out
+        cautious: {
+          walkSpeed: 1.45, strafeSpeed: 1.5, keepDistance: 2.4,
+          attackCooldownMs: 1200, strafeHoldMs: 1500, repositionDist: 5.2,
+          pressWeight: 2, strafeWeight: 4, repositionWeight: 2.5
+        },
+        // slow, heavy, and crosses the whole nave when he does come
+        brute: {
+          walkSpeed: 1.3, turnRate: 2.4, dashRange: 7.0, dashSpeed: 10.5,
+          dashTellMs: 480, dashCooldownMs: 5000, staggerDamage: 130,
+          staggerBuildup: 300, strafeWeight: 0.5, pressWeight: 5
+        }
+      }
+    }
   },
   church: { rotY: Math.PI / 2, x: 0, y: 34.04, z: -7.5 },
 
@@ -131,27 +208,84 @@ CHLOE.data.arena3d = {
   /* Attack patterns. The engine (arena.js) picks WHICH one; arena3d.js plays
      the telegraph and, at strike time, tests the player against the volume.
      evade: what saves you (shown as the HUD hint).
-     - slash:    horizontal arc at chest height -> CROUCH under it (or be out of reach)
-     - overhead: vertical smash on a strip ahead -> SIDESTEP out of the lane
-     - charge:   lunging thrust down a long lane -> MOVE, it's aimed where you stood */
+     - slash:        horizontal arc at chest height -> CROUCH under it (or be out of reach)
+     - overhead:     vertical smash on a strip ahead -> SIDESTEP out of the lane
+     - charge:       lunging thrust down a long lane -> MOVE, it's aimed where you stood
+     - thrust_combo: two jabs then a lunge, THREE hit windows -> SIDESTEP off the line
+     - ground_slam:  radial shockwave off his boots -> BACK OFF past `radius`
+
+     §22 optional `feint: {chance, holdMs}`: the wind-up stops at the apex,
+     holds, then finishes, so reading the telegraph is no longer sufficient on
+     its own. The hold MUST NOT damage — a feint that hits mid-hold is just an
+     unreadable attack. No feint on ground_slam: its whole read is "get out of
+     the circle", and pausing the drop only makes the ring land later.
+
+     WEIGHT MIX (relative, out of 14) — tuned so no single answer carries a
+     whole fight: slash 4 (29%) stays the bread and butter you crouch under,
+     overhead 3 (21%) and thrust_combo 3 (21%) split the sidestep budget so
+     the two never feel like the same move, charge 2 (14%) and ground_slam 2
+     (14%) are the rarer commitments that reshape where you are standing.
+     Roughly half the swings still want a sidestep, which is what keeps the
+     fight mobile. Remember data/knighttree.js gates patterns by his LEVEL,
+     so an early round rolls from a smaller table than this. */
   patterns: {
     slash: {
       id: 'slash', name: 'Wide Slash', hint: 'CROUCH!',
       telegraphMs: 1500, recoverMs: 700,
       reach: 3.4, evade: 'crouch',
-      power: 110, weight: 3
+      power: 110, weight: 4,
+      feint: { chance: 0.20, holdMs: 320 }
     },
     overhead: {
       id: 'overhead', name: 'Overhead Ruin', hint: 'SIDESTEP!',
       telegraphMs: 1700, recoverMs: 900,
       width: 1.7, length: 4.4, evade: 'sidestep',
-      power: 145, weight: 2
+      power: 145, weight: 3,
+      // the longest, highest apex — the pose that can afford the biggest lie
+      feint: { chance: 0.30, holdMs: 420 }
     },
     charge: {
       id: 'charge', name: 'Hollow Charge', hint: 'MOVE!',
       telegraphMs: 1900, recoverMs: 1100,
       width: 1.9, length: 7.5, evade: 'sidestep',
-      power: 170, weight: 1
+      power: 170, weight: 2,
+      // he is already lunging in the last quarter of the wind-up (§21), so
+      // keep the hold short or the feint reads as a stumble
+      feint: { chance: 0.18, holdMs: 300 }
+    },
+    /* Two fast stabs, then he steps through with a third. `hits` is the
+       schedule the engine reads: `atMs` is measured from atk.t0, the same
+       stamp the strike timer counts from (§21 — the picture and the damage
+       drifting apart on two clocks is exactly the bug that cost a fight).
+       telegraphMs equals the FIRST hit so any path that only knows
+       telegraphMs/power still lands one honest stab; `power` is the fallback
+       for that path. Per-hit power is deliberately well under overhead's 145
+       — three connected stabs (235) should beat one overhead, but only just,
+       and only if you eat the whole combo. */
+    thrust_combo: {
+      id: 'thrust_combo', name: 'Hollow Thrust', hint: 'SIDESTEP!',
+      telegraphMs: 1100, recoverMs: 850,
+      width: 1.0, length: 3.6, reach: 3.6, evade: 'sidestep',
+      power: 70,
+      hits: [
+        { atMs: 1100, power: 70 },              // jab
+        { atMs: 1400, power: 70 },              // jab, same lane
+        { atMs: 1850, power: 95, lunge: 1.6 }   // steps 1.6m through on the third
+      ],
+      totalMs: 1850,          // last hit — recoverMs starts from here, not telegraphMs
+      feint: { chance: 0.25, holdMs: 260 },
+      weight: 3
+    },
+    /* Both hands overhead, then the floor. The shockwave is RADIAL: facing
+       does not save you, distance does, so it is the answer to a player who
+       has learned to live inside his guard. Long telegraph and a long recover
+       because it is the one attack you punish by walking in afterwards. */
+    ground_slam: {
+      id: 'ground_slam', name: 'Ground Ruin', hint: 'GET BACK!',
+      telegraphMs: 2100, recoverMs: 1300,
+      radius: 4.2,            // be OUTSIDE this at the strike frame, measured from his feet
+      evade: 'backoff',
+      power: 190, weight: 2
     }
   }
 };

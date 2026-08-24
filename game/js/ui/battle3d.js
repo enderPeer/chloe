@@ -196,12 +196,45 @@ CHLOE.ui.battle3d = (function () {
 
   function log(t) { els.log.textContent = t || ''; }
 
-  function prompt(text, cls, ms) {
-    els.prompt.className = 'b3d-prompt ' + (cls || '');
-    els.prompt.textContent = text;
-    if (ms) later(function () { els.prompt.classList.add('hidden'); }, ms);
+  /* ---------- the centre line ----------
+     One line of text, several things competing for it: a dodge warning for
+     every swing IN FLIGHT (with a squad two knights are often winding up at
+     once, and §22's thrust_combo puts up a fresh warning per stab) plus
+     banners like the round title. They go on a stack, the newest owns the
+     line, and when one clears whatever is still live underneath comes back up.
+     It used to be a single element written blind, which lost the line two
+     ways: a strike hid it unconditionally, so knight A's blow blanked knight
+     B's warning while B was still mid-wind-up, and the round banner's own hide
+     timer fired straight through the first dodge warning of the fight — after
+     which the knight attacked with no tell at all. */
+  var promptStack = [];   // [{id, text, cls}] — newest last
+  var promptSeq = 0;
+
+  function renderPrompt() {
+    var top = promptStack.length ? promptStack[promptStack.length - 1] : null;
+    if (!top) { els.prompt.classList.add('hidden'); return; }
+    els.prompt.className = 'b3d-prompt ' + (top.cls || '');
+    els.prompt.textContent = top.text;
   }
-  function hidePrompt() { els.prompt.classList.add('hidden'); }
+
+  function prompt(text, cls, ms) {
+    var e = { id: ++promptSeq, text: text, cls: cls || '' };
+    promptStack.push(e);
+    renderPrompt();
+    if (ms) later(function () { dropPrompt(e.id); }, ms);
+    return e.id;
+  }
+
+  /* Retire ONE prompt by id; anything else still live stays on screen. */
+  function dropPrompt(id) {
+    for (var i = promptStack.length - 1; i >= 0; i--) {
+      if (promptStack[i].id === id) { promptStack.splice(i, 1); break; }
+    }
+    renderPrompt();
+  }
+
+  /* Clear the line completely — used when the fight itself ends. */
+  function hidePrompt() { promptStack.length = 0; renderPrompt(); }
 
   function splash(text, cls) {
     var s = ui.el('div', 'b3d-splash ' + (cls || ''), text);
@@ -269,11 +302,19 @@ CHLOE.ui.battle3d = (function () {
     if (!targets || !targets.length) { splash('miss', 'miss'); return; }
     var shown = 0;
     targets.forEach(function (ti) {
-      var res = C3.hitEnemy(abilityId, 1, ti);
+      /* §22: a reeling knight takes staggerTakeMult more, and this is the only
+         place that can price it. The 3D layer knows he is reeling but not what
+         a hit is worth; combat3 owns the damage sum but knows nothing about
+         his footing. The multiplier crosses here or the punish window is a
+         pose with no payoff — which is exactly what it was.
+         `a3d` degrades to the no-WebGL surface, which answers 1. */
+      var mult = a3d.staggerMult ? (a3d.staggerMult(ti) || 1) : 1;
+      var res = C3.hitEnemy(abilityId, mult, ti);
       if (!res) return;
       a3d.flinch(res.dmg, res.killed, ti);
       if (!shown++) {
-        splash('-' + res.dmg + (res.mult >= 2 ? ' SUPER' : '') +
+        splash('-' + res.dmg + (mult > 1 ? ' STAGGERED' : '') +
+               (res.mult >= 2 ? ' SUPER' : '') +
                (targets.length > 1 ? ' x' + targets.length : ''),
                res.mult >= 2 ? 'super' : 'dmg');
       }
@@ -290,6 +331,82 @@ CHLOE.ui.battle3d = (function () {
     nextSwingAt = now + Math.max(650, base / Math.sqrt(alive));
   }
 
+  /* §22: what the centre line tells you to DO about the swing coming at you.
+     The pattern's own `hint` wins — the copy belongs in data/arena3d.js — but
+     every evade KIND carries a hint here as the floor under it. A pattern that
+     reaches the HUD without a hint used to print "Ground Slam — undefined",
+     and a blank or wrong instruction is worse than none: the hint is the only
+     thing that says WHICH way to move, and 'backoff' (ground_slam's shockwave
+     rolls out from his feet) is the one kind where a clean sidestep still
+     leaves you standing in it. */
+  var EVADE_HINT = {
+    crouch:   'CROUCH!',
+    sidestep: 'SIDESTEP!',
+    backoff:  'GET BACK!'
+  };
+  function evadeHint(p) {
+    if (!p) return 'EVADE!';
+    return p.hint || EVADE_HINT[p.evade] || 'EVADE!';
+  }
+
+  /* When window `i` of this pattern is due, measured from the start of the
+     swing — thrust_combo's `hits` schedule states it as `atMs` off the same
+     atk.t0 the strike timer counts from (§21). `hitAtMs` is the ability-side
+     spelling of the same idea; null means the pattern never said. */
+  function windowAtMs(p, i) {
+    var h = p.hits && p.hits.length > i ? p.hits[i] : null;
+    if (h && typeof h.atMs === 'number') return h.atMs;
+    if (p.hitAtMs && p.hitAtMs.length > i) return p.hitAtMs[i];
+    return null;
+  }
+
+  /* How many separate hit windows one pattern lands. thrust_combo is the first
+     with more than one; fall back to a single window so every pattern written
+     before §22 behaves exactly as it always has. */
+  function hitWindows(p) {
+    if (!p) return 1;
+    if (p.hits && p.hits.length) return p.hits.length;
+    if (p.hitAtMs && p.hitAtMs.length) return p.hitAtMs.length;
+    return (typeof p.hits === 'number' && p.hits > 1) ? p.hits : 1;
+  }
+
+  /* How long window `i`'s warning may stay up before it is stale by
+     definition. The 3D layer normally retires it by calling back at the
+     strike, but a knight killed mid-wind-up never calls back at all, and a
+     warning that outlives its swing is a lie about what is about to hit you.
+     §22 feints stop at the apex and hold, so that hold counts toward the wait;
+     the extra slack is there so the callback normally wins this race. */
+  function windowWaitMs(p, i) {
+    var hold = (p.feint && p.feint.holdMs) || 0;
+    var at = windowAtMs(p, i), prev = i > 0 ? windowAtMs(p, i - 1) : 0;
+    var wait;
+    if (at !== null && prev !== null) wait = at - prev;
+    else wait = i > 0 ? (p.hitGapMs || 500) : (p.telegraphMs || 1500);
+    return wait + hold + 900;
+  }
+
+  /* One warning for one hit window. Multi-hit patterns count the stabs so you
+     know another is coming after the one you just dodged. */
+  function warnSwing(p, i, n) {
+    return prompt(p.name + ' — ' + evadeHint(p) +
+                  (n > 1 ? '  ·  ' + (i + 1) + '/' + n : ''),
+                  'telegraph ev-' + (p.evade || 'any'),
+                  windowWaitMs(p, i));
+  }
+
+  /* §22: a multi-hit pattern states a power PER window — thrust_combo's two
+     jabs are 70 and the step-through is 95 — but combat3.takeHit prices a
+     swing off `pattern.power`, which is only the single-window fallback. Hand
+     it a shallow view carrying THIS window's number, or the combo's heavy
+     third stab quietly lands for the same as a jab and the data lies. */
+  function windowPattern(p, res) {
+    if (!p || res.power == null || res.power === p.power) return p;
+    var out = {};
+    for (var k in p) out[k] = p[k];
+    out.power = res.power;
+    return out;
+  }
+
   function enemySwing() {
     if (!active || C3.isOver()) return;
     var pattern = pickPattern();
@@ -300,26 +417,45 @@ CHLOE.ui.battle3d = (function () {
     snap.enemy.each.forEach(function (e, i) { if (e.alive) living.push(i); });
     if (!living.length) return;
     var who = living[Math.floor(Math.random() * living.length)];
-    prompt(pattern.name + ' — ' + pattern.hint, 'telegraph');
+    /* §22: a multi-hit pattern gets ONE warning per hit window. The warning is
+       retired the moment its own stab arrives and the next one goes up in its
+       place, so the line never sits there telling you to dodge a stab that has
+       already landed. */
+    var windows = hitWindows(pattern);
+    var landed = 0;
+    var warn = warnSwing(pattern, 0, windows);
     a3d.telegraph(pattern, function (res) {
-      if (!active || C3.isOver()) { hidePrompt(); return; }
-      hidePrompt();
-      var out = C3.takeHit(res.hit ? pattern : null);
+      dropPrompt(warn);                 // this window is spent, hit or miss
+      if (!active || C3.isOver()) return;
+      landed++;
+      var out = C3.takeHit(res.hit ? windowPattern(pattern, res) : null);
       if (!res.hit || (out && out.evaded)) {
         splash(out && out.evaded ? 'DODGED!' : 'EVADED!', 'evade');
         log('The blade splits empty air.');
       } else if (out) {
         splash('-' + out.dmg, 'hurt');
         flashHurt();
-        log(pattern.name + ' lands: ' + out.dmg + '.');
+        log(pattern.name + ' lands: ' + out.dmg + '.' +
+            (windows > 1 ? '  (' + landed + '/' + windows + ')' : ''));
         // §19: leader fell but someone else is still standing — take over
         if (out.leaderSwap) {
           var nm = (CHLOE.data.characters[out.leaderSwap] || {}).name || out.leaderSwap;
           prompt(nm.toUpperCase() + ' TAKES OVER', 'banner', 1800);
           log(nm + ' steps over the body and keeps swinging.');
           buildHotbar(C3.snapshot());   // their level, their abilities, their keys
+          /* §22: he just put a leader down — roll the beat of contempt. It has
+             to WAIT for his own follow-through: a3d.taunt refuses a knight who
+             is still mid-swing, which is every knight at the instant his blow
+             lands, so rolling it here and now would never once succeed. The
+             whiffed-attack half of the same rule lives in the engine, where the
+             miss is already known. */
+          var slow = who;
+          later(function () {
+            if (active && !C3.isOver() && a3d.taunt) a3d.taunt(slow);
+          }, (pattern.recoverMs || 800) + 320);
         }
       }
+      if (landed < windows) warn = warnSwing(pattern, landed, windows);
       refresh();
       if (C3.isOver()) { finish(); return; }
     }, who);
@@ -365,10 +501,6 @@ CHLOE.ui.battle3d = (function () {
           var span = (ab.hitAtMs[ab.hitAtMs.length - 1] - ab.hitAtMs[0]) + 900;
           a3d.spawnTornado(span);
           splash('FIRE TORNADO', 'super');
-        }
-        // §19: a swing that catches a pew breaks it into a wood pile
-        if (ab && a3d.abilityHitsBench && a3d.abilityHitsBench(ab)) {
-          splash('CRASH', 'miss');
         }
         resolveStrike(ab, e);
       } else if (e.t === 'castEnd') {
@@ -565,6 +697,15 @@ CHLOE.ui.battle3d = (function () {
     /* test hooks */
     _fire: fire, _evade: doEvade, _active: function () { return active; },
     _swing: enemySwing,
+    /* §22: what the centre line is actually saying right now ('' = nothing),
+       so "a multi-hit pattern never leaves a stale dodge warning up" is a
+       measurement rather than an opinion. _hint proves the evade->hint map
+       covers a kind without having to drive a whole swing for it. */
+    _prompt: function () {
+      return (els.prompt && !els.prompt.classList.contains('hidden'))
+        ? els.prompt.textContent : '';
+    },
+    _hint: evadeHint,
     /* The resolve path only runs off rAF, which is frozen whenever the tab
        is not compositing — so without this the victory/defeat card and the
        mode switch that goes with it cannot be tested headlessly at all. */

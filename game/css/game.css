@@ -1551,6 +1551,12 @@ button:disabled .cost-chip{ opacity:.7; }
 .b3d-prompt.hidden{ display:none; }
 .b3d-prompt.telegraph{ color:#ffd7de; animation:b3dTelegraph .5s ease-in-out infinite; }
 .b3d-prompt.banner{ color:var(--red); }
+/* §22: every telegraph carries its evade kind as `ev-<kind>`. 'backoff'
+   (ground_slam's shockwave rolls out from his feet) is the one dodge about
+   distance rather than lanes, so it gets its own colour — at the size and
+   speed these flash by, an identical-looking warning reads as "sidestep" and
+   walks you straight into the ring. */
+.b3d-prompt.ev-backoff{ color:#ffc27a; text-shadow:0 0 18px rgba(255,150,40,.85); }
 @keyframes b3dTelegraph{
   0%,100%{ transform:translateX(-50%) scale(1); opacity:1; }
   50%{ transform:translateX(-50%) scale(1.07); opacity:.75; }
