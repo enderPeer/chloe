@@ -12,12 +12,22 @@ CHLOE.data.arena3d = {
      as ?v=N so browsers that cached an older build refetch instead of
      rendering the stale one (a cached all-black church looked like "no
      textures" long after the fix shipped). */
-  assetVersion: 3,
+  assetVersion: 4,
   models: {
     church: 'assets/3d/church.glb',
     knight: 'assets/3d/knight.glb',
-    punch:  'assets/3d/punch.glb'
+    punch:  'assets/3d/punch.glb',
+    tornado: 'assets/3d/firetornado.glb',
+    handsign: 'assets/3d/handsign.glb'
   },
+  /* §18 Fire Tornado presentation: the hand comes up at the camera, a rune
+     spins off the fingertips, and the funnel drops on the target. */
+  tornado: {
+    height: 3.6,          // model is normalized to this
+    spin: [2.2, -3.1, 4.4], // per-tube spin rates (rad/s) for a churning look
+    riseMs: 420, holdMs: 1500, fadeMs: 500
+  },
+  handSign: { x: 0.30, y: -0.34, z: -0.58, scale: 1.25, rotY: -0.55, rotX: -0.25 },
   // image-based light for the nave (Poly Haven, CC0)
   hdri: 'assets/hdri/afrikaans_church_interior_1k.hdr',
 
@@ -43,7 +53,16 @@ CHLOE.data.arena3d = {
   knight: {
     x: 0, z: -1.8,          // before the chancel steps, altar at its back
     targetHeight: 2.15,     // model is bbox-normalized to this height
-    name: 'Hollow Black Knight'
+    name: 'Hollow Black Knight',
+    /* §18 movement: he hunts you. Walks to close, dashes across the nave on
+       a cooldown, and stops at keepDistance so he is always in swinging
+       range without standing inside you. */
+    walkSpeed: 1.6,
+    keepDistance: 2.0,
+    dashSpeed: 9.5,
+    dashTime: 0.42,
+    dashCooldown: 6.0,
+    dashRange: 5.0
   },
   church: { rotY: Math.PI / 2, x: 0, y: 34.04, z: -7.5 },
 

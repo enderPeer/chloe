@@ -43,6 +43,10 @@ CHLOE.data.trees = {
         cost:2, requires:['c_v3_slot2'], pos:{x:74,y:2}, kind:'move', grant:{ability:'ember_jab'} },
       { id:'c_v3_breaker', branch:'voice', name:'Hollow Breaker', desc:'Unlocks Hollow Breaker — divine damage that ignores plate.',
         cost:3, requires:['c_v3_ember'], pos:{x:86,y:2}, kind:'move', grant:{ability:'hollow_breaker'} },
+      { id:'c_v3_slot3', branch:'trunk', name:'Third Hand', desc:'+1 ability keybind (key 4).',
+        cost:1, requires:['c_v3_slot2'], pos:{x:50,y:2}, kind:'passive', grant:{abilitySlot:1} },
+      { id:'c_v3_tornado', branch:'pyre', name:'Fire Tornado', desc:'Unlocks Fire Tornado — trace the sign, drop a pillar of fire on them.',
+        cost:3, requires:['c_v3_ember','c_v3_slot3'], pos:{x:92,y:8}, kind:'move', grant:{ability:'fire_tornado'} },
 
       /* ---- trunk (5) ---- */
       { id:'c_t1', branch:'trunk', name:'First Chord', desc:'The night it all started. +8 life.',

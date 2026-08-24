@@ -1683,6 +1683,19 @@ button:disabled .cost-chip{ opacity:.7; }
   max-width:92%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 .b3d-slot .ch{ position:absolute; top:2px; right:5px; font-size:.62rem; color:#ffd166; }
+/* §18: cost chip + cooldown readout on every hotbar slot */
+.b3d-slot .cost{
+  position:absolute; bottom:2px; left:0; right:0; text-align:center;
+  font-size:.5rem; letter-spacing:.04em; color:#7fd08a;
+}
+.b3d-slot .cost.mana{ color:#7fb3e8; }
+.b3d-slot .cd{
+  position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  font-family:var(--font-head); font-size:1.15rem; color:#fff;
+  text-shadow:0 2px 6px #000; pointer-events:none; z-index:2;
+}
+.b3d-slot.broke{ opacity:.5; }
+.b3d-slot.broke .cost{ color:var(--red); }
 .b3d-slot .sweep{
   position:absolute; left:0; bottom:0; width:100%; height:0%;
   background:rgba(0,0,0,.66); pointer-events:none; transition:height .1s linear;
