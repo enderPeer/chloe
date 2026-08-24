@@ -1501,6 +1501,12 @@ button:disabled .cost-chip{ opacity:.7; }
   0%,100%{ transform:scale(1.55); }
   50%    { transform:scale(1.95); }
 }
+/* TV hovered — crosshair stays white, just brightens + grows a touch */
+.r3d-crosshair.tv-range{
+  background:var(--text);
+  transform:scale(1.4);
+  box-shadow:0 0 10px rgba(242,238,240,.75), 0 0 3px rgba(242,238,240,.9);
+}
 /* engage hint under the crosshair */
 .r3d-hint{
   position:absolute; left:50%; top:50%;
@@ -1517,6 +1523,15 @@ button:disabled .cost-chip{ opacity:.7; }
 @keyframes r3dHintPulse{
   0%,100%{ opacity:.65; }
   50%    { opacity:1; }
+}
+/* TV variant of the hint — calm white, keeps the exact "TV — ..." casing */
+.r3d-hint.tv{
+  color:var(--text);
+  text-transform:none;
+  letter-spacing:.08em;
+  font-size:.95rem;
+  text-shadow:0 0 8px rgba(242,238,240,.4), 0 1px 3px rgba(0,0,0,.9);
+  animation:r3dHintPulse 1.8s ease-in-out infinite;
 }
 
 /* bottom control hints line */
