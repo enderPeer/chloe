@@ -365,36 +365,53 @@ one is where §30's own measured figure came from.
 The probe was not wrong about `spawnLevel`. It was wrong about what it had modelled — it asked a
 question the game never asks. Nothing in the answer said so.
 
-### A second example, in which the first explanation was also wrong
+### A second example, in which three successive explanations were wrong
 
-Worth following all the way down, because it took three passes to reach the truth and each wrong
-answer was more convincing than the last.
+Worth following all the way down, because the conclusion held steady while the explanation of it
+was overturned three times, and the third overturning is the one with a lesson in it.
 
 `grep -c $'\r'` was used to census line endings, and reported every file as containing carriage
-returns on **every single line** — `GAME_SPEC.md` 706/706, `ROADMAP.md` 30/30. The numbers looked
-like a clean result and happened to agree with a true claim (`GAME_SPEC.md` really is mixed), so
-nothing prompted a second look.
+returns on **every single line** — `GAME_SPEC.md` 706/706, `ROADMAP.md` 30/30, this page 688/688.
+The numbers looked like a clean result and happened to agree with a claim that was independently
+true (`GAME_SPEC.md` really is mixed), so nothing prompted a second look.
 
-**First explanation:** the pattern collapsed to the letter `r`, and prose contains an `r` on nearly
-every line. Plausible, consistent with the numbers, and **wrong** — a control file with no letter
+**Explanation 1:** the pattern collapsed to the letter `r`, and prose has an `r` on nearly every
+line. Plausible, consistent with every number to hand, and **wrong** — a control file with no letter
 `r` anywhere still returned the full line count.
 
-**Actual mechanism:** `$'\r'` expands to a **zero-length string** in this shell, so the command was
-`grep -c ''`, which matches every line and returns the line total. That is why every file's "CRLF
-count" was exactly its own line count — a tell that was visible in the first result and read as
-confirmation instead.
+**Explanation 2:** the shell expanded `$'\r'` to a zero-length string, making it an empty-pattern
+grep. Also plausible, also consistent, also **wrong** — measured directly, the shell emits the byte.
 
-**And the opposite pattern fails the opposite way.** On a file with two genuine CRLF line endings,
-`grep -cP '\r'` returns `0`, as does `grep -oaP '.\r'` — this `grep` strips CRLF as the line
-terminator, so the carriage return is never in the text the pattern is matched against. Two probes,
-two false answers, in **opposite directions**, on a question `grep` cannot observe at all. Count the
-bytes: pipe the file through `tr -dc` keeping only carriage returns, then only newlines, and compare
-the two counts.
+**Explanation 3:** `grep` discards the carriage return from the pattern, so a pattern of nothing but
+a CR becomes the empty pattern. This one is probably right, and it is deliberately not asserted
+here, because:
 
-The layer on top is the part worth keeping. **An explanation that fits the observation is not a
-diagnosis.** The letter-`r` theory predicted that a file with no `r` would count zero; one control
-file disproved it in seconds, and nobody ran one until the numbers were needed for something else.
-Make the explanation fail on purpose too, not just the probe.
+**Every instrument in the chain also handles carriage returns specially, so the measurement is part
+of the phenomenon.** Command substitution `$(…)` strips a trailing CR, so a byte count taken through
+it reports zero for a byte that exists. A CR reaching the terminal returns the cursor and overwrites
+the line already printed, so a result *read off the screen* can be a different number from the one
+produced — that is how explanation 2 got its supporting evidence. Two runs of the same
+`printf '%s' $'\r' | wc -c` disagreed, 1 against 0, depending only on whether the value passed
+through a substitution.
+
+What survives all three passes, and is what you actually need:
+
+| | |
+|---|---|
+| A lone-CR pattern | returns the **line total** — on files with CR *and* on files with none |
+| A real CR via `grep -P` | returns **0** on a genuinely CRLF file, as does `grep -oaP '.\r'` |
+
+**`grep` cannot answer this question in either direction.** Count the bytes instead, with a method
+that never routes a control character through a shell or a terminal: pipe the file through `tr -dc`
+keeping only carriage returns, then only newlines, and compare — or scan the buffer directly for
+`b[i] === 10 && b[i-1] === 13`, which asks no tool that has opinions about carriage returns.
+
+Two things to carry out of it. **An explanation that fits the observation is not a diagnosis** —
+make it predict something you have not measured yet, then measure that. Explanation 1 predicted
+zero on an `r`-less file; explanation 2 predicted zero bytes from `printf`. Each was one command
+from falsification and neither command was run, because the conclusion each supported was already
+believed. And **when the thing under test is a control character, suspect the instrument first**:
+the shell, the terminal and the tool may each consume it silently, and none of them will say so.
 
 ### The rule
 
