@@ -1,8 +1,9 @@
 /* CHLOE — ui/room3d.js  (Room3D — first-person mode, spec sec 13 + 14)
    Owns the #screen-room3d div + HUD: full-viewport canvas, center crosshair
    (red + "CLICK TO ENGAGE" when the enemy is hovered in range; white +
-   "TV — click to turn on/off" when the TV is hovered, or "◀ THE CHURCH" on
-   the stage board's picker arrows (§26) — enemy wins, then the TV),
+   "TV — click to turn on/off" when the TV is hovered, "◀ THE CHURCH" on the
+   stage board's picker arrows (§26), or "open the giftbox" on §27's shop box
+   — enemy wins, then the TV, then the board, then the box),
    top bar (shards / active char level / Menu — reuses the .hud style),
    bottom control-hints line, and the lock overlay shown while the pointer
    is not locked. All Three.js logic lives in CHLOE.engine.world3d; this file
@@ -139,20 +140,28 @@ CHLOE.ui.room3d = (function(){
     return a.name ? (mark + ' ' + String(a.name).toUpperCase())
                   : (mark + ' ANOTHER FLOOR');
   }
-  function setHint(kind, label){ // 'enemy' | 'tv' | 'item' | 'stage' | null
+  function setHint(kind, label){ // 'enemy' | 'tv' | 'item' | 'stage' | 'gift' | null
     if (els.crosshair) {
       els.crosshair.classList.toggle('in-range', kind === 'enemy' || kind === 'item');
-      // §26: the board's arrows borrow the TV's white crosshair — both are
-      // panels you press, neither is something you fight
-      els.crosshair.classList.toggle('tv-range', kind === 'tv' || kind === 'stage');
+      /* §26/§27D: the board's arrows and the giftbox borrow the TV's white
+         crosshair — all three are things you PRESS, none is something you
+         fight, and the red reticle is reserved for what you can attack. */
+      els.crosshair.classList.toggle('tv-range',
+        kind === 'tv' || kind === 'stage' || kind === 'gift');
     }
     if (els.hint) {
       els.hint.classList.toggle('hidden', !kind);
-      els.hint.classList.toggle('tv', kind === 'tv' || kind === 'stage');
+      els.hint.classList.toggle('tv', kind === 'tv' || kind === 'stage' || kind === 'gift');
       if (kind) {
+        /* §27D names the ACTION, not the object: "the giftbox" alone leaves
+           you to guess whether it opens, is taken, or is kicked — and the box
+           is the only way to spend Shards, so a player who never guesses
+           never finds the shop. */
         var text = kind === 'tv' ? 'TV — click to turn on/off'
                  : (kind === 'item' ? ('take the ' + (label || 'item'))
-                 : (kind === 'stage' ? (label || 'change the floor') : 'CLICK TO ENGAGE'));
+                 : (kind === 'stage' ? (label || 'change the floor')
+                 : (kind === 'gift' ? 'open ' + (label || 'the giftbox') + ' — the shop'
+                 : 'CLICK TO ENGAGE')));
         if (els.hint.textContent !== text) els.hint.textContent = text;
       }
     }
@@ -177,11 +186,16 @@ CHLOE.ui.room3d = (function(){
        the stage rather than saying "click". They outrank a pickup for the
        same reason they do in the engine — you are standing at the wall. */
     var arrow = (!enemyHover && !tvHovered(d) && d) ? d.stageArrow : null;
-    // §16: a glinting item under the crosshair — enemy, TV and board first
-    var pk = (!enemyHover && !tvHovered(d) && !arrow && d) ? d.pickupHover : null;
+    /* §27D: the shop giftbox. world3d ranks it enemy -> TV -> board -> box in
+       BOTH click paths, so the hint is ranked the same way — a prompt that
+       named a target the click would not act on is worse than no prompt. */
+    var gift = (!enemyHover && !tvHovered(d) && !arrow && d) ? d.giftHover : null;
+    // §16: a glinting item under the crosshair — enemy, TV, board and box first
+    var pk = (!enemyHover && !tvHovered(d) && !arrow && !gift && d) ? d.pickupHover : null;
     setHint(enemyHover ? 'enemy'
-          : (tvHovered(d) ? 'tv' : (arrow ? 'stage' : (pk ? 'item' : null))),
-            arrow ? stageArrowLabel(arrow) : (pk && pk.label));
+          : (tvHovered(d) ? 'tv'
+          : (arrow ? 'stage' : (gift ? 'gift' : (pk ? 'item' : null)))),
+            arrow ? stageArrowLabel(arrow) : (gift ? gift.label : (pk && pk.label)));
     if (els.overlay) els.overlay.classList.toggle('hidden', isLocked());
     refreshHud();
   }
@@ -202,6 +216,15 @@ CHLOE.ui.room3d = (function(){
         w.init(els.canvas);
         if (typeof w.onEngage === 'function') w.onEngage(engage);
         if (typeof w.onHover === 'function') w.onHover(onWorldHover);
+        /* §27D: the box publishes its own hover edge rather than joining
+           onHover's (enemy, dist, tv) signature. Nothing is stored from it —
+           poll() still reads debug().giftHover, the single source — this only
+           wakes the HUD on the edge so the prompt does not trail the aim. */
+        if (typeof w.onGiftHover === 'function') {
+          w.onGiftHover(function(){
+            if (ui && ui.current() === 'room3d' && !inBattle) poll();
+          });
+        }
         if (typeof w.onPickup === 'function') {
           w.onPickup(function(itemId, label){
             var item = (CHLOE.data.items || {})[itemId];
