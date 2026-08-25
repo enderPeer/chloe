@@ -128,8 +128,10 @@ CHLOE.engine.knighttree = (function () {
 
      Omitting the seniority argument makes him a NEWCOMER (seniority 1), which
      is §28's opening level exactly — but not §28's ceiling: he now tops out
-     overCap past his OWN opening rather than past the round baseline, so
-     levelFor('brute', 120) answers 4 where §28 answered 7. That is the change,
+     overCap past his OWN opening rather than past the round baseline, so at
+     round 5 levelFor('brute', 120) answers 4 where §28 answered 7. The round
+     matters to that example and is an implicit argument: capForKnight also
+     mins against the round's own ceiling, so at round 1 both answer 3. That
      not a regression: a knight who walked in tonight must not finish the
      fight level with the one who has been coming since round 1. */
   function levelFor(personality, seconds, r, seniority) {

@@ -1135,10 +1135,11 @@ CHLOE.engine.combat3 = (function () {
      data/knighttree.js bite — and it can never kill him, because a ratio of
      a positive maximum is positive.
 
-     Emitted as an event so a HUD can float "LEVEL 4" over the right body;
-     nothing renders it yet (ui/battle3d.js still names the round baseline on
-     the plate), and an event nobody consumes is cheaper than a level-up
-     nobody can see. */
+     Emitted as an event so a HUD can float "LEVEL 4" over the right body.
+     Still nobody floats it per body — but as of §30 the plate DOES render
+     the spread (it names the living range, `Lv 2-5`, off `each[].level`), so
+     this is no longer an event with no consumer anywhere: the numbers it
+     carries are on screen, just aggregated rather than per knight. */
   function syncLevels() {
     var kt = CHLOE.engine.knighttree;
     var a3d = CHLOE.engine.arena3d;

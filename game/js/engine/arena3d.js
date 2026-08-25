@@ -2824,12 +2824,19 @@ CHLOE.engine = CHLOE.engine || {};
      No candidate passes both -> the request goes through UNCHANGED, because a
      knight who declines to attack reads as a bug rather than as a weak
      knight. In practice that leaves exactly one gap: ground_slam is the only
-     'backoff' pattern, so a knight below level 5 handed one throws it. It can
-     only be rolled from round 5 onward (it unlocks at level 5 = round 5), and
-     by ~35s of a round-5 fight every temperament has climbed past level 5, so
-     the gap is the opening seconds of a late round. Closing it properly means
-     rolling the pattern per knight, which is ui/battle3d.js's call to make:
-     `kt.patterns(a3d.knightLevels()[who])` after `who` is chosen. */
+     'backoff' pattern, so a knight below level 5 handed one throws it.
+
+     §30 CLOSED IT AT THE SOURCE, and the old reasoning here is recorded
+     because it stopped being true rather than because it was wrong. §28 let
+     every knight climb to the round's own ceiling, so by ~35s of a round-5
+     fight everyone was past level 5 and the gap was the opening seconds of a
+     late round. Under §30's ladder the junior end is capped BELOW 5 for the
+     whole fight, which would have made it permanent — the newest knight
+     throwing the heaviest swing in the game, every round, forever.
+     ui/battle3d.js now picks the knight first and rolls from HIS level
+     (`pickPattern(a3d.knightLevels()[who])`), which is the fix this comment
+     asked for. This fallback stays as the backstop for any caller that still
+     rolls a pattern nobody on the floor has learned. */
   function windowsOf(p) { return (p && p.hits && p.hits.length) ? p.hits.length : 1; }
   function patternForKnight(k, pattern) {
     var kt = ktree();
