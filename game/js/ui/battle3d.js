@@ -7,7 +7,10 @@
    so ui/room3d.js's wrapper handles the roguelike outcomes (§15).
    §23 adds pockets: a hotbar key may hold a consumable instead of an ability,
    and the asteroid's impact stun floats its own label over the knights it
-   catches. Both read the engine defensively — see slotView() and floatStun(). */
+   catches. Both read the engine defensively — see slotView() and floatStun().
+   §24 makes this the place the round's STAGE is resolved and applied, before
+   the arena is built — see resolveStage()/applyStage(), and keep them in step
+   with the room board that promised the player that stage. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -17,6 +20,11 @@ CHLOE.ui.battle3d = (function () {
   var ui, party, C3, a3d;
   var els = {};
   var built = false, inited3d = false, active = false;
+  /* §24: the stage THIS fight is being fought on, kept because the result card
+     is written after `stage` has gone out of startFight's scope and a card that
+     names the church over a body lying in the Ring is the same lie the loading
+     gate copy was fixed for. null = no stages data; the old wording stands. */
+  var curStage = null;
   var rafId = 0, lastT = 0;
   var enemyTimer = null, nextSwingAt = 0;
   var slotEls = [];
@@ -829,6 +837,67 @@ CHLOE.ui.battle3d = (function () {
     if (C3.isOver()) { finish(); return; }
   }
 
+  /* ------------------------------------------------ §24: where we are fighting
+     KEEP THIS IN STEP with engine/world3d.js nextStagePlan(): the south poster
+     in the room paints its board from these same three rules, and a board that
+     names a different floor than the one you land on is the single failure
+     that makes the whole feature worthless. The rules, in order:
+       1. CHLOE.engine.stages.forRound(n) — the stateful selector, if it is
+          there. Once it exists it owns the cycle.
+       2. CHLOE.data.stagePick — the pure round -> stage half that lives in data.
+       3. neither -> the church, i.e. exactly what every fight was before §24.
+     All of it is gated on arena3d.setStage EXISTING, because that is the only
+     thing that can move the fight: on a build without it every round is still
+     in the church, and the board is gated the same way so it says so. */
+  function stageEntry(v) {
+    if (!v) return null;                 // forRound may hand back an id
+    if (typeof v === 'string') return ((CHLOE.data && CHLOE.data.stages) || {})[v] || null;
+    return v.id ? v : null;
+  }
+
+  function resolveStage(round) {
+    if (!a3d || typeof a3d.setStage !== 'function') return null;
+    var def = null;
+    var sel = CHLOE.engine.stages;
+    if (sel && typeof sel.forRound === 'function') def = stageEntry(sel.forRound(round));
+    var pick = !def && CHLOE.data && CHLOE.data.stagePick;
+    if (pick && typeof pick.stageForRound === 'function') def = stageEntry(pick.stageForRound(round));
+    else if (pick && typeof pick.forRound === 'function') def = stageEntry(pick.forRound(round));
+    if (!def) def = ((CHLOE.data && CHLOE.data.stages) || {}).church || null;
+    return def;
+  }
+
+  /* What the arena says it is standing on, or null if it does not publish it. */
+  function appliedStageId() {
+    try {
+      var d = a3d.debug && a3d.debug();
+      var s = d && d.stage;
+      if (!s) return null;
+      return (typeof s === 'string') ? s : (s.id || null);
+    } catch (e) { return null; }
+  }
+
+  /* Apply it BEFORE anything builds. On the first fight arena3d has not been
+     init'd yet, so this only records the pick and init() builds the right
+     stage; on later fights setStage has to tear the previous one down. Either
+     way the arena must never be constructed and then re-pointed.
+     setStage's argument shape belongs to the arena, so try the id and then the
+     entry itself, and VERIFY against debug().stage instead of assuming it took
+     — a silent mismatch here is exactly the lie the board must never tell. */
+  function applyStage(def) {
+    if (!def || !a3d || typeof a3d.setStage !== 'function') return null;
+    var forms = [def.id, def], got = null;
+    for (var i = 0; i < forms.length; i++) {
+      try { a3d.setStage(forms[i]); } catch (e) { continue; }
+      got = appliedStageId();
+      // null = this arena publishes no debug().stage to check against, so the
+      // call is all we have; take it rather than re-setting the stage twice.
+      if (got === null || got === def.id) return def;
+    }
+    console.warn('[battle3d] stage "' + def.id + '" did not take — arena reports "' + got + '"');
+    return null;
+  }
+
   /* ---------- lifecycle ---------- */
   function begin(enemyId) {
     ui = CHLOE.ui; party = CHLOE.engine.party;
@@ -841,6 +910,11 @@ CHLOE.ui.battle3d = (function () {
     if (!built) build();
     active = true;
 
+    // §24: the stage the room's board has been announcing, applied before the
+    // arena exists. Nothing below this line may run first.
+    var stage = applyStage(resolveStage(round));
+    curStage = stage;
+
     ui.show('battle3d');
     if (!inited3d) { a3d.init(els.canvas); inited3d = true; }
     a3d.reset();
@@ -852,30 +926,38 @@ CHLOE.ui.battle3d = (function () {
        invisible knight already walking you down. The gate also warms every
        shader, which is what stops the first Fire Tornado from hitching. */
     var load = CHLOE.ui.loading;
+    /* The gate copy names the floor you are about to stand on: "Unsealing the
+       church" over a bare disc of stone read as a bug the moment §24 gave the
+       run somewhere else to go. */
+    var churchy = !stage || stage.id === 'church';
+    var opening = churchy ? 'Unsealing the church…' : ('Opening ' + (stage.name || 'the floor') + '…');
+    var settled = churchy ? 'Lighting the candles…' : 'Lighting the rim…';
     if (load && a3d.assetsReady && !a3d.assetsReady()) {
-      load.show('Unsealing the church…');
+      load.show(opening);
       load.waitFor(
         function () { return a3d.assetsReady(); },
         function (setProgress) {
           var pr = a3d.assetProgress ? a3d.assetProgress() : null;
-          if (pr) setProgress(pr.done, pr.total + 1, pr.done >= pr.total
-            ? 'Lighting the candles…' : 'Unsealing the church…');
+          if (pr) setProgress(pr.done, pr.total + 1, pr.done >= pr.total ? settled : opening);
         },
-        function () { load.hide(); startFight(round); }
+        function () { load.hide(); startFight(round, stage); }
       );
       return;
     }
-    startFight(round);
+    startFight(round, stage);
   }
 
   /* Everything that must not happen until the scene is actually on screen. */
-  function startFight(round) {
+  function startFight(round, stage) {
     if (!active) return;
     a3d.start();
     a3d.stopAbility();
 
     buildHotbar(C3.snapshot());
     refresh();
+    // naming the stage in the log is the player-visible half of §24's promise:
+    // the board said this floor, and here it is.
+    if (stage && stage.name) log(stage.name + (stage.blurb ? ' — ' + stage.blurb : ''));
     log('The doors seal. Keys 1-9 to strike, SPACE to evade.');
     var snap0 = C3.snapshot();
     prompt(round > 1
@@ -976,7 +1058,8 @@ CHLOE.ui.battle3d = (function () {
     var card = ui.el('div', 'result-card defeat');
     card.appendChild(ui.el('h2', null, 'The Night Wins'));
     var dl = ui.el('div', 'result-lines');
-    dl.appendChild(ui.el('div', null, 'The church keeps what it takes...'));
+    dl.appendChild(ui.el('div', null,
+      ((curStage && curStage.name) || 'The church') + ' keeps what it takes...'));
     var s = party.state, topLv = 1;
     (s.members || []).forEach(function (m) { if (m.level > topLv) topLv = m.level; });
     var kills = (s.runStats && s.runStats.kills) || 0;

@@ -536,3 +536,58 @@ Existing cross-fade discipline holds: build a target pose each frame, ease at th
 
 ### Verification hooks
 `combat3` exposes the resolved slot list including item entries (id, kind, count, ready) for tests. A headless check must prove: asteroid castable twice on a level-3 pool; every knight in the splash is stunned and cannot attack for the duration; using a bandage restores life, decrements the bag, locks the shared cooldown, and does not refund on a failed press.
+
+## 24. Two stages: The Ring, and the board that announces it (extends §16 arena, §19 displays, §22 open nave)
+
+### Why a second stage
+The church is 250 m² of pillared stone shaped by a real model and a baked navgrid. Round N fields N knights (§20), and six of them in the transept is a scrum. **The Ring** is its opposite: a big, clear, perfectly round floor with nothing on it — pure room to move, circle and fight. Blank is the point; do not decorate it into a second church.
+
+### `data/stages.js` (NEW) — one entry per stage, the engine reads the active one
+```js
+CHLOE.data.stages = {
+  church: { id:'church', name:'The Church', shape:'model', ... },
+  ring:   { id:'ring',   name:'The Ring',   shape:'round', ... }
+}
+```
+Every stage carries: `id, name, blurb` (one line for the board), `shape` (`'model'` = load a glb + use the baked navgrid; `'round'` = procedural, no navgrid, radius clamp), `playerSpawn {x,z,yaw}`, `knightSpawn {x,z}`, `arena {radius | bounds, knightMinDist}`, `lights`, `fog`, and for `'round'` a `build` description the engine renders procedurally. The **church entry restates today's values from `data/arena3d.js`** — that file stays the source for models/patterns/knight brain; stages only own *where the fight happens and what it looks like*. Contradictions between the two are a bug: the church stage entry must reproduce §22's measured bounds and spawns exactly.
+
+### The Ring — procedural, no new assets
+Radius **14m** of open floor (~615 m², 2.5x the church), centred on the origin. Built from primitives and EXISTING textures only — no Pollinations run, no new glb:
+- A round floor disc, a low perimeter wall/kerb (~0.9m) so the edge reads as a boundary rather than a drop, and a wide dark void beyond it. A ring of standing light sources (braziers/pylons) around the rim at even intervals for readability and to give the eye something to judge distance and rotation against — the one thing a blank floor must not lose.
+- Nothing inside the circle. No colliders except the perimeter. **`shape:'round'` sets `nav = null`**, so §22's existing radius/bounds fallback clamp does the containment — this is why the Ring needs no bake, and that fallback path must be exercised, not bypassed.
+- Fog/backdrop dark enough that the rim lights carry the silhouette of a knight across 14m.
+
+### Stage selection
+`CHLOE.engine.stages` (or an equivalent named export — state it in the code): `order` (default `['church','ring']`), `forRound(n)` cycling that order so the stage is deterministic and learnable, `current()`, `next()`. The battle entry point resolves the stage for the round and applies it BEFORE the arena builds. Switching stages between rounds must fully reset the previous one (no church geometry left standing in the Ring, no doubled lights, no stale colliders or navgrid).
+
+### The board — the second poster becomes the stage announcement
+The room has TWO poster props (`data/room3d.js`: west wall `x -3.96`, south wall `x -1.4`) and both currently paint the SAME `displays.poster()` knight canvas, so one is redundant. The **south poster becomes the stage board**: give the props distinct kinds/ids in data (e.g. `poster` and `poster_stage`) rather than relying on array order, so moving one in data cannot silently swap the two.
+New `displays.stage()` canvas, in the house style of the existing panels: the stage **name** big, its `blurb`, a simple **plan diagram** that reads at a glance (a circle for the Ring, a nave outline for the church), the round it applies to, its size, and how many knights are waiting. It repaints wherever the mirror/poster repaint (room entry and after a round), so walking in tells you where the next fight is. The knight-stats poster is unchanged on the west wall.
+
+### Verification hooks
+`debug()` gains `stage: {id, shape, radius|bounds, nav: bool}`. A test must prove: the Ring clamps the player at its rim from 8 compass directions and never lets them past it; a knight squad spawns inside, spreads, and every §22 state still occurs there; switching church→Ring→church leaves no orphan geometry, lights or colliders; and the board canvas names the stage the next fight actually uses.
+
+## 25. A miss must cost nothing, and Water Wave (fixes §16/§17 damage; extends §19 ladder)
+
+### THE BUG: a dodge still damages you
+`ui/battle3d.js` calls `C3.takeHit(res.hit ? windowPattern(pattern, res) : null)` — on a geometric MISS it passes `null`. `engine/combat3.js takeHit()` guards only `isOver()` and `invulnerable()`; with no null-pattern guard it falls through, prices the hit at the fallback `(pattern && pattern.power) || 100`, and **deducts HP** (`Math.max(1, ...)` guarantees at least 1). The UI meanwhile branches on `!res.hit` and prints "DODGED!" / "The blade splits empty air", so the feedback and the health bar disagree and every clean dodge quietly costs life. Only the 220ms evade i-frames ever really prevented damage.
+
+**Fix, both ends (defence in depth — either alone leaves the trap armed for the next caller):**
+1. `takeHit(pattern)` returns a miss **before any damage maths** when `pattern` is falsy: `{dmg:0, missed:true, dead:false}`. No HP write, no leader-swap check, no side effects.
+2. `ui/battle3d.js` does not call `takeHit` at all on a miss; it renders the dodge feedback from `res.hit` alone. The engine guard stays as the backstop.
+3. The `|| 100` power fallback is a lie by omission — a pattern that reaches damage with no `power` should be *reported* (console.warn once) rather than silently priced at 100.
+Damage may only ever be applied on a TRUE hit test. Add a regression test to the harness: `takeHit(null)` leaves `hp` byte-identical.
+
+### Water Wave — level 4
+A wall of water shoved out in front of you that **throws the knights in it to the SIDES**, opening a lane you can walk through. It is the answer to being cornered — a mobility tool first, damage second.
+- `data/abilities.js` `water_wave`: type **`magical`** (the §12 chart has no water type — do NOT invent a 12th; `magical` is what `frost` migrated to). Modest cost (castable at level 4 on that pool — check the numbers, do not guess), short cooldown relative to the offensive spells because its job is escape. **Low power** — this must not become the best damage in the kit.
+- Shape: a cone/box in front of the camera (state reach and half-angle in data). Every knight inside is **displaced laterally** — perpendicular to your facing, each thrown toward whichever side it is already nearest, so the wave *parts* rather than pushing everything straight back. The displacement is paid out over ~250-350ms, never teleported.
+- Being thrown **breaks whatever he was doing**: `clearAttack` so a knight mid-wind-up drops the swing. It does NOT stun (that is §23's asteroid) — he recovers his footing and comes back.
+- New engine surface `CHLOE.engine.arena3d.shove(index, dirX, dirZ, distance, ms)`: displaces one knight, **respecting containment** — the navgrid on `shape:'model'` stages and the radius/bounds clamp on `shape:'round'` (§24). A shove must never push a knight into stone or outside the arena; clamp and stop short rather than teleporting him out of the world. Returns whether it moved him.
+- The lane must be real: immediately after the wave, the player can walk forward through where the knights were (`knightMinDist` no longer blocking that line).
+
+### Ladder: level 4 keeps Ash AND grants the wave
+Row 4 currently grants `ally:'ash'`. A row may carry several fields, so **add `ability:'water_wave'` + a key to row 4** rather than renumbering §21's authored 1-9 ladder. **Watch the slot arithmetic:** levels 1-9 hand out 6 ability keys today; this makes 7, plus §23's 2 pockets = 9, exactly `maxSlots`. The generated 10-100 "Wider Grip" rows count ability keys only (`slotsSoFar < 9`) and would push the total past the cap — that counter must account for pocket slots so the hotbar can never exceed 9. Verify the bind array at levels 4, 9, 12 and 100.
+
+### Verification
+Prove: a dodged swing leaves HP unchanged (all five patterns, both the geometric miss and the i-frame path); the wave throws knights sideways, breaks their wind-up, respects both stages' containment, and genuinely opens a walkable lane when cornered against a wall/rim; the hotbar never exceeds 9 keys.

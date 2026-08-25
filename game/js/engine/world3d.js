@@ -24,7 +24,7 @@ CHLOE.engine = CHLOE.engine || {};
     return {
       x: 0, y: 1.6, z: 0, yaw: 0, pitch: 0, locked: false, grounded: true,
       enemyDist: 0, enemyAlive: false, tvOn: false, envMap: false,
-      handsVisible: false, modelsLoaded: {}, colliders: []
+      handsVisible: false, stageBoard: null, modelsLoaded: {}, colliders: []
     };
   }
   function disableAPI(reason) {
@@ -435,16 +435,86 @@ CHLOE.engine = CHLOE.engine || {};
   // TV group ({model} block for GLTF, {fallback} block for the box TV).
   // Also creates the ON/OFF materials + the bluish flicker light. Default OFF.
 
-  /* §19 information surfaces: the mirror shows YOU, the poster shows the
-     knight, the TV plays a chaptered how-to. Each is a CanvasTexture painted
-     by engine/displays.js and refreshed when the room is entered (or, for the
-     TV, when you click it). */
-  var panels = { mirror: null, poster: null, tvChapter: 0, tvMat: null };
+  /* §19 information surfaces: the mirror shows YOU, the WEST poster shows the
+     knight, the TV plays a chaptered how-to. §24 gave the SOUTH poster a job
+     of its own — it is the stage board, and it announces where the next fight
+     happens. Each is a CanvasTexture painted by engine/displays.js and
+     refreshed when the room is entered (or, for the TV, when you click it).
+
+     Panels are keyed by the prop's `kind` out of data/room3d.js, NEVER by its
+     position in the furniture list: the two posters are the same size on the
+     same kind of wall, so matching on array order would silently swap the
+     dossier and the board the first time somebody reorders that list, and
+     both would still look perfectly plausible hanging there. */
+  var PANEL_KINDS = ['mirror', 'poster', 'poster_stage'];
+  var panels = { mirror: null, poster: null, poster_stage: null,
+                 stagePlan: null, tvChapter: 0, tvMat: null };
+
+  /* forRound()/stageForRound() may hand back an id or the entry itself. */
+  function stageEntry(v) {
+    if (!v) return null;
+    if (typeof v === 'string') return ((CHLOE.data && CHLOE.data.stages) || {})[v] || null;
+    return v.id ? v : null;
+  }
+
+  /* §24: which stage the NEXT fight will use, and how many are waiting on it.
+     KEEP THIS IN STEP with ui/battle3d.js resolveStage() — that is what
+     actually applies the stage before the arena builds, and a board naming a
+     different floor than the one you land on is the single failure that makes
+     this whole feature worthless. The rules, in order:
+       1. CHLOE.engine.stages.forRound(n) — the stateful selector, if it is
+          there. Once it exists it owns the cycle.
+       2. CHLOE.data.stagePick — the pure round -> stage half that lives in data.
+       3. neither -> the church, i.e. exactly what every fight was before §24.
+     All of it is gated on arena3d.setStage EXISTING, because that is the only
+     thing that can move the fight: on a build without it every round is still
+     in the church, and a board promising the Ring would simply be lying. */
+  function nextStagePlan() {
+    var round = 1, def = null;
+    var pt = CHLOE.engine.party;
+    var rs = pt && pt.state && pt.state.runStats;
+    // combat3 bumps runStats.round the moment a round is cleared, so by the
+    // time you walk back in this is already the round the board must announce.
+    if (rs && rs.round > 0) round = Math.floor(rs.round);
+    var a3d = CHLOE.engine.arena3d;
+    if (a3d && typeof a3d.setStage === 'function') {
+      var sel = CHLOE.engine.stages;
+      if (sel && typeof sel.forRound === 'function') def = stageEntry(sel.forRound(round));
+      var pick = !def && CHLOE.data && CHLOE.data.stagePick;
+      if (pick && typeof pick.stageForRound === 'function') def = stageEntry(pick.stageForRound(round));
+      else if (pick && typeof pick.forRound === 'function') def = stageEntry(pick.forRound(round));
+    }
+    if (!def) def = ((CHLOE.data && CHLOE.data.stages) || {}).church || null;
+    return { def: def, round: round, knights: round };  // round N fields N knights (§20)
+  }
+
+  /* The canvas a panel kind paints. displays.stage() is the newest of these
+     and may not be in this build's displays.js at all, so its presence is
+     checked rather than assumed: with no stage() — or with nothing able to
+     tell us which stage is coming — the south sheet falls back to the knight
+     dossier. A redundant second poster is what hung there before §24 and it
+     beats a board that says nothing, or worse, says the wrong thing. */
+  function panelCanvas(D2, kind) {
+    if (kind === 'mirror') return D2.mirror();
+    if (kind === 'poster_stage') {
+      var plan = (typeof D2.stage === 'function') ? nextStagePlan() : null;
+      if (plan && plan.def) {
+        try {
+          var c = D2.stage(plan.def, plan.round, plan.knights);
+          if (c) { panels.stagePlan = plan; return c; }
+        } catch (e) {
+          console.warn('[world3d] displays.stage() failed: ' + e.message);
+        }
+      }
+      panels.stagePlan = null;   // the board is showing the dossier instead
+    }
+    return D2.poster();
+  }
 
   function displayMat(kind) {
     var D2 = CHLOE.engine.displays;
     if (!D2) return null;
-    var canvas = (kind === 'mirror') ? D2.mirror() : D2.poster();
+    var canvas = panelCanvas(D2, kind);
     var tex = new THREE.CanvasTexture(canvas);
     if (THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
     var mat = new THREE.MeshBasicMaterial({ map: tex });
@@ -454,14 +524,17 @@ CHLOE.engine = CHLOE.engine || {};
     return mat;
   }
 
-  /* Repaint the mirror/poster (stats change as you level). */
+  /* Repaint mirror/poster (stats change as you level) AND the stage board (the
+     round moved on while you were out, so the next fight may be somewhere
+     else). Redrawing into the existing canvas keeps the material and texture
+     the mesh already holds — the panels must never blink out between rounds. */
   A_refreshPanels = function () {
     var D2 = CHLOE.engine.displays;
     if (!D2) return;
-    ['mirror', 'poster'].forEach(function (k) {
+    PANEL_KINDS.forEach(function (k) {
       var mat = panels[k];
       if (!mat || !mat.map) return;
-      var fresh = (k === 'mirror') ? D2.mirror() : D2.poster();
+      var fresh = panelCanvas(D2, k);
       var ctx = mat.userData.canvas.getContext('2d');
       ctx.clearRect(0, 0, mat.userData.canvas.width, mat.userData.canvas.height);
       ctx.drawImage(fresh, 0, 0);
@@ -609,8 +682,13 @@ CHLOE.engine = CHLOE.engine || {};
         // (the lamp point light is added by buildFurniture/addLampLight)
         break;
 
+      /* Two identical sheets, two different jobs (§24): 'poster' is the knight
+         dossier on the west wall, 'poster_stage' the board on the south. Same
+         mesh, and the KIND — not the list position — decides what is painted
+         on it, so the pair cannot be swapped by an edit to data/room3d.js. */
       case 'poster':
-        m = displayMat('poster') || makeMat(f.tex, { fallback: 0x2b2b30 });
+      case 'poster_stage':
+        m = displayMat(f.kind) || makeMat(f.tex, { fallback: 0x2b2b30 });
         mesh = new THREE.Mesh(new THREE.PlaneGeometry(f.w, f.h), m);
         mesh.position.y = 1.5;
         g.add(mesh);
@@ -1477,8 +1555,10 @@ CHLOE.engine = CHLOE.engine || {};
     try { if (document.pointerLockElement) document.exitPointerLock(); } catch (e) {}
   };
   W.isLocked = function () { return !!document.pointerLockElement; };
-  /* Repaint mirror/poster — levels and stats change between visits — and
-     rehang the gallery, since a round may have been cleared since you left. */
+  /* Repaint mirror/poster — levels and stats change between visits — refresh
+     the §24 stage board, since the round moved on and the next fight may be on
+     a different floor, and rehang the gallery, since a round may have been
+     cleared since you left. The room router calls this on every entry. */
   W.refreshPanels = function () {
     if (A_refreshPanels) A_refreshPanels();
     if (inited) buildTrophies();
@@ -1505,6 +1585,15 @@ CHLOE.engine = CHLOE.engine || {};
       enemyHovered: hovered,
       tvOn: tv.on,
       tvHover: tvHovered,
+      /* §24 verification hook: what the south board is ACTUALLY announcing
+         right now, straight off the last paint rather than re-resolved — a
+         test proving the board names the stage the next fight uses has to read
+         the wall, not ask the question a second time. null = the board fell
+         back to the knight dossier (no stages data, or no displays.stage). */
+      stageBoard: panels.stagePlan
+        ? { id: panels.stagePlan.def.id, name: panels.stagePlan.def.name,
+            round: panels.stagePlan.round, knights: panels.stagePlan.knights }
+        : null,
       envMap: envMapOk,
       handsVisible: hands.visible,
       crouch: !!(keys.ControlLeft || keys.ControlRight || keys.KeyC),

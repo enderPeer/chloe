@@ -14,6 +14,9 @@ CHLOE.engine.displays = (function () {
   'use strict';
 
   var BG = '#0d0a0c', RED = '#e5173f', TXT = '#f2eef0', DIM = '#9a939c';
+  // amber: the stage board's accent, kept off the mirror's blue and the
+  // poster's red so a glance at the wall tells the three panels apart
+  var ACCENT_DIM = 'rgba(255,209,102,0.65)';
 
   function make(w, h) {
     var c = document.createElement('canvas');
@@ -266,6 +269,206 @@ CHLOE.engine.displays = (function () {
     }
   }
 
+  /* ---------------- stage: the board that announces the fight ----------- */
+  /* §24. The south poster stopped being a second knight dossier and became
+     this: where the NEXT fight happens, so walking into the room tells you
+     what floor you are about to stand on before you engage.
+
+     stage(stageDef, round, knightCount) — every argument optional:
+       stageDef    a CHLOE.data.stages entry, or its id as a string, or
+                   omitted to resolve it from the round via stagePick
+       round       omitted -> party.state.runStats.round (default 1)
+       knightCount omitted -> round, because round N fields N knights (§20)
+     The engine passes all three when it already knows them (it resolves the
+     stage before the arena builds anyway); the room router can call it bare.
+     Reading state itself when asked to is deliberate — trophy() does the same,
+     and it is what keeps the board from drifting out of step with the round
+     counter hanging two walls away. */
+  function stage(def, round, knightCount) {
+    var W = 512, H = 700, c = make(W, H), g = c.getContext('2d');
+    var ACC = '#ffd166';
+    var pt = CHLOE.engine.party;
+    var rs = (pt && pt.state && pt.state.runStats) || {};
+
+    if (round === undefined || round === null) { round = rs.round || 1; }
+    round = Math.floor(round); if (!(round >= 1)) { round = 1; }
+    if (typeof def === 'string') { def = (CHLOE.data.stages || {})[def] || null; }
+    if (!def) {
+      var pick = CHLOE.data.stagePick;
+      def = pick ? pick.stageForRound(round) : null;
+    }
+    if (knightCount === undefined || knightCount === null) { knightCount = round; }
+    knightCount = Math.max(0, Math.floor(knightCount) || 0);
+
+    panel(g, W, H, 'WHERE IT HAPPENS', ACC);
+
+    if (!def) {
+      g.fillStyle = DIM; g.font = '22px system-ui, sans-serif';
+      g.fillText('The night has not chosen yet.', 40, H / 2);
+      return c;
+    }
+
+    var y = H * 0.17;
+    g.fillStyle = TXT; g.font = 'bold 40px Impact, "Arial Narrow", sans-serif';
+    g.fillText((def.name || def.id || 'Somewhere').toUpperCase(), 36, y);
+    g.fillStyle = ACC; g.font = '20px system-ui, sans-serif';
+    g.fillText('Round ' + round + '  ·  ' + sizeLine(def), 36, y + 30);
+
+    y += 62;
+    g.fillStyle = DIM; g.font = 'italic 17px system-ui, sans-serif';
+    y = wrap(g, def.blurb || '', 36, y, W - 72, 24, 3);
+
+    /* The knight row and the footer are anchored to the BOTTOM and the plan
+       takes whatever is left, rather than everything flowing down from the
+       blurb. A two-line blurb was already pushing the count into the footer,
+       and a stage author writing a long one should cost the diagram a few
+       pixels — never overlap the thing that says how many are coming. */
+    var kY = H - 204;
+    var box = { x: 36, y: y + 14, w: W - 72, h: Math.max(150, kY - 20 - (y + 14)) };
+    plan(g, box, def);
+
+    g.fillStyle = ACC; g.font = 'bold 20px Impact, sans-serif';
+    g.fillText('WAITING FOR YOU', 36, kY);
+    g.textAlign = 'center';
+    knightMark(g, W / 2, H - 148, 46, knightCount);
+    g.fillStyle = TXT; g.font = 'bold 19px Impact, "Arial Narrow", sans-serif';
+    g.fillText(knightCount + (knightCount === 1 ? ' HOLLOW KNIGHT' : ' HOLLOW KNIGHTS'),
+      W / 2, H - 92);
+    g.textAlign = 'left';
+
+    // what actually stops you at the edge — the two stages contain you by
+    // different machinery (§24) and it changes how the edge behaves
+    g.fillStyle = DIM; g.font = 'italic 14px system-ui, sans-serif';
+    g.fillText(def.shape === 'round'
+      ? 'The kerb turns you back. There is nothing beyond it.'
+      : 'Stone stops you. Learn where it stands.', 36, H - 36);
+    return c;
+  }
+
+  function sizeLine(def) {
+    var a = def.arena || {};
+    var area = def.area ? '~' + def.area + ' m²' : '';
+    if (def.shape === 'round' && a.radius) {
+      return Math.round(a.radius * 2) + ' m across' + (area ? '  ·  ' + area : '');
+    }
+    var b = a.bounds;
+    if (b) {
+      return Math.round(b.maxX - b.minX) + ' × ' + Math.round(b.maxZ - b.minZ) + ' m' +
+             (area ? '  ·  ' + area : '');
+    }
+    return area || 'unmeasured';
+  }
+
+  /* Word wrap that returns the next free y, so the caller can lay out what
+     follows. `maxLines` truncates with an ellipsis instead of running on: the
+     blurb is meant to be one line (§24) and a board that swallows its own
+     diagram to fit somebody's paragraph is worse than a clipped sentence. */
+  function wrap(g, text, x, y, maxW, lh, maxLines) {
+    var words = String(text).split(' '), line = '', lines = [], i;
+    for (i = 0; i < words.length; i++) {
+      var test = line ? line + ' ' + words[i] : words[i];
+      if (g.measureText(test).width > maxW && line) { lines.push(line); line = words[i]; }
+      else { line = test; }
+    }
+    if (line) { lines.push(line); }
+    if (maxLines && lines.length > maxLines) {
+      lines = lines.slice(0, maxLines);
+      lines[maxLines - 1] = lines[maxLines - 1].replace(/[\s,.;:—-]+$/, '') + '…';
+    }
+    for (i = 0; i < lines.length; i++) { g.fillText(lines[i], x, y); y += lh; }
+    return y;
+  }
+
+  /* ---- the plan diagram ----
+     Top-down, world +X to the right and world +Z down the page, so the two
+     spawn pips are placed from the SAME numbers the arena spawns from — a
+     hand-drawn picture would be free to lie about which side you start on. */
+  function plan(g, box, def) {
+    var a = def.arena || {};
+    var cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+    var s, ox = 0, oz = 0;
+
+    if (def.shape === 'round') {
+      var R = Math.min(box.w, box.h) / 2 - 16;
+      s = R / (a.radius || 14);
+    } else {
+      var b = a.bounds || { minX: -9, maxX: 9, minZ: -9, maxZ: 9 };
+      ox = (b.minX + b.maxX) / 2; oz = (b.minZ + b.maxZ) / 2;
+      s = Math.min((box.w - 32) / (b.maxX - b.minX), (box.h - 32) / (b.maxZ - b.minZ));
+    }
+    function px(x) { return cx + (x - ox) * s; }
+    function pz(z) { return cy + (z - oz) * s; }
+
+    if (def.shape === 'round') { drawRoundPlan(g, cx, cy, (a.radius || 14) * s, def); }
+    else { drawNavePlan(g, px, pz, s, a.bounds); }
+
+    if (def.playerSpawn) { pip(g, px(def.playerSpawn.x), pz(def.playerSpawn.z), '#9db4c0', 'YOU'); }
+    if (def.knightSpawn) { pip(g, px(def.knightSpawn.x), pz(def.knightSpawn.z), RED, 'HIM'); }
+  }
+
+  function drawRoundPlan(g, cx, cy, r, def) {
+    var bld = def.build || {};
+    var floor = g.createRadialGradient(cx, cy, r * 0.1, cx, cy, r);
+    floor.addColorStop(0, 'rgba(150,150,158,0.22)');
+    floor.addColorStop(1, 'rgba(90,92,102,0.10)');
+    g.fillStyle = floor;
+    g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.fill();
+    // the kerb: the one thing on the whole stage
+    g.strokeStyle = ACCENT_DIM; g.lineWidth = 5;
+    g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.stroke();
+    // the rim pylons, drawn at their real count so the picture and the floor
+    // agree about how many lights you can navigate by
+    var pyl = bld.pylons || {}, n = pyl.count || 12, every = pyl.litEvery || 1;
+    var pr = r * ((pyl.radius || 15.6) / ((def.arena && def.arena.radius) || 14));
+    for (var i = 0; i < n; i++) {
+      var ang = (i / n) * Math.PI * 2;
+      var x = cx + Math.cos(ang) * pr, y = cy + Math.sin(ang) * pr;
+      var lit = (i % every) === 0;
+      g.fillStyle = lit ? '#ff8a2a' : 'rgba(255,138,42,0.35)';
+      g.beginPath(); g.arc(x, y, lit ? 5 : 3, 0, Math.PI * 2); g.fill();
+    }
+  }
+
+  /* The church from above: the long nave, the apse toward +X, and the block of
+     stone in the middle that the navgrid bake proved was there (§20) — which
+     is the whole reason the fight happens in the band to one side of it. */
+  function drawNavePlan(g, px, pz, s, b) {
+    if (!b) { return; }
+    var x0 = px(b.minX), x1 = px(b.maxX), z0 = pz(b.minZ), z1 = pz(b.maxZ);
+    var w = x1 - x0, h = z1 - z0;
+    g.fillStyle = 'rgba(150,150,158,0.16)';
+    g.beginPath();
+    g.moveTo(x0, z0);
+    g.lineTo(x1 - w * 0.10, z0);
+    g.quadraticCurveTo(x1 + w * 0.06, z0 + h / 2, x1 - w * 0.10, z1);  // apse, +X
+    g.lineTo(x0, z1);
+    g.closePath();
+    g.fill();
+    g.strokeStyle = ACCENT_DIM; g.lineWidth = 4; g.stroke();
+    // the rood screen / altar block: solid, dead centre, not walkable
+    g.fillStyle = 'rgba(229,23,63,0.22)';
+    g.strokeStyle = 'rgba(229,23,63,0.55)'; g.lineWidth = 2;
+    g.fillRect(px(-1.6), pz(-1.4), 4.6 * s, 3.6 * s);
+    g.strokeRect(px(-1.6), pz(-1.4), 4.6 * s, 3.6 * s);
+    // two rows of columns, the pinch points you fight around
+    g.fillStyle = 'rgba(200,200,210,0.35)';
+    for (var i = 0; i < 4; i++) {
+      var x = -6.5 + i * 4.2;
+      g.beginPath(); g.arc(px(x), pz(-4.2), 3.5, 0, Math.PI * 2); g.fill();
+      g.beginPath(); g.arc(px(x), pz(3.6), 3.5, 0, Math.PI * 2); g.fill();
+    }
+  }
+
+  function pip(g, x, y, color, label) {
+    g.fillStyle = color;
+    g.beginPath(); g.arc(x, y, 7, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 2; g.stroke();
+    g.fillStyle = color; g.font = 'bold 13px Impact, sans-serif';
+    g.textAlign = 'center';
+    g.fillText(label, x, y - 13);
+    g.textAlign = 'left';
+  }
+
   /* ---------------- TV: the how-to programme ---------------- */
   var CHAPTERS = [
     { t: 'THE LONG NIGHT', l: ['A programme in six parts.', '', 'Everything you need to survive', 'the Backstage Between.', '', 'Click the TV to turn the page.'] },
@@ -310,6 +513,6 @@ CHLOE.engine.displays = (function () {
     return c;
   }
 
-  return { mirror: mirror, poster: poster, tv: tv, trophy: trophy,
+  return { mirror: mirror, poster: poster, tv: tv, trophy: trophy, stage: stage,
            chapterCount: CHAPTERS.length };
 })();

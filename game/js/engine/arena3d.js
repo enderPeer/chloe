@@ -9,9 +9,12 @@
 
    API: CHLOE.engine.arena3d = {
      init(canvas), start(), stop(), resize(), reset(),
+     setStage(id), stageInfo(),                   // §24, call setStage BEFORE init
      telegraph(pattern, onResult), flinch(dmg, killed), setKnightAlive(bool),
      debug(), _teleport(x, z), _setCrouch(bool)   // test hooks (§13 spirit)
-   } */
+   }
+   Also publishes CHLOE.engine.stages (§24 stage selection) — see the block
+   just below disableAPI() for why it lives in this file and not its own. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.engine = CHLOE.engine || {};
 
@@ -25,7 +28,31 @@ CHLOE.engine = CHLOE.engine || {};
   function deadDebug() {
     return { x: 0, z: 0, yaw: 0, pitch: 0, crouch: false, eye: 0, knightDist: 0,
              mode: 'dead', churchLoaded: false, knightLoaded: false,
-             locked: false, squad: 0, squadAlive: 0 };
+             locked: false, squad: 0, squadAlive: 0,
+             /* §24: a caller reading debug().stage must not have to branch on
+                whether WebGL exists, or on whether init() has run yet — answer
+                the stage we WOULD build, out of its own data. Hardcoding
+                shape:'model' here made the pre-init answer contradict the
+                post-init one the moment the round resolved to the Ring, and
+                ui/battle3d.js verifies setStage against exactly this object.
+                `nav:false` is honest either way: nothing is baked until the
+                stage is actually built. */
+             stage: deadStage() };
+  }
+  function deadStage() {
+    var def = stageDef, ar = (def && def.arena) || null;
+    var out = { id: (def && def.id) || stageId || 'church',
+                name: def ? def.name : null,
+                shape: (def && def.shape) || 'model', nav: false };
+    if (ar) {
+      if (ar.bounds) {
+        out.bounds = { minX: ar.bounds.minX, maxX: ar.bounds.maxX,
+                       minZ: ar.bounds.minZ, maxZ: ar.bounds.maxZ };
+      } else if (ar.radius != null) {
+        out.radius = ar.radius; out.cx = ar.cx || 0; out.cz = ar.cz || 0;
+      }
+    }
+    return out;
   }
   function disableAPI(reason) {
     if (reason) console.warn('[arena3d] disabled: ' + reason);
@@ -64,7 +91,78 @@ CHLOE.engine = CHLOE.engine || {};
     A.stun = function () { return false; };
     A.isStunned = function () { return false; };
     A.taunt = noop;
+    /* §24. setStage still RECORDS the choice on a dead API: the board and the
+       round counter read CHLOE.engine.stages.current(), and a machine with no
+       WebGL must still be able to say which stage the fight is nominally on
+       rather than answering null and painting an empty poster. */
+    A.setStage = function (id) { if (S.get(id)) { stageId = id; stageDef = S.get(id); } return false; };
+    A.stageInfo = function () { return stageDef; };
+    A._stageCount = function () { return null; };
   }
+
+  /* ------------------------------------------------------- §24 stage state
+     Declared HERE, above the THREE guard, because CHLOE.engine.stages answers
+     current()/next() on a machine with no WebGL too — the room's stage board
+     paints from data long before anyone loads a renderer. */
+  var stageId = null;    // id of the stage the arena is standing in (or will build)
+  var stageDef = null;   // its resolved data object; null = no data/stages.js, legacy church
+
+  /* ---------------------------------------------------- §24 stage selection
+     WHY THIS LIVES IN arena3d.js AND NOT engine/stages.js: index.html lists
+     every script by hand, and adding a file nobody wires up is a file that
+     silently never loads. §24 allows "an equivalent named export — state it in
+     the code"; this is that statement. The public surface is:
+       order       — the cycle (from CHLOE.data.stagePick when present)
+       forRound(n) — which stage round n is fought on: deterministic, so the
+                     player can learn "even rounds are the Ring"
+       current()   — the id the arena is standing in RIGHT NOW
+       next()      — the id after current in the order (what the board announces)
+       get(id)     — the resolved stage object, or null
+       apply(id)   — hand it to the engine (same as arena3d.setStage)
+     Every one degrades to 'church' when data/stages.js is missing or partial,
+     because a half-shipped data file must be a church, not a throw. The PURE
+     half (the order and the cycle) belongs to data/stagePick and is only
+     re-derived here when that is absent. */
+  var S = {};
+  CHLOE.engine.stages = S;
+
+  function stagesTable() { return (CHLOE.data && CHLOE.data.stages) || null; }
+  function stagePickData() { return (CHLOE.data && CHLOE.data.stagePick) || null; }
+
+  function orderList() {
+    var p = stagePickData();
+    if (p && p.order && p.order.length) return p.order.slice();
+    var t = stagesTable(), o = [], k;
+    if (t) { for (k in t) { if (t[k] && t[k].id) o.push(k); } }
+    return o.length ? o : ['church'];
+  }
+
+  S.order = orderList();
+  S.get = function (id) {
+    var t = stagesTable();
+    return (t && id && t[id]) || null;
+  };
+  S.forRound = function (n) {
+    S.order = orderList();
+    var p = stagePickData();
+    if (p && typeof p.forRound === 'function') {
+      var pick = p.forRound(n);
+      /* Trust data's cycle, but only if it names a stage that really exists —
+         a typo'd order would otherwise resolve to undefined and setStage would
+         quietly keep the previous stage for the rest of the run. */
+      if (S.get(pick)) return pick;
+    }
+    n = Math.floor(n);
+    if (!(n >= 1)) n = 1;
+    return S.order[(n - 1) % S.order.length];
+  };
+  S.current = function () { return stageId || (stagesTable() ? S.forRound(1) : null); };
+  S.next = function () {
+    S.order = orderList();
+    var i = S.order.indexOf(S.current());
+    return S.order[(i < 0 ? 0 : i + 1) % S.order.length];
+  };
+  S.apply = function (id) { return A.setStage(id); };
 
   if (!window.THREE) { disableAPI('THREE not found'); return; }
 
@@ -165,7 +263,63 @@ CHLOE.engine = CHLOE.engine || {};
      A squad that shared one attack window would telegraph in unison and land
      every strike on the same frame. */
 
-  function D() { return (CHLOE.data && CHLOE.data.arena3d) || {}; }
+  /* §24: ONE accessor, made stage-aware, instead of thirty call sites made
+     stage-aware. Everything in this file already asks D() for the arena box,
+     the spawns, the light rig and the fog, so overlaying the active stage
+     HERE reaches all of them at once — including the ones inside the §22
+     fallback clamp, which is exactly the path the Ring has to exercise.
+     With no data/stages.js (or no stage applied) this returns the base object
+     untouched, byte for byte, so the church behaves as it did yesterday.
+     The merge is cached and re-cut only when the stage or the underlying data
+     object changes: D() is called inside the frame loop. */
+  var mergeCache = null, mergeForStage = null, mergeForBase = null;
+
+  function D() {
+    var base = (CHLOE.data && CHLOE.data.arena3d) || {};
+    if (!stageDef) return base;
+    if (mergeCache && mergeForStage === stageDef && mergeForBase === base) return mergeCache;
+    mergeCache = mergeStage(base, stageDef);
+    mergeForStage = stageDef; mergeForBase = base;
+    return mergeCache;
+  }
+  function invalidateCfg() {
+    mergeCache = null; mergeForStage = null; mergeForBase = null;
+    if (inited) cfg = D();
+  }
+
+  /* What a stage is allowed to override, and — just as important — what it is
+     not. data/arena3d.js keeps MODELS, ATTACK PATTERNS and the KNIGHT BRAIN;
+     a stage owns only WHERE the fight happens and WHAT IT LOOKS LIKE (§24).
+     `arena` is replaced WHOLESALE rather than key-merged, and that is
+     deliberate: key-merging would leave the church's `bounds` sitting under
+     the Ring's `radius`, and the clamp in updatePlayer prefers bounds when
+     present — the circle would come out square. Same reasoning for colliders:
+     a stage that declares none must GET none. */
+  function mergeStage(base, st) {
+    var out = {}, k;
+    for (k in base) out[k] = base[k];
+    if (st.playerSpawn) out.playerSpawn = st.playerSpawn;
+    if (st.arena) {
+      var a = {};
+      for (k in st.arena) a[k] = st.arena[k];
+      // knightMinDist describes the knight's BODY, not the room, so it falls
+      // back to the base value rather than to a literal in the engine
+      if (a.knightMinDist == null && base.arena) a.knightMinDist = base.arena.knightMinDist;
+      out.arena = a;
+    }
+    if (st.knightSpawn) {
+      var kn = {};
+      for (k in (base.knight || {})) kn[k] = base.knight[k];
+      kn.x = st.knightSpawn.x; kn.z = st.knightSpawn.z;
+      out.knight = kn;         // targetHeight / rotY / brain all survive
+    }
+    if (st.lights) out.lights = st.lights;
+    if (st.fog) out.fog = st.fog;
+    // `hdri: null` is a STATEMENT (the Ring is lit by its own rig), so test for
+    // the key rather than for a truthy value
+    if (Object.prototype.hasOwnProperty.call(st, 'hdri')) out.hdri = st.hdri;
+    return out;
+  }
   /* Append the asset version so a rebuilt .glb is never served from cache. */
   function versioned(path) {
     if (!path) return path;
@@ -199,6 +353,21 @@ CHLOE.engine = CHLOE.engine || {};
     if (!assets.names[name] || assets.names[name] !== 'pending') return;
     assets.names[name] = how || 'ok';
     assets.done++;
+  }
+  /* §24: retire a SETTLED slot. A stage rebuild expects fresh slots for its own
+     textures, and without this `total` grows by two every time the Ring is
+     built — after ten rounds the loading bar is counting assets that were
+     disposed nine rounds ago. Deliberately refuses to touch a slot still
+     'pending': that one has an in-flight callback which will settle it, and
+     forgetting it here would leave a load nobody is waiting for and a gate
+     nobody can satisfy. */
+  function assetForget(prefix) {
+    for (var n in assets.names) {
+      if (n.indexOf(prefix) !== 0) continue;
+      if (assets.names[n] === 'pending') continue;
+      delete assets.names[n];
+      assets.total--; assets.done--;
+    }
   }
 
   A.assetProgress = function () {
@@ -279,8 +448,28 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   var churchFallback = null;
+  /* §24: the parsed church is CACHED across stage switches and deliberately
+     never disposed. It is a 26MB glb; re-entering the church after a round in
+     the Ring must not re-download and re-parse it, and must not stall the §21
+     loading gate a second time. Teardown detaches this group from the stage
+     root and hands it back on the next church build — so the scene graph is
+     genuinely clean between stages, while the expensive thing survives. */
+  var churchGroup = null;
+  var churchTimer = 0;
 
   function loadChurch() {
+    if (churchGroup) {
+      /* Already parsed this session — re-attach and re-derive everything the
+         build normally derives from it. The navgrid is 400 bytes of base64,
+         so re-decoding it is cheaper than trying to keep it valid across a
+         teardown, and re-deriving guarantees it matches the church we just
+         put back rather than the one we tore down. */
+      stageRoot.add(churchGroup);
+      churchLoaded = true;
+      nav = loadShippedNav();
+      measureArena();
+      return;
+    }
     assetExpect('church');
     var loader = makeLoader();
     var models = D().models || {};
@@ -289,14 +478,31 @@ CHLOE.engine = CHLOE.engine || {};
       assetDone('church', 'skipped');
       return;
     }
+    /* Everything below runs asynchronously, and a stage switch can land in the
+       middle of it. `root`/`epoch` are captured so a late callback adds its
+       geometry to the stage that ASKED for it, and bails outright if that
+       stage has since been torn down — otherwise a church quietly materialises
+       in the middle of the Ring several seconds after the fight started. */
+    var root = stageRoot, epoch = stageEpoch;
     // draco/network failures can stall without ever calling the error cb —
     // if nothing arrived after 12s, build the fallback nave so the arena is
     // never a void (removed again if the real church shows up late)
     var fallbackTimer = window.setTimeout(function () {
+      if (epoch !== stageEpoch) return;
       if (!churchLoaded && !churchFallback) churchFallback = buildFallbackChurch();
     }, 12000);
+    churchTimer = fallbackTimer;
     loader.load(versioned(models.church), function (gltf) {
       window.clearTimeout(fallbackTimer);
+      if (churchTimer === fallbackTimer) churchTimer = 0;
+      if (epoch !== stageEpoch) {
+        /* Stale: this church belongs to a stage that no longer exists. Drop it
+           on the floor rather than into the scene, and settle the asset slot
+           so the §21 gate does not wait forever on a load that already won. */
+        assetDone('church', 'stale');
+        disposeTree(gltf.scene);
+        return;
+      }
       try {
         var g = gltf.scene;
         var place = D().church || {};
@@ -313,9 +519,14 @@ CHLOE.engine = CHLOE.engine || {};
             }
           }
         });
-        scene.add(g);
+        root.add(g);
+        churchGroup = g;
         churchLoaded = true;
-        if (churchFallback) { scene.remove(churchFallback); churchFallback = null; }
+        if (churchFallback) {
+          if (churchFallback.parent) churchFallback.parent.remove(churchFallback);
+          disposeTree(churchFallback);
+          churchFallback = null;
+        }
         /* The walkable floor is PRECOMPUTED (data/arena-nav.js). Baking it
            live costs ~50s of frozen main thread — three r128 has no BVH, so
            every probe ray walks all 37 church meshes triangle by triangle.
@@ -335,6 +546,7 @@ CHLOE.engine = CHLOE.engine || {};
     }, undefined, function () {
       assetDone('church', 'failed');
       window.clearTimeout(fallbackTimer);
+      if (epoch !== stageEpoch) return;
       console.warn('[arena3d] church.glb failed to load — fallback nave');
       if (!churchFallback) churchFallback = buildFallbackChurch();
     });
@@ -363,7 +575,9 @@ CHLOE.engine = CHLOE.engine || {};
         emissive: 0x33060e, emissiveIntensity: 0.8 }));
     apse.position.set(0, 1.1, -((ar.radius || 6) + 1.4));
     g.add(apse);
-    scene.add(g);
+    // §24: into the STAGE root, never straight into the scene — a fallback
+    // nave parented to the scene survives every teardown there is.
+    (stageRoot || scene).add(g);
     return g;
   }
 
@@ -660,7 +874,11 @@ CHLOE.engine = CHLOE.engine || {};
       // fan them out across the nave in front of the altar
       /* Fan the squad ACROSS the approach, not along a fixed axis, so the
          line stays abreast whichever way the spawns face. */
-      var bx = (kcfg.x || 0), bz = (kcfg.z || 5.4);
+      /* `!= null`, not `||`. The church spawns at z -5.4 so the old default-or
+         never fired, but the Ring puts him on z 0 — and `0 || 5.4` is 5.4, so
+         the whole squad would have fanned 5.4m off the stage's own spawn line.
+         A legitimate zero coordinate is exactly what a centred stage has. */
+      var bx = (kcfg.x != null ? kcfg.x : 0), bz = (kcfg.z != null ? kcfg.z : 5.4);
       var ax = pos.x - bx, az = pos.z - bz;
       var al = Math.sqrt(ax * ax + az * az) || 1;
       var px2 = -az / al, pz2 = ax / al;          // perpendicular, unit
@@ -724,11 +942,24 @@ CHLOE.engine = CHLOE.engine || {};
 
   // HDRI -> PMREM -> scene.environment. Gives the stone and glass real
   // image-based light; failure just leaves the rig lighting alone (§14 pattern).
+  var envPath = null;   // §24: which probe is currently resolved on the scene
+
   function loadEnvironment() {
+    var path = D().hdri;
+    /* §24. Two early outs, and both are about stage switching:
+       - the same probe is already resolved: re-running the PMREM pass on a
+         stage switch would cost a full HDRI decode for an identical result.
+       - the stage declares `hdri: null` (the Ring): KEEP whatever is resolved
+         rather than clearing it. data/stages.js counts on that — the Ring's
+         materials all set userData.envClamp precisely because the church's
+         probe may still be live when you walk in. Clearing it here would make
+         the Ring's look depend on which stage you came from. */
+    if (path && path === envPath && envMapOk) return;
+    if (!path) return;
     assetExpect('hdri');
     envMapOk = false;
-    var path = D().hdri;
-    if (!path || !THREE.RGBELoader || !THREE.PMREMGenerator) { assetDone('hdri', 'skipped'); return; }
+    if (!THREE.RGBELoader || !THREE.PMREMGenerator) { assetDone('hdri', 'skipped'); return; }
+    envPath = path;
     var pmrem = null;
     function bail() { if (pmrem) { try { pmrem.dispose(); } catch (e) {} pmrem = null; } }
     try {
@@ -766,10 +997,15 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   // ---------------------------------------------------------------- build
+  /* §24: every light below goes into `stageRoot`, not into the scene. A light
+     parented straight to the scene survives a stage teardown, and four of
+     those stacked up over three rounds is how a "clean" switch quietly ends
+     up twice as bright as it started. */
   function buildLights() {
     var L = D().lights || {};
+    var root = stageRoot || scene;
     var amb = L.ambient || {};
-    scene.add(new THREE.AmbientLight(amb.color != null ? amb.color : 0x5a5f6a,
+    root.add(new THREE.AmbientLight(amb.color != null ? amb.color : 0x5a5f6a,
       (amb.intensity != null ? amb.intensity : 1.0) * LIGHT_SCALE));
 
     // cold moonlight raking in through the stained glass
@@ -784,7 +1020,7 @@ CHLOE.engine = CHLOE.engine || {};
       cam.left = -12; cam.right = 12; cam.top = 12; cam.bottom = -12;
       cam.near = 0.5; cam.far = 40;
     }
-    scene.add(moon);
+    root.add(moon);
 
     // a soft fill from the nave behind so the space reads as a room, not a pit
     var fill = L.fill || {};
@@ -792,15 +1028,22 @@ CHLOE.engine = CHLOE.engine || {};
       fill.sky != null ? fill.sky : 0x8092c0,
       fill.ground != null ? fill.ground : 0x241c1e,
       (fill.intensity != null ? fill.intensity : 0.9) * LIGHT_SCALE);
-    scene.add(fillLight);
+    root.add(fillLight);
 
-    // red altar glow behind the knight
-    var al = L.altar || {};
-    var altar = new THREE.PointLight(al.color != null ? al.color : 0xe5173f,
-      (al.intensity != null ? al.intensity : 3.2) * LIGHT_SCALE,
-      al.distance || 18, al.decay || 1.5);
-    altar.position.set(al.x || 0, al.y || 2.6, al.z || -5.5);
-    scene.add(altar);
+    /* Red altar glow behind the knight — and now CONDITIONAL. It used to be
+       built from defaults whether or not the rig asked for one, which the
+       church never noticed (it always asks) but which would hang a red accent
+       at z -5.5 in the middle of an empty Ring. `key`/`key2`/`candles` were
+       already opt-in; ambient/moon/fill stay unconditional so the church's
+       look is unchanged to the pixel. */
+    if (L.altar) {
+      var al = L.altar;
+      var altar = new THREE.PointLight(al.color != null ? al.color : 0xe5173f,
+        (al.intensity != null ? al.intensity : 3.2) * LIGHT_SCALE,
+        al.distance || 18, al.decay || 1.5);
+      altar.position.set(al.x || 0, al.y || 2.6, al.z || -5.5);
+      root.add(altar);
+    }
 
     // neutral keys above the arena so the knight and the aisle stay readable
     [L.key, L.key2].forEach(function (k) {
@@ -809,7 +1052,7 @@ CHLOE.engine = CHLOE.engine || {};
         (k.intensity != null ? k.intensity : 3.0) * LIGHT_SCALE,
         k.distance || 24, k.decay || 1.4);
       kl.position.set(k.x || 0, k.y || 5, k.z || 0);
-      scene.add(kl);
+      root.add(kl);
     });
 
     var cands = L.candles || [];
@@ -819,13 +1062,359 @@ CHLOE.engine = CHLOE.engine || {};
       c.position.set(cands[i].x || 0, 1.1, cands[i].z || 0);
       c.userData.baseI = base;
       c.userData.phase = Math.random() * 10;
-      scene.add(c);
+      root.add(c);
       candleLights.push(c);
     }
   }
+  /* Flickered every frame by updateFx. §24: this array is the one piece of
+     light state that lives OUTSIDE the scene graph, so teardownStage has to
+     empty it by hand — otherwise the Ring spends every frame setting the
+     intensity of two church candles that were removed three rounds ago. */
   var candleLights = [];
 
   function cfgSpawn() { return D().playerSpawn || { x: 0, z: 4.6, yaw: 0 }; }
+
+  /* ================================================================ §24 stages
+     THE PLACE, built and unbuilt.
+
+     Everything a stage puts in the world hangs off ONE group, `stageRoot`.
+     That is the whole containment strategy and it is deliberate: "did I
+     remember to remove the second key light" is not a question a person can
+     reliably answer three rounds into a run, but "is stageRoot's parent null"
+     is. Teardown removes that one node and disposes every geometry, material
+     and texture underneath it.
+
+     What must NOT be in stageRoot, and why:
+       - the knight groups (added to the scene by loadKnight/spawnSquad). They
+         outlive the stage; they are repositioned, not rebuilt.
+       - the first-person arms, hand sign, tornado, asteroid and the pooled
+         shockwave rings. All stage-independent VFX, all pre-warmed once (§21);
+         rebuilding them per stage would re-pay the 444ms upload §21 exists to
+         kill.
+       - the parsed church glb, which is CACHED (see churchGroup) — detached
+         from stageRoot on teardown, handed back on the next church build.
+
+     Three things leak outside the scene graph and are therefore reset by hand:
+     `candleLights` and `rimLights` (arrays the frame loop flickers), the
+     navgrid + its measurement, and the pending church fallback timer. */
+  var stageRoot = null;
+  var stageEpoch = 0;     // bumped per build; async loaders carry a copy and bail if it moves
+  var rimLights = [];     // §24 Ring pylon lights — flicker-free, but the array still needs emptying
+
+  /* Free the GPU side of a subtree. Geometries, materials and every texture
+     slot a material can hold, each disposed exactly once — a material shared
+     by 40 pylon meshes must not be disposed 40 times.
+
+     LIGHTS TOO, and that one is not obvious: a shadow-casting light owns a
+     WebGLRenderTarget that three allocates lazily, on the first shadow pass
+     after the light joins the scene. Removing the light from the graph does
+     NOT free it — only light.dispose() -> shadow.dispose() does. buildLights()
+     makes a fresh castShadow moon every stage build, so without this a full
+     church -> Ring -> church cycle leaked exactly one shadow map, measured as
+     renderer.info.memory.textures climbing +2 per cycle and never coming back
+     down while the scene graph counts looked perfectly clean. Light.dispose()
+     is a no-op on the ambient/hemisphere lights, so calling it on every light
+     is safe. */
+  var DISPOSE_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap',
+                       'aoMap', 'alphaMap', 'bumpMap', 'displacementMap', 'lightMap',
+                       'envMap', 'specularMap'];
+  function disposeTree(root) {
+    if (!root) return { geometries: 0, materials: 0, textures: 0, lights: 0 };
+    var geos = [], mats = [], texs = [], lits = [];
+    var n = { geometries: 0, materials: 0, textures: 0, lights: 0 };
+    root.traverse(function (o) {
+      if (o.isLight && lits.indexOf(o) === -1) lits.push(o);
+      if (o.geometry && geos.indexOf(o.geometry) === -1) geos.push(o.geometry);
+      if (!o.material) return;
+      var list = Array.isArray(o.material) ? o.material : [o.material];
+      for (var i = 0; i < list.length; i++) {
+        var m = list[i];
+        if (!m || mats.indexOf(m) !== -1) continue;
+        mats.push(m);
+        for (var s = 0; s < DISPOSE_SLOTS.length; s++) {
+          var t = m[DISPOSE_SLOTS[s]];
+          if (t && t.isTexture && texs.indexOf(t) === -1) texs.push(t);
+        }
+      }
+    });
+    var j;
+    for (j = 0; j < geos.length; j++) { try { geos[j].dispose(); n.geometries++; } catch (e) {} }
+    for (j = 0; j < mats.length; j++) { try { mats[j].dispose(); n.materials++; } catch (e) {} }
+    for (j = 0; j < texs.length; j++) { try { texs[j].dispose(); n.textures++; } catch (e) {} }
+    for (j = 0; j < lits.length; j++) { try { lits[j].dispose(); n.lights++; } catch (e) {} }
+    return n;
+  }
+
+  function teardownStage() {
+    /* Bump FIRST. Every in-flight loader compares against this, so anything
+       still on the wire is stale from the moment we decide to tear down —
+       not from the moment we finish. */
+    stageEpoch++;
+    if (churchTimer) { window.clearTimeout(churchTimer); churchTimer = 0; }
+    // the expensive church survives; detach it before the disposal sweep
+    if (churchGroup && churchGroup.parent) churchGroup.parent.remove(churchGroup);
+    if (stageRoot) {
+      if (stageRoot.parent) stageRoot.parent.remove(stageRoot);
+      disposeTree(stageRoot);
+      stageRoot = null;
+    }
+    churchFallback = null;      // it lived inside stageRoot; already disposed
+    churchLoaded = false;
+    candleLights.length = 0;
+    rimLights.length = 0;
+    assetForget('stagetex@');   // those textures are disposed; stop counting them
+    /* The navgrid belongs to the stone that was standing. Leaving it behind is
+       the single nastiest way to get this wrong: the Ring would clamp the
+       player against the church's baked floor and the radius clamp §24 asks
+       for would never run at all. */
+    nav = null;
+    arenaArea = null;
+  }
+
+  function applyFog() {
+    var fg = D().fog || {};
+    var col = fg.color != null ? fg.color : 0x0d1018;
+    if (scene.background && scene.background.isColor) scene.background.setHex(col);
+    else scene.background = new THREE.Color(col);
+    if (scene.fog) {
+      scene.fog.color.setHex(col);
+      scene.fog.near = fg.near || 14;
+      scene.fog.far = fg.far || 70;
+    } else {
+      scene.fog = new THREE.Fog(col, fg.near || 14, fg.far || 70);
+    }
+  }
+
+  function buildStage() {
+    stageRoot = new THREE.Group();
+    stageRoot.name = 'stage:' + (stageId || 'legacy');
+    scene.add(stageRoot);
+    applyFog();
+    buildLights();
+    if (stageDef && stageDef.shape === 'round') buildRing();
+    else loadChurch();          // 'model', and the no-stages.js legacy path
+    loadEnvironment();
+    /* The new stage's materials have never been drawn, so their programs and
+       texture uploads are unwarmed again. Re-arming the §21 gate here is what
+       keeps the first frame in the Ring from hitching the way the first Fire
+       Tornado used to. assetsReady() re-runs warmShaders() behind the veil. */
+    assets.warm = false;
+  }
+
+  /* ------------------------------------------------------------- The Ring
+     §24: ~615 m² of clear floor, built from primitives and textures we
+     already ship. Blank is the POINT — floor, kerb, a ring of pylons for
+     rotation cues, and dark void. Nothing inside the circle, no colliders but
+     the perimeter, and `nav` stays null so §22's radius clamp does the
+     containment. That is why the Ring needs no bake.
+     Every material here sets userData.envClamp (§14/§20): arriving from the
+     church leaves a lit-interior probe resolved on the scene, and without the
+     clamp applyEnvIntensity renders this dark floor as white plastic. */
+  function ringTexture(key, cfgBlock, build, epoch) {
+    var path = (build.textures || {})[cfgBlock.tex];
+    if (!path || typeof THREE.TextureLoader !== 'function') return null;
+    /* One Texture per SURFACE, not per file: floor and kerb are the same jpg
+       at different repeats, and repeat lives on the texture object. */
+    var slot = 'stagetex@' + epoch + ':' + key;
+    assetExpect(slot);
+    var tex = new THREE.TextureLoader().load(path,
+      function () { assetDone(slot); },
+      undefined,
+      function () { assetDone(slot, 'failed'); });
+    if (THREE.RepeatWrapping !== undefined) {
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+    }
+    var rep = cfgBlock.repeat || 1;
+    if (tex.repeat && tex.repeat.set) tex.repeat.set(rep, rep);
+    if (THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
+    tex.anisotropy = 4;
+    return tex;
+  }
+
+  function ringMaterial(opts) {
+    var m = new THREE.MeshStandardMaterial(opts);
+    /* A NUMBER, not `true`. data/stages.js says `envClamp: true` meaning "damp
+       this"; applyEnvIntensity reads the value and assigns it straight to
+       envMapIntensity, so a boolean would set intensity 1 — the exact
+       white-plastic bug the clamp exists to prevent. §14's figure is ~0.1. */
+    m.userData.envClamp = 0.1;
+    m.envMapIntensity = 0.1;
+    return m;
+  }
+
+  function buildRing() {
+    var b = (stageDef && stageDef.build) || {};
+    var epoch = stageEpoch;
+    var root = stageRoot;
+    var i;
+
+    /* The void first, and UNLIT (MeshBasicMaterial) in the fog colour. A
+       standard material here catches the key light and turns the edge of the
+       world into a grey table; basic + fog colour means the floor simply stops
+       having edges. Dropped 0.4m so it can never z-fight the disc. */
+    var vd = b['void'] || { color: 0x05060a, radius: 90 };
+    var voidMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(vd.radius || 90, vd.radius || 90, 0.2, 24),
+      new THREE.MeshBasicMaterial({ color: vd.color != null ? vd.color : 0x05060a,
+                                    fog: true, depthWrite: true }));
+    voidMesh.position.y = -0.5;
+    root.add(voidMesh);
+
+    // ---- floor disc: top face at y = 0, so every hit test and every probe
+    // that assumes ground level still agrees with the church.
+    var fl = b.floor || { radius: 16.5, segments: 96 };
+    var fr = fl.radius || 16.5;
+    var floorMat = ringMaterial({
+      color: fl.color != null ? fl.color : 0x6d6a66,
+      roughness: fl.roughness != null ? fl.roughness : 0.95,
+      metalness: fl.metalness != null ? fl.metalness : 0.0,
+      map: ringTexture('floor', fl, b, epoch)
+    });
+    var floor = new THREE.Mesh(
+      new THREE.CylinderGeometry(fr, fr, 0.2, fl.segments || 96), floorMat);
+    floor.position.y = -0.1;
+    floor.receiveShadow = true;
+    root.add(floor);
+
+    /* ---- kerb: three primitives sharing one material rather than a lathe,
+       because every geometry used here is one this file already builds and a
+       lathe's winding is easy to get inside-out. DoubleSide because you see
+       the inner face from the arena and the outer face from nowhere — cheaper
+       than getting normals right on both walls. 0.9m: high enough to read as a
+       boundary, never high enough to hide a knight behind. */
+    var kb = b.kerb || { inner: 14.4, outer: 14.95, height: 0.9, segments: 96 };
+    var ki = kb.inner || 14.4, ko = kb.outer || 14.95, kh = kb.height || 0.9;
+    var kseg = kb.segments || 96;
+    var kerbMat = ringMaterial({
+      color: kb.color != null ? kb.color : 0x4a4744,
+      roughness: kb.roughness != null ? kb.roughness : 0.9,
+      map: ringTexture('kerb', kb, b, epoch),
+      side: THREE.DoubleSide
+    });
+    var inner = new THREE.Mesh(new THREE.CylinderGeometry(ki, ki, kh, kseg, 1, true), kerbMat);
+    inner.position.y = kh / 2;
+    root.add(inner);
+    var outer = new THREE.Mesh(new THREE.CylinderGeometry(ko, ko, kh, kseg, 1, true), kerbMat);
+    outer.position.y = kh / 2;
+    root.add(outer);
+    var capGeo = new THREE.RingGeometry(ki, ko, kseg);
+    capGeo.rotateX(-Math.PI / 2);
+    var cap = new THREE.Mesh(capGeo, kerbMat);
+    cap.position.y = kh;
+    root.add(cap);
+
+    /* ---- pylons. The count is the whole readability budget of a blank floor:
+       they are the only thing telling you which way you have turned and how
+       far away he is. They stand OUTSIDE the kerb and outside the clamp, which
+       is how the Ring keeps its promise of "no colliders but the perimeter" —
+       you cannot reach them, so they cannot be walked into.
+       Only every `litEvery`-th post carries a real PointLight. Twelve punctual
+       lights would push three r128 into recompiling every material in the
+       scene, and four already says which way you are facing. */
+    var py = b.pylons || {};
+    var pn = py.count || 12, prad = py.radius || 15.6, ph = py.height || 2.6;
+    var postR = py.postRadius || 0.16, capR = py.capRadius || 0.26;
+    var every = Math.max(1, py.litEvery || 3), phase = py.litPhase || 0;
+    var postMat = ringMaterial({ color: py.color != null ? py.color : 0x1a1a1e,
+                                 roughness: 0.85, metalness: 0.2 });
+    /* The lamp head is emissive and NOT env-clamped the same way — it is meant
+       to be the brightest thing on the floor. MeshBasic would ignore fog
+       falloff across 28m, so it stays standard with a strong emissive. */
+    var lampMat = new THREE.MeshStandardMaterial({
+      color: 0x120d08,
+      emissive: py.emissive != null ? py.emissive : 0xff6a18,
+      emissiveIntensity: py.emissiveIntensity != null ? py.emissiveIntensity : 1.6,
+      roughness: 0.6
+    });
+    lampMat.userData.envClamp = 0.1;
+    lampMat.envMapIntensity = 0.1;
+    var postGeo = new THREE.CylinderGeometry(postR * 0.85, postR, ph, 8);
+    var lampGeo = new THREE.CylinderGeometry(capR, capR * 0.45, 0.34, 10);
+    var rim = (D().lights || {}).rim || null;
+    for (i = 0; i < pn; i++) {
+      /* phase 0 puts post 0 on +X, which is where the knight spawns — so the
+         opening beat of a Ring fight has him backlit. */
+      var ang = (i / pn) * Math.PI * 2;
+      var px = Math.cos(ang) * prad, pz = Math.sin(ang) * prad;
+      var post = new THREE.Mesh(postGeo, postMat);
+      post.position.set(px, ph / 2, pz);
+      root.add(post);
+      var lamp = new THREE.Mesh(lampGeo, lampMat);
+      lamp.position.set(px, ph + 0.12, pz);
+      root.add(lamp);
+      if (rim && (i % every) === (phase % every)) {
+        var pl = new THREE.PointLight(rim.color != null ? rim.color : 0xff7a2a,
+          (rim.intensity != null ? rim.intensity : 2.4) * LIGHT_SCALE,
+          rim.distance || 22, rim.decay || 1.25);
+        pl.position.set(px, rim.y != null ? rim.y : 2.5, pz);
+        root.add(pl);
+        rimLights.push(pl);
+      }
+    }
+
+    /* nav STAYS NULL. §22's radius/bounds fallback in updatePlayer and
+       updateOneKnight is the containment here, exercised rather than
+       duplicated — a second clamp written next to it is a second clamp to
+       keep in step, and the two would disagree the first time either moved. */
+    nav = null;
+    arenaArea = null;
+    console.info('[arena3d] stage "' + (stageDef ? stageDef.id : '?') + '" built: round floor r=' +
+                 ((D().arena || {}).radius || '?') + 'm, ' + pn + ' pylons, ' +
+                 rimLights.length + ' rim lights, nav=null (radius clamp)');
+  }
+
+  /* Put the squad back on the floor of the stage that is standing now. On a
+     stage switch their group positions are still the OLD stage's coordinates —
+     in the Ring that is merely wrong, but going the other way it is a knight
+     standing inside the rood screen. spawnSquad already fans them across the
+     approach and walks each one onto legal ground, so reuse it rather than
+     writing a second placement rule. */
+  function placeSquad() {
+    var n = knights.length;
+    if (knightProto) { spawnSquad(n); return; }
+    // the knight glb has not landed yet: spawnSquad would only queue, so move
+    // the leader by hand and let the loader's pendingSquad path do the rest
+    var kc = D().knight || {};
+    for (var i = 0; i < n; i++) {
+      if (!knights[i].group) continue;
+      var spot = navNearest(kc.x || 0, kc.z || 0, KNIGHT_RADIUS);
+      knights[i].group.position.set(spot.x, 0, spot.z);
+    }
+  }
+
+  /* §24 public: choose the stage. MUST be called BEFORE init() on the first
+     fight (init builds whatever is selected); after that it may be called
+     between rounds and rebuilds the world in place. Returns true when the
+     world changed. */
+  A.setStage = function (id) {
+    /* Accept the stage OBJECT as well as its id. ui/battle3d.js probes both
+       forms because the argument shape is this file's to decide; answering
+       "unknown stage [object Object]" to a caller holding the right entry
+       would be a pointless way to fail. */
+    if (id && typeof id === 'object' && typeof id.id === 'string') id = id.id;
+    var def = S.get(id);
+    if (id && !def) {
+      console.warn('[arena3d] unknown stage "' + id + '" — staying on ' + (stageId || 'church'));
+      return false;
+    }
+    if (stageId === id && (!inited || stageRoot)) return false;   // already standing in it
+    stageId = id || null;
+    stageDef = def;
+    invalidateCfg();
+    if (!inited) return true;      // init() will build it
+    teardownStage();
+    buildStage();
+    /* Order matters: reset() reads the new spawn out of the refreshed cfg and
+       puts the camera and every knight's pose back, THEN placeSquad walks the
+       bodies onto the new floor. Doing it the other way round leaves them
+       facing the old stage's player position. */
+    A.reset();
+    placeSquad();
+    return true;
+  };
+
+  A.stageInfo = function () { return stageDef; };
 
   // ------------------------------------------------- first-person arms (§17)
   /* The punch rig is parented to the camera with its head bone collapsed, so
@@ -1463,6 +2052,15 @@ CHLOE.engine = CHLOE.engine || {};
     if (disabled || inited) return;
     if (!canvasEl) { disableAPI('init without canvas'); disabled = true; return; }
     canvas = canvasEl;
+    /* §24: if nobody called setStage first, resolve the default now — but only
+       when data/stages.js is actually present. With no stages table stageDef
+       stays null, D() returns data/arena3d.js untouched, and this is the
+       church exactly as it was before §24. */
+    if (!stageId && stagesTable()) {
+      stageId = S.forRound(1);
+      stageDef = S.get(stageId);
+      invalidateCfg();
+    }
     cfg = D();
     if (cfg.knight && cfg.knight.bodyRadius) KNIGHT_RADIUS = cfg.knight.bodyRadius;
 
@@ -1487,21 +2085,21 @@ CHLOE.engine = CHLOE.engine || {};
     }
 
     scene = new THREE.Scene();
-    var fg = cfg.fog || {};
-    scene.background = new THREE.Color(fg.color != null ? fg.color : 0x0d1018);
-    scene.fog = new THREE.Fog(fg.color != null ? fg.color : 0x0d1018, fg.near || 14, fg.far || 70);
-
     camera = new THREE.PerspectiveCamera(72, 1, 0.05, 200);
     camera.rotation.order = 'YXZ';
 
-    buildLights();
     /* One shockwave ring up front so the §21 warm-up pass actually draws it.
        Built lazily it would be a new material compiled and uploaded on the
        frame of the first ground_slam, which is the exact hitch §21 exists to
-       kill; the pool grows from here if two knights slam at once. */
+       kill; the pool grows from here if two knights slam at once.
+       Before buildStage, and stage-INDEPENDENT: the pool survives every switch
+       so the warm-up is paid once, not once per round. */
     makeShock();
-    loadEnvironment();
-    loadChurch();
+    /* §24: fog, lights, the church-or-Ring geometry and the env probe are all
+       one stage build now, so the switch path and the first build are the same
+       code. Anything that goes only through init() is a thing that will be
+       missing the first time someone changes stage. */
+    buildStage();
     loadKnight();
     loadFirstPerson();
     loadHandSign();
@@ -1597,6 +2195,13 @@ CHLOE.engine = CHLOE.engine || {};
     } catch (e) {}
   }
   function addListeners() {
+    /* §24 asks that a stage switch leave no doubled listeners. start() already
+       guards on `running`, but that guard is one early-return away from being
+       wrong; make the wiring itself idempotent so a second start() — from a
+       stage rebuild, a re-entered round, anything — cannot double-bind WASD.
+       `listeners` is emptied by removeListeners(), so a non-empty array means
+       exactly one live set. */
+    if (listeners.length) return;
     function on(t, type, fn) { t.addEventListener(type, fn); listeners.push([t, type, fn]); }
     on(canvas, 'click', onClick);
     on(document, 'mousemove', onMouseMove);
@@ -1853,6 +2458,50 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
 
+  /* Put the camera back inside the arena, whatever put it outside.
+     ONE function because the frame now needs it twice — once after movement,
+     once after the knight push — and two copies of a containment rule is how
+     a stage ends up contained on one path and not the other.
+     `prevX/prevZ` is the position to fall back to: it must be a cell that was
+     legal, or the nav branch has nothing to revert to and walks you out with
+     navNearest instead.
+     The branch order is load-bearing (§24): nav first because the baked stone
+     is the real constraint where it exists, then `bounds`, then the radius —
+     which is the path the Ring runs on, since its stage entry sets nav null
+     and bounds null precisely so this last clause does the work. */
+  function containPlayer(prevX, prevZ) {
+    var ar = cfg.arena || { cx: 0, cz: 0, radius: 6 };
+    if (nav) {
+      /* §20: the baked stone is the arena. Resolving one axis at a time
+         lets you slide along a wall or the altar instead of sticking. */
+      if (!navFree(pos.x, prevZ, RADIUS)) pos.x = prevX;
+      if (!navFree(pos.x, pos.z, RADIUS)) pos.z = prevZ;
+      if (!navFree(pos.x, pos.z, RADIUS)) {
+        /* Both axes blocked. Falling back to where you stood is only a fix
+           when THAT was legal — and it often is not: a test hook can teleport
+           you anywhere. Then every later frame reverts to the same illegal
+           cell and you are wedged for the rest of the fight. §22: walk out to
+           real floor instead of freezing. */
+        if (navFree(prevX, prevZ, RADIUS)) { pos.x = prevX; pos.z = prevZ; }
+        else {
+          var pOut = navNearest(pos.x, pos.z, RADIUS);
+          pos.x = pOut.x; pos.z = pOut.z;
+        }
+      }
+    } else if (ar.bounds) {
+      pos.x = Math.max(ar.bounds.minX + RADIUS, Math.min(ar.bounds.maxX - RADIUS, pos.x));
+      pos.z = Math.max(ar.bounds.minZ + RADIUS, Math.min(ar.bounds.maxZ - RADIUS, pos.z));
+    } else {
+      var dx = pos.x - (ar.cx || 0), dz = pos.z - (ar.cz || 0);
+      var d = Math.sqrt(dx * dx + dz * dz);
+      var maxR = (ar.radius || 6) - RADIUS;
+      if (d > maxR && d > 0) {
+        pos.x = (ar.cx || 0) + dx / d * maxR;
+        pos.z = (ar.cz || 0) + dz / d * maxR;
+      }
+    }
+  }
+
   function updatePlayer(dt) {
     var f = ((keys.KeyW || keys.ArrowUp) ? 1 : 0) - ((keys.KeyS || keys.ArrowDown) ? 1 : 0);
     var s = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
@@ -1918,39 +2567,13 @@ CHLOE.engine = CHLOE.engine || {};
     /* §19: the nave WALLS are the arena. Rectangular bounds matching the
        stone; the old circle is only a fallback for configs without them. */
     var ar = cfg.arena || { cx: 0, cz: 0, radius: 6 };
-    if (nav) {
-      /* §20: the baked stone is the arena. Resolving one axis at a time
-         lets you slide along a wall or the altar instead of sticking. */
-      if (!navFree(pos.x, prevZ, RADIUS)) pos.x = prevX;
-      if (!navFree(pos.x, pos.z, RADIUS)) pos.z = prevZ;
-      if (!navFree(pos.x, pos.z, RADIUS)) {
-        /* Both axes blocked. Falling back to where you stood is only a fix
-           when THAT was legal — and it often is not: the knight personal-space
-           push below runs AFTER this clamp and can shove you into stone, and a
-           test hook can teleport you anywhere. Then every later frame reverts
-           to the same illegal cell and you are wedged for the rest of the
-           fight. §22: walk out to real floor instead of freezing. */
-        if (navFree(prevX, prevZ, RADIUS)) { pos.x = prevX; pos.z = prevZ; }
-        else {
-          var pOut = navNearest(pos.x, pos.z, RADIUS);
-          pos.x = pOut.x; pos.z = pOut.z;
-        }
-      }
-    } else if (ar.bounds) {
-      pos.x = Math.max(ar.bounds.minX + RADIUS, Math.min(ar.bounds.maxX - RADIUS, pos.x));
-      pos.z = Math.max(ar.bounds.minZ + RADIUS, Math.min(ar.bounds.maxZ - RADIUS, pos.z));
-    } else {
-      var dx = pos.x - (ar.cx || 0), dz = pos.z - (ar.cz || 0);
-      var d = Math.sqrt(dx * dx + dz * dz);
-      var maxR = (ar.radius || 6) - RADIUS;
-      if (d > maxR && d > 0) {
-        pos.x = (ar.cx || 0) + dx / d * maxR;
-        pos.z = (ar.cz || 0) + dz / d * maxR;
-      }
-    }
+    containPlayer(prevX, prevZ);
+
     /* §20: every living knight has personal space, so a squad cannot be
        walked through and cannot all stack on the same tile. */
     var minD = (ar.knightMinDist || 1.3);
+    var safeX = pos.x, safeZ = pos.z;   // legal: containPlayer just said so
+    var pushed = false;
     for (var pi = 0; pi < knights.length; pi++) {
       var pk = knights[pi];
       if (!pk.alive || !pk.group) continue;
@@ -1959,8 +2582,20 @@ CHLOE.engine = CHLOE.engine || {};
       if (kd < minD && kd > 0) {
         pos.x = pk.group.position.x + kx / kd * minD;
         pos.z = pk.group.position.z + kz / kd * minD;
+        pushed = true;
       }
     }
+    /* §24: contain AGAIN, because the push above is the one thing in the frame
+       that moves you without asking the arena. A knight backed against the
+       edge shoves you outward from HIS centre, and he is himself clamped only
+       0.05m further in than you are — measured on the Ring, that put the
+       player 0.106m past the rim clamp for half a second at a time, standing
+       inside the kerb. Re-running it with the pre-push position as the
+       fallback is exact: that cell was legal one statement ago, so the nav
+       branch has somewhere real to send you and the radius branch simply
+       pulls you back onto the circle. Skipped when nothing pushed, so the
+       common frame pays nothing. */
+    if (pushed) containPlayer(safeX, safeZ);
 
     // eye height (crouch lerp) + bob
     var targetEye = crouch ? eyeCrouch() : eyeStand();
@@ -3371,7 +4006,65 @@ CHLOE.engine = CHLOE.engine || {};
          the fight is running on the fallback `arena.bounds` rectangle — which
          is the only state in which that rectangle matters. */
       arenaArea: arenaArea,
+      /* §24: WHERE this fight is, and — the load-bearing bit — which
+         containment rule is actually live. `nav:false` on a round stage is not
+         a missing bake, it is the whole design: the radius clamp is doing the
+         work. `nav:false` on a MODEL stage is a bug, and this is where you see
+         the difference. Only the clamp in play is reported, so the field
+         cannot claim a rectangle the engine is ignoring. */
+      stage: stageDebug(),
       locked: isLocked()
+    };
+  };
+
+  function stageDebug() {
+    var ar = (cfg && cfg.arena) || {};
+    var out = {
+      id: stageId || (stageDef && stageDef.id) || 'church',
+      name: stageDef ? stageDef.name : null,
+      shape: (stageDef && stageDef.shape) || 'model',
+      nav: !!nav
+    };
+    if (nav) out.nav = true;
+    if (ar.bounds) {
+      out.bounds = { minX: ar.bounds.minX, maxX: ar.bounds.maxX,
+                     minZ: ar.bounds.minZ, maxZ: ar.bounds.maxZ };
+    } else {
+      out.radius = ar.radius != null ? ar.radius : 6;
+      out.cx = ar.cx || 0; out.cz = ar.cz || 0;
+    }
+    return out;
+  }
+
+  /* §24 verification hook: everything a "did the switch leave anything
+     behind?" test needs, counted off the live scene graph rather than
+     asserted. stageObjects is the node count under stageRoot; sceneChildren
+     is the top level, which must not grow by one group per round. */
+  A._stageCount = function () {
+    if (!inited || !scene) return null;
+    var objects = 0, meshes = 0, lights = 0, stageObjects = 0, stageLights = 0;
+    scene.traverse(function (o) {
+      objects++;
+      if (o.isMesh) meshes++;
+      if (o.isLight) lights++;
+    });
+    if (stageRoot) stageRoot.traverse(function (o) {
+      stageObjects++;
+      if (o.isLight) stageLights++;
+    });
+    var info = (renderer && renderer.info && renderer.info.memory) || null;
+    return {
+      stage: stageId, epoch: stageEpoch,
+      objects: objects, meshes: meshes, lights: lights,
+      sceneChildren: scene.children.length,
+      stageObjects: stageObjects, stageLights: stageLights,
+      candles: candleLights.length, rims: rimLights.length,
+      shocks: shocks.length, knights: knights.length,
+      listeners: listeners.length,
+      colliders: ((cfg && cfg.arena && cfg.arena.colliders) || []).length,
+      nav: !!nav, navCells: nav ? nav.data.length : 0,
+      churchCached: !!churchGroup, churchAttached: !!(churchGroup && churchGroup.parent),
+      gpu: info ? { geometries: info.geometries, textures: info.textures } : null
     };
   };
 
