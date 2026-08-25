@@ -40,6 +40,9 @@
 <script src="js/data/room3d.js"></script>
 <script src="js/data/arena3d.js"></script>
 <script src="js/data/arena-nav.js"></script>
+<!-- §24 stages: must load BEFORE any engine file, because arena3d.js reads
+     CHLOE.data.stages at definition time to publish CHLOE.engine.stages. -->
+<script src="js/data/stages.js"></script>
 <script src="js/data/abilities.js"></script>
 <script src="js/data/skilltree.js"></script>
 <script src="js/data/knighttree.js"></script>

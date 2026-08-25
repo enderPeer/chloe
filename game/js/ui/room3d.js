@@ -300,7 +300,11 @@ CHLOE.ui.room3d = (function(){
     }
     inBattle = true;
     pause();
-    // §16: battles happen in the 3D church arena (fallback: 2D battle screen)
+    /* §16: battles happen in the 3D arena (fallback: 2D battle screen).
+       §24: which STAGE that arena is does not get decided here. battle3d.begin
+       resolves the round's stage and applies it before the arena builds, so
+       every caller of begin() lands on the floor the room's board announced —
+       a second resolution on this side is a second thing to drift. */
     if (CHLOE.ui.battle3d && typeof CHLOE.ui.battle3d.begin === 'function') {
       CHLOE.ui.battle3d.begin(id);
     } else {
@@ -403,7 +407,11 @@ CHLOE.ui.room3d = (function(){
     // router hook: (re)entering the screen starts the loop
     ui.onShow('room3d', function(){
       refreshHud();
-      // §19: the mirror and poster show live stats — repaint on every entry
+      /* §19/§20/§24: the mirror and the west poster show live stats, the
+         picture shows the round you are standing in, and the south board
+         announces the stage the NEXT fight uses — all of which moved while you
+         were away. One repaint on every entry covers the lot, which is why the
+         board must hang off refreshPanels rather than its own hook. */
       var w = world();
       if (w && typeof w.refreshPanels === 'function') { try { w.refreshPanels(); } catch(e){} }
       resume();

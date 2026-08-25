@@ -89,9 +89,15 @@ CHLOE.data.room3d = {
     // by the couch, a wine bottle standing in the couch/door corner
     { kind: 'clutter', x: 2.55, z: 1.7,  w: 0.24, d: 0.14, h: 0.06, rotY: 0.55,             tex: null,        model: 'clutter1', targetH: 0.052 },
     { kind: 'clutter', x: 3.45, z: 2.3,  w: 0.09, d: 0.09, h: 0.33, rotY: 0,                tex: null,        model: 'clutter2', targetH: 0.33 },
-    // grungy posters: one west wall, one south wall
-    { kind: 'poster', x: -3.96, z: 0.6,  w: 0.85, d: 0.04, h: 1.15, rotY: Math.PI / 2,      tex: 'poster',    model: null },
-    { kind: 'poster', x: -1.4,  z: 2.96, w: 0.85, d: 0.04, h: 1.15, rotY: Math.PI,          tex: 'poster',    model: null }
+    /* Two grungy sheets, and §24 gave them DIFFERENT jobs: west is still the
+       knight dossier (displays.poster), south is now the stage board
+       (displays.stage). They carry distinct kind/id so the engine picks the
+       canvas by name — matching on array order would silently swap the two
+       the first time somebody reorders this list, and both would still look
+       plausible on the wall. `tex` stays the same sheet for both: it is only
+       the fallback when the canvas cannot be painted. */
+    { kind: 'poster',       id: 'poster_knight', x: -3.96, z: 0.6,  w: 0.85, d: 0.04, h: 1.15, rotY: Math.PI / 2, tex: 'poster', model: null },
+    { kind: 'poster_stage', id: 'poster_stage',  x: -1.4,  z: 2.96, w: 0.85, d: 0.04, h: 1.15, rotY: Math.PI,     tex: 'poster', model: null }
   ],
 
   lights: {
