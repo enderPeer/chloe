@@ -80,7 +80,7 @@ CHLOE.ui.room3d = (function(){
 
     // bottom control hints
     els.controls = ui.el('div', 'r3d-controls',
-      'WASD move · mouse look · Space jump · Ctrl or C crouch · clicks close your hands here — your binds fire in the church · M menu');
+      'WASD move · mouse look · Space jump · Ctrl or C crouch · clicks close your hands here — your binds fire in the arena · M menu');
     r.appendChild(els.controls);
 
     // lock overlay (informational — clicks pass through to the canvas,

@@ -193,7 +193,7 @@ CHLOE.ui.binds = (function () {
        player who is not told that will think one of them is broken. */
     if (mouseIds().length) {
       body.appendChild(ui.el('div', 'menu-note',
-        'The mouse and the wheel only fire binds in the church. Back in the room they are still ' +
+        'The mouse and the wheel only fire binds in the ARENA — either floor. Back in the room they are still ' +
         'your hands — click to close them, and to take what you are looking at.'));
     }
     if (notice) body.appendChild(ui.el('div', 'menu-note warn', notice));

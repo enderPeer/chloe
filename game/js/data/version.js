@@ -18,7 +18,7 @@ CHLOE.data = CHLOE.data || {};
 CHLOE.data.version = {
   major: 0,
   minor: 31,
-  build: 1,
+  build: 2,
   label: 'The Whole Mouse',
   date: '2026-08-25',
   /* Called as CHLOE.data.version.string(), so `this` is the object. Kept as
