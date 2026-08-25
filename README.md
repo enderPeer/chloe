@@ -9,6 +9,8 @@ knight swings back and you must physically dodge it — crouch under the slash, 
 
 **Play now:** https://enderpeer.github.io/chloe/ (landing) · https://enderpeer.github.io/chloe/game/ (game)
 
+> **v0.31.4 — latest:** mouse-wheel binds, stamina, smelling salts.
+
 ## Controls
 
 | Input | Action |
