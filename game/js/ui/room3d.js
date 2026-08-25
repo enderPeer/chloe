@@ -1,7 +1,8 @@
 /* CHLOE — ui/room3d.js  (Room3D — first-person mode, spec sec 13 + 14)
    Owns the #screen-room3d div + HUD: full-viewport canvas, center crosshair
    (red + "CLICK TO ENGAGE" when the enemy is hovered in range; white +
-   "TV — click to turn on/off" when the TV is hovered — enemy wins if both),
+   "TV — click to turn on/off" when the TV is hovered, or "◀ THE CHURCH" on
+   the stage board's picker arrows (§26) — enemy wins, then the TV),
    top bar (shards / active char level / Menu — reuses the .hud style),
    bottom control-hints line, and the lock overlay shown while the pointer
    is not locked. All Three.js logic lives in CHLOE.engine.world3d; this file
@@ -130,17 +131,28 @@ CHLOE.ui.room3d = (function(){
     if (typeof d.tvDist === 'number' && d.tvDist <= TV_RANGE) return true;
     return false;
   }
-  function setHint(kind, label){ // 'enemy' | 'tv' | 'item' | null
+  /* "◀ THE RING" — the arrow under the crosshair and the floor it hands
+     you. A board that only said "click" would make you click to find out
+     what you were choosing, which is the one thing a picker must not do. */
+  function stageArrowLabel(a){
+    var mark = a.which === 'left' ? '◀' : '▶';
+    return a.name ? (mark + ' ' + String(a.name).toUpperCase())
+                  : (mark + ' ANOTHER FLOOR');
+  }
+  function setHint(kind, label){ // 'enemy' | 'tv' | 'item' | 'stage' | null
     if (els.crosshair) {
       els.crosshair.classList.toggle('in-range', kind === 'enemy' || kind === 'item');
-      els.crosshair.classList.toggle('tv-range', kind === 'tv');
+      // §26: the board's arrows borrow the TV's white crosshair — both are
+      // panels you press, neither is something you fight
+      els.crosshair.classList.toggle('tv-range', kind === 'tv' || kind === 'stage');
     }
     if (els.hint) {
       els.hint.classList.toggle('hidden', !kind);
-      els.hint.classList.toggle('tv', kind === 'tv');
+      els.hint.classList.toggle('tv', kind === 'tv' || kind === 'stage');
       if (kind) {
         var text = kind === 'tv' ? 'TV — click to turn on/off'
-                 : (kind === 'item' ? ('take the ' + (label || 'item')) : 'CLICK TO ENGAGE');
+                 : (kind === 'item' ? ('take the ' + (label || 'item'))
+                 : (kind === 'stage' ? (label || 'change the floor') : 'CLICK TO ENGAGE'));
         if (els.hint.textContent !== text) els.hint.textContent = text;
       }
     }
@@ -160,10 +172,16 @@ CHLOE.ui.room3d = (function(){
     // otherwise "CLICK TO ENGAGE" shows while clicks do nothing.
     var enemyHover = cbHover === 'enemy' && !!(d && d.enemyAlive) &&
                      !(typeof d.enemyDist === 'number' && d.enemyDist > ENGAGE_RANGE);
-    // §16: a glinting item under the crosshair — enemy and TV keep priority
-    var pk = (!enemyHover && !tvHovered(d) && d) ? d.pickupHover : null;
-    setHint(enemyHover ? 'enemy' : (tvHovered(d) ? 'tv' : (pk ? 'item' : null)),
-            pk && pk.label);
+    /* §26: the stage board's picker arrows. The engine publishes which one
+       is under the crosshair AND the floor it would pick, so the hint names
+       the stage rather than saying "click". They outrank a pickup for the
+       same reason they do in the engine — you are standing at the wall. */
+    var arrow = (!enemyHover && !tvHovered(d) && d) ? d.stageArrow : null;
+    // §16: a glinting item under the crosshair — enemy, TV and board first
+    var pk = (!enemyHover && !tvHovered(d) && !arrow && d) ? d.pickupHover : null;
+    setHint(enemyHover ? 'enemy'
+          : (tvHovered(d) ? 'tv' : (arrow ? 'stage' : (pk ? 'item' : null))),
+            arrow ? stageArrowLabel(arrow) : (pk && pk.label));
     if (els.overlay) els.overlay.classList.toggle('hidden', isLocked());
     refreshHud();
   }

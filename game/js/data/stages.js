@@ -211,7 +211,7 @@ CHLOE.data.stages = {
   }
 };
 
-/* ---------------- stage selection (the pure half) ----------------
+/* ---------------- stage selection ----------------
    §24 asks for `CHLOE.engine.stages` with order/forRound/current/next. The
    half that is a pure function of the round number lives HERE, so the order
    and the cycle are defined in exactly one place next to the stages they
@@ -220,12 +220,27 @@ CHLOE.data.stages = {
    tearing the previous one down — belongs to the engine agent and should call
    into this rather than re-listing the ids.
 
-   forRound cycles the order so the stage is deterministic and learnable:
-   round 1 church, round 2 ring, round 3 church, and so on. */
+   cycleForRound cycles the order so a night nobody interferes with is
+   deterministic and learnable: round 1 the Ring, round 2 the church, round 3
+   the Ring, and so on. The run OPENS on the Ring deliberately (§26) — a lit
+   blank circle with nothing to snag on is where the fight is legible, and the
+   church, with its pillars and its baked navgrid, is the complication you
+   walk into second, not the thing that has to teach you.
+
+   §26 also put ARROWS on the room's stage board, so the player can simply
+   pick. That choice lives here, not in the engine, for one reason: forRound()
+   is the single question both the board (world3d.nextStagePlan) and the fight
+   (ui/battle3d.resolveStage) already ask, so an override answered here reaches
+   both of them and CANNOT drift into a board promising a floor you do not
+   land on. A pick sticks until it is changed — you set the stage, it stays
+   set — and the round cycle only decides while nobody has. */
 CHLOE.data.stagePick = (function () {
   'use strict';
 
-  var ORDER = ['church', 'ring'];
+  var ORDER = ['ring', 'church'];
+
+  // the floor the player chose at the board; null = the round cycle decides
+  var chosenId = null;
 
   function byId(id) {
     return (id && CHLOE.data.stages[id]) || null;
@@ -233,16 +248,55 @@ CHLOE.data.stagePick = (function () {
 
   // 1-based rounds; anything junk or below 1 resolves to the first stage
   // rather than returning undefined, because the board paints every round.
-  function forRound(n) {
+  function cycleForRound(n) {
     n = Math.floor(n);
     if (!(n >= 1)) { n = 1; }
     return ORDER[(n - 1) % ORDER.length];
   }
 
+  /* A pick is honoured only while it names a stage that really exists: a
+     stale id — a stage renamed out from under it — must fall back to the
+     cycle rather than freeze the run on a floor nothing can build. */
+  function chosen() {
+    return byId(chosenId) ? chosenId : null;
+  }
+
+  function forRound(n) {
+    return chosen() || cycleForRound(n);
+  }
+
+  /* What an arrow WOULD give you, without taking it — the room names the
+     floor under the crosshair before you commit to it. Steps from what the
+     board is CURRENTLY announcing, so the first click always moves you one
+     off the stage you are looking at, whether that was your pick or the
+     cycle's. */
+  function peek(dir, n) {
+    var i = ORDER.indexOf(forRound(n));
+    if (i < 0) { i = 0; }
+    var len = ORDER.length;
+    return ORDER[((i + (dir < 0 ? -1 : 1)) % len + len) % len];
+  }
+
+  function choose(id) {
+    if (byId(id)) { chosenId = id; }
+    return chosen();
+  }
+
+  // back to the deterministic cycle. Nothing in the UI hangs off this today;
+  // it is what a new run calls if picks are ever made run-scoped.
+  function clear() { chosenId = null; }
+
   return {
     order: ORDER,
     forRound: forRound,
+    cycleForRound: cycleForRound,
     byId: byId,
+    chosen: chosen,
+    choose: choose,
+    peek: peek,
+    // one arrow click: take what peek() named, and answer with the new pick
+    cycle: function (dir, n) { return choose(peek(dir, n)); },
+    clear: clear,
     // convenience for the engine: the resolved stage object for a round
     stageForRound: function (n) { return byId(forRound(n)); }
   };
