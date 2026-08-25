@@ -99,6 +99,19 @@ CHLOE.engine = CHLOE.engine || {};
        was certainly not thrown anywhere. */
     A.shove = function () { return false; };
     A.isShoved = function () { return false; };
+    /* §28 A per-knight levels. engine/combat3.js PULLS these every tick to
+       price the squad, so on a machine with no WebGL it must answer with
+       something a stat line can be built from: the round's own baseline,
+       which is exactly what the pre-§28 game did for every knight. Returning
+       [] here would silently reprice the whole squad to level 1. */
+    A.knightLevels = function (n) {
+      var kt = CHLOE.engine.knighttree;
+      var L = kt ? kt.level() : 1, out = [];
+      for (var i = 0; i < Math.max(1, n || 1); i++) out.push(L);
+      return out;
+    };
+    // no knight is ever mid-swing on a dead API
+    A.striker = function () { return -1; };
     A.waveTargets = function () { return []; };
     A.spawnWave = function () { return false; };
     A.taunt = noop;
@@ -245,6 +258,10 @@ CHLOE.engine = CHLOE.engine || {};
          timers were pushed back by. Single-hit patterns keep sched = [swingDur]
          and behave exactly as they did in §21. */
       sched: null, feintHold: 0,
+      /* §28 A2: the round-speed scalar THIS swing was armed with. Held on the
+         anim rather than recomputed, so the recover timer cannot end up on a
+         different round's multiplier from the wind-up that preceded it. */
+      speed: 1,
       turnErr: 0,                // yaw error, for the planted turnInPlace pose
       dash: 0, dashCd: 0, dashDir: { x: 0, z: 1 }
     },
@@ -252,6 +269,12 @@ CHLOE.engine = CHLOE.engine || {};
        personality. Built lazily by brainOf() because the leader is on the
        floor and walking before spawnSquad ever runs. */
     brain: null,
+    /* §28 A: HIS OWN LEVEL. `levelT` is seconds alive in this fight — the
+       trigger data/knighttree.js names — and `level` is what that is worth
+       for his personality, capped against the round's baseline. `levelTell`
+       is the burn-down on the flash that fires when it changes, because a
+       knight who quietly got stronger is a knight who did not. */
+    level: 1, levelT: 0, levelTell: 0,
     staggerMeter: 0,     // §22 buildup; decays at brain.staggerDecay per second
     dropped: null,       // §22 death: sword pieces taken out of his hand
     // §20 per-knight attack window (battle3d schedules these staggered)
@@ -612,15 +635,7 @@ CHLOE.engine = CHLOE.engine || {};
 
     var attach = function (model, k) {
       k = k || knight;
-      // normalize height + ground the feet, darken to "hollow black"
-      var box = new THREE.Box3().setFromObject(model);
-      var h = Math.max(0.01, box.max.y - box.min.y);
-      var s = (kcfg.targetHeight || 2.15) / h;
-      model.scale.setScalar(s);
-      box.setFromObject(model);
-      model.position.y -= box.min.y;
-      var cx = (box.min.x + box.max.x) / 2, cz = (box.min.z + box.max.z) / 2;
-      model.position.x -= cx; model.position.z -= cz;
+      // darken to "hollow black"; mountKnight does the scaling and grounding
       model.traverse(function (o) {
         if (o.isMesh && o.material) {
           o.castShadow = true;
@@ -644,15 +659,13 @@ CHLOE.engine = CHLOE.engine || {};
           }
         }
       });
-      k.model = model;
-      k.group.add(model);
-      /* Take the template BEFORE rigging. knightProto used to be grabbed
-         after buildKnightRig, so every clone arrived already containing a set
-         of pivot groups and then had a second set bolted on - orphan groups
-         nested inside orphan groups, and a rig traversal that could find the
-         wrong one. */
+      /* Take the template BEFORE rigging, and before the model is parented or
+         scaled. knightProto used to be grabbed after the rig was built, so
+         every clone arrived already containing a set of pivot groups and then
+         had a second set bolted on — orphan groups nested inside orphan
+         groups, and a rig traversal that could find the wrong one. */
       if (!knightProto) knightProto = model.clone(true);
-      buildKnightRig(k, model);
+      mountKnight(k, model);
       faceKnightTo(k, cfgSpawn().x, cfgSpawn().z);
       knightLoaded = true;
       if (pendingSquad > 1) { spawnSquad(pendingSquad); pendingSquad = 0; }
@@ -670,7 +683,15 @@ CHLOE.engine = CHLOE.engine || {};
     loader.load(versioned(models.knight), function (gltf) {
       window.clearTimeout(fallbackTimer);
       try {
-        if (knight.model) { knight.group.remove(knight.model); knight.model = null; knight.mats.length = 0; }
+        /* The fallback totem got in first. Take out the RIG ROOT as well as
+           the model: since §28 the meshes hang off bones under rig.root and
+           removing only `model` would leave the whole totem standing inside
+           the knight who just finished loading. */
+        if (knight.model || knight.rig) {
+          if (knight.rig && knight.rig.root) knight.group.remove(knight.rig.root);
+          if (knight.model) knight.group.remove(knight.model);
+          knight.model = null; knight.rig = null; knight.mats.length = 0;
+        }
         attach(gltf.scene);
       }
       catch (e) { console.warn('[arena3d] knight setup failed — fallback totem', e); if (!knight.model) attach(buildFallbackKnight()); }
@@ -701,138 +722,152 @@ CHLOE.engine = CHLOE.engine || {};
     return g;
   }
 
-  /* §18 knight rig. The model has no skeleton — it is 103 separately named
-     armour pieces. Sort them into limb groups by name, split left/right by
-     which side of the body they sit on, and re-parent each piece under a
-     pivot placed at the matching joint. Rotating those pivots then animates
-     real arms, legs and sword without any bones. */
-  function buildKnightRig(k, model) {
-    /* Measure in the model's OWN space, never in world.
+  /* §28 B: MOUNT THE REAL SKELETON.
+     §18 built the rig here, in this file, by sorting the 103 armour pieces
+     into six groups BY NAME and hanging each group off a pivot Group that was
+     a SIBLING of the model rather than a link in a chain. Its own comment
+     recorded the price — "the head never inherited the torso lean" — and §21
+     recorded two more: the shoulder pivots were placed at a fraction of the
+     model's HEIGHT (which put them inside the chest) and the name-suffix
+     left/right split is INVERTED for `Boot_Toe`, so the legs came out 9/7 with
+     a shin plate on the wrong side. All of that is gone. The hierarchy now
+     comes from data/knightrig.js — root -> hips -> torso -> {head, armL ->
+     forearmL, armR -> forearmR -> sword}, hips -> {legL, legR}, 103/103 meshes
+     assigned, every pivot MEASURED from the vertices of the meshes its own
+     bone owns — and engine/knightanim.js does the reparenting.
 
-       setFromObject() reports WORLD coordinates, but `model` is already
-       parented to k.group - which sits at knight.x = 5 for the knight that
-       loaded, and at the origin for a clone spawnSquad has not placed yet.
-       Those world numbers were being written straight into g.position, which
-       is MODEL-LOCAL. Measured: the leader's shoulder pivot ended up 5.9m
-       from his own hand, so a 3.9rad overhead threw the sword across the
-       nave, while a clone's landed 2.0m away and barely moved. One line, two
-       opposite failures, which is why a squad looked like one windmilling
-       leader and N-1 statues. */
-    model.updateMatrixWorld(true);
-    var toLocal = new THREE.Matrix4().copy(model.matrixWorld).invert();
-    var m4 = new THREE.Matrix4(), pb = new THREE.Box3(), c = new THREE.Vector3();
-    var box = new THREE.Box3();
-    var bodyMinX = Infinity, bodyMaxX = -Infinity;
+     THREE RULES THIS FUNCTION EXISTS TO KEEP:
 
-    /* One pass: local AABB per piece, cached with the name it gets classified
-       by. Reading the name here also means a re-run on an already-rigged
-       model never sees a pivot group's name in m.parent.name. */
-    var pieces = [];
-    model.traverse(function (o) {
-      if (!o.isMesh || !o.geometry) return;
-      if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
-      m4.multiplyMatrices(toLocal, o.matrixWorld);
-      pb.copy(o.geometry.boundingBox).applyMatrix4(m4);
-      box.union(pb);
-      /* The drawn sword hangs off his right hand and drags the whole-model X
-         centre across the body, which flips pieces that sit between the true
-         centre and the skewed one - that is why the split came out a lopsided
-         legL 9 / legR 7. Take the midline from the BODY only. */
-      if (!/Sword/i.test(o.name || '')) {
-        if (pb.min.x < bodyMinX) bodyMinX = pb.min.x;
-        if (pb.max.x > bodyMaxX) bodyMaxX = pb.max.x;
+     1. Rig the model DETACHED and UNSCALED. knightanim preserves each mesh's
+        world matrix as it reparents, so whatever space the model is in at
+        build time is the space the bone offsets are computed in. §21 lost a
+        fight to exactly this: a rig measured in world coordinates was written
+        into model-local ones, the leader's shoulder pivot ended up 5.9m from
+        his own hand and a clone's 2.0m, and a squad read as one windmilling
+        leader and N-1 statues. The model is therefore rigged BEFORE it is
+        parented to k.group and BEFORE any scale is applied.
+
+     2. The normalising scale goes on rig.root, never on the model. The pivots
+        in data/knightrig.js are in native model metres (crown 1.832); scaling
+        the meshes first would leave the bones 1.83m tall inside 2.15m of
+        plate. That is the §17 "Box3 lies" bug class, so the on-screen height
+        is asserted afterwards and published as _rigProbe().height.
+
+     3. He is grounded and centred on the `root` BONE, not on a bounding box.
+        The old code centred the model on its full bbox — which the drawn
+        sword drags 0.11m across the body and 0.15m back, so his own group
+        origin (the point every hit test and the ground_slam ring measure
+        from) sat 0.19m from his actual body. The generator derives `root` as
+        the floor between the two boots precisely so it can be that origin. */
+  /* How tall he really stands: the highest vertex of the head bone above the
+     rig's own ground plane, both in world metres. Falls back to the head
+     bone's world position if the meshes carry no position attribute, because a
+     missing measurement must not read as a knight of height zero. */
+  function crownHeight(rig) {
+    var head = rig.bones.head && rig.bones.head.group;
+    if (!head) return 0;
+    head.updateWorldMatrix(true, false);
+    var v = new THREE.Vector3(), top = -Infinity;
+    head.traverse(function (o) {
+      if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+      o.updateWorldMatrix(true, false);
+      var p = o.geometry.attributes.position;
+      for (var i = 0; i < p.count; i++) {
+        v.set(p.getX(i), p.getY(i), p.getZ(i)).applyMatrix4(o.matrixWorld);
+        if (v.y > top) top = v.y;
       }
-      pieces.push({ m: o, minX: pb.min.x, maxX: pb.max.x,
-                    c: pb.getCenter(c).clone(),
-                    n: (o.name || '') + ' ' + ((o.parent && o.parent.name) || '') });
     });
-    if (!pieces.length) return;
-    if (bodyMinX > bodyMaxX) { bodyMinX = box.min.x; bodyMaxX = box.max.x; }
+    if (top === -Infinity) { head.getWorldPosition(v); top = v.y; }
+    /* The floor is where the `root` bone sits, not the lowest thing in the
+       scene: a boot posed off the ground is a stride, not a shorter knight. */
+    var floor = new THREE.Vector3();
+    rig.bones.root.group.updateWorldMatrix(true, false);
+    rig.bones.root.group.getWorldPosition(floor);
+    return top - floor.y;
+  }
 
-    var h = Math.max(0.01, box.max.y - box.min.y);
-    var floorY = box.min.y;
-    var mid = (bodyMinX + bodyMaxX) / 2;
-    var halfW = Math.max(0.02, (bodyMaxX - bodyMinX) / 2);
+  function mountKnight(k, model) {
+    var KA = CHLOE.engine.knightanim;
+    var kcfg = D().knight || {};
+    var target = kcfg.targetHeight || 2.15;
 
-    /* Shoulders and hips scale off the body's own WIDTH rather than its
-       height - a fraction of height put the shoulder pivots inside the chest
-       on this model, which is the other half of why the arms swung like
-       levers instead of hinging. */
-    var groups = {
-      armL:  { y: floorY + h * 0.80, x: mid + halfW * 0.72 },
-      armR:  { y: floorY + h * 0.80, x: mid - halfW * 0.72 },
-      legL:  { y: floorY + h * 0.48, x: mid + halfW * 0.30 },
-      legR:  { y: floorY + h * 0.48, x: mid - halfW * 0.30 },
-      torso: { y: floorY + h * 0.50, x: mid },
-      head:  { y: floorY + h * 0.82, x: mid }
-    };
-    var rig = {};
-    for (var key in groups) {
-      var g = new THREE.Group();
-      g.position.set(groups[key].x, groups[key].y, 0);
-      g.userData.rest = g.position.clone();
-      model.add(g);
-      rig[key] = g;
+    model.position.set(0, 0, 0);
+    model.rotation.set(0, 0, 0);
+    model.scale.setScalar(1);
+    model.updateMatrixWorld(true);
+    var box = new THREE.Box3().setFromObject(model);
+    var nativeH = Math.max(0.01, box.max.y - box.min.y);
+    var s = target / nativeH;
+
+    var rig = KA ? KA.build(model, THREE) : null;
+    if (!rig) {
+      /* knightanim's own contract: no data/knightrig.js (or a fallback totem
+         with no manifest names in it) means NO rig, and a knight who stands
+         there is far better than one who throws exceptions every frame. Fall
+         back to the pre-§28 placement so he is at least the right size, in
+         the right place, and lit. */
+      model.scale.setScalar(s);
+      box.setFromObject(model);
+      model.position.y -= box.min.y;
+      model.position.x -= (box.min.x + box.max.x) / 2;
+      model.position.z -= (box.min.z + box.max.z) / 2;
+      k.group.add(model);
+      k.model = model;
+      k.rig = null;
+      k.rigInfo = { rigged: false, reason: KA ? 'no meshes matched the manifest' : 'knightanim missing' };
+      k.height = target;
+      return;
     }
 
-    var counts = { armL: 0, armR: 0, legL: 0, legR: 0, torso: 0, head: 0, none: 0 };
-    pieces.forEach(function (pc) {
-      var n = pc.n;
-      var right = pc.c.x < mid;                  // model faces +Z, so right = -X
-      var key = null;
+    k.group.add(rig.root);
+    rig.root.scale.setScalar(s);
+    var rp = rig.bones.root.def.pivot;
+    KA.setRootRest(rig, -rp[0] * s, -rp[1] * s, -rp[2] * s);
 
-      if (/Crown|Hood|Head_Mask|NeckStrap/i.test(n)) key = 'head';
-      else if (/Shoulder|ArmStrap|Bracer|Glove|UnderShoulder|Sword/i.test(n)) {
-        /* Several "arm" pieces are body harness worn ACROSS the chest - the
-           shoulder yoke, the arm straps, a second sword slung over his back.
-           They matched the arm regex and rode the LEFT arm, so the
-           counterbalance dragged all of it through his torso on every swing.
-           Anything straddling the midline is body. */
-        key = (pc.minX < mid - 0.05 && pc.maxX > mid + 0.05) ? 'torso'
-            : (right ? 'armR' : 'armL');
-      } else if (/Boot|Knee|Shin|Greave|Leg|Thigh/i.test(n)) {
-        key = right ? 'legR' : 'legL';
-      } else if (/Chest|Padded|Belt|Dress|Cover|Shirt|Pants/i.test(n)) key = 'torso';
-
-      if (!key) { counts.none++; return; }
-      rig[key].attach(pc.m);
-      counts[key]++;
-    });
-
-    /* Elbows. A rigid shoulder-to-blade-tip bar rotated through 3.9rad sweeps
-       the tip in a circle through his own chest. The model ships an explicit
-       elbow marker per side; use its centre as the joint so the blade can
-       fold behind the shoulder on the wind-up and whip straight on the chop.
-       Built HERE, in the rest pose - a sub-pivot created after a pose would
-       bake that pose into its local matrix. */
-    model.updateMatrixWorld(true);
-    var FOREARM = /Elbow|ArmStrap_Rings|Bracer|Glove|Sword/i;
-    ['L', 'R'].forEach(function (side) {
-      var arm = rig['arm' + side];
-      var elbow = new THREE.Group();
-      var mark = null;
-      arm.traverse(function (o) { if (o.isMesh && /Shoulder_Elbow/i.test(o.name || '')) mark = o; });
-      if (mark) {
-        pb.setFromObject(mark);
-        pb.getCenter(c);
-        arm.worldToLocal(c);
-        elbow.position.copy(c);
-      } else {
-        elbow.position.set(0, -h * 0.16, 0);     // no marker: a forearm down
-      }
-      elbow.userData.rest = elbow.position.clone();
-      arm.add(elbow);
-      var move = [];
-      arm.children.forEach(function (o) { if (o !== elbow && o.isMesh && FOREARM.test(o.name || '')) move.push(o); });
-      move.forEach(function (o) { elbow.attach(o); });
-      rig['elbow' + side] = elbow;
-      counts['elbow' + side] = move.length;
-    });
-
+    /* The model Group is now an empty husk — every mesh moved onto a bone —
+       but it is kept on the knight so `mats`, the fallback path and anything
+       that still expects `k.model` keep working. It is deliberately NOT added
+       to the scene: adding it would put an empty, unscaled group under the
+       knight and invite the next reader to parent something to it. */
+    k.model = model;
     k.rig = rig;
-    k.rigInfo = counts;
-    k.height = h;
-    console.log('[arena3d] knight rig:', JSON.stringify(counts));
+    k.height = target;
+
+    /* Assert the height rather than trusting the arithmetic. This is the one
+       number §17 proved a Box3 will lie about, and it is cheap to check once
+       per knight at spawn — but it must not be checked WITH a Box3, which is
+       the joke §17 is making. `setFromObject` unions each mesh's own bounding
+       box after rotating it, i.e. the AABB of a set of OBBs, and that is
+       strictly larger than the body: measured on the rigged knight it read
+       2.166m against a real crown of 2.146m. A 20mm inflation sits right on
+       the 20mm tolerance below, so the assert could neither pass honestly nor
+       catch a genuine 20mm scaling error. The crown is therefore taken from
+       the VERTICES of the head bone's own meshes — the highest thing on him at
+       rest, four meshes, measured once — and the floor is the `root` bone,
+       which the generator derives as the plane between the boots precisely so
+       it can be the origin. That is the number §28 asks a test to assert.
+
+       It lands at 2.146, not 2.150, and the 4mm is honest: `s` above is still
+       derived from the model's own Box3 (1.8329 against a true crown of
+       1.8296), so the same inflation that made the assert useless makes the
+       scale 0.2% small. Deriving `s` from the crown instead would make this
+       read exactly 2.150 — and would also move every hit volume in
+       data/arena3d.js by 4mm, which were reconciled against the blade at THIS
+       scale. Four millimetres on a two-metre knight is not worth re-deriving
+       that table for; the assert only has to be able to see a real error, and
+       at 20mm tolerance against a 4mm bias it now can. */
+    var shownH = crownHeight(rig);
+    k.rigInfo = { rigged: true, moved: rig.moved, missing: rig.missing,
+                  counts: rig.counts, nativeH: +nativeH.toFixed(4),
+                  scale: +s.toFixed(4), height: +shownH.toFixed(3) };
+    if (Math.abs(shownH - target) > 0.02) {
+      console.warn('[arena3d] knight measures ' + shownH.toFixed(3) + 'm on screen, not ' +
+                   target + 'm — the rig and the model are in different spaces');
+    }
+    if (rig.missing) {
+      console.warn('[arena3d] ' + rig.missing + ' manifest mesh(es) missing from the GLB — ' +
+                   'rerun tools/build-knight-rig.js');
+    }
   }
 
   var pendingSquad = 0;
@@ -864,9 +899,11 @@ CHLOE.engine = CHLOE.engine || {};
             o.castShadow = true;
           }
         });
-        k.model = clone;
-        k.group.add(clone);
-        buildKnightRig(k, clone);
+        /* NOT `k.group.add(clone)` first: mountKnight rigs the model where it
+           stands, and a clone already parented to a group sitting at the
+           spawn would bake that offset into every bone. §21's "measured in
+           the wrong space" bug, one line of setup away from coming back. */
+        mountKnight(k, clone);
         var lc = (D().lights || {}).knight || {};
         k.light = new THREE.PointLight(lc.color != null ? lc.color : 0xff2038,
           (lc.intensity != null ? lc.intensity : 0.55) * LIGHT_SCALE,
@@ -923,6 +960,24 @@ CHLOE.engine = CHLOE.engine || {};
 
   A.spawnSquad = function (n) { spawnSquad(Math.max(1, n || 1)); };
   A.squadSize = function () { return knights.length; };
+
+  /* §28 A: what each knight on the floor currently IS. The 3D layer owns this
+     because it owns the personality, the seconds alive and the moment of
+     death; engine/combat3.js pulls it every tick and reprices the squad off
+     it. Pulled rather than pushed on purpose — combat3 already calls in here
+     for the §23 stun, so the dependency runs one way and a no-WebGL machine
+     degrades through disableAPI's version of this function instead of
+     needing a second code path. `n` pads the answer for a caller with more
+     entries than the arena has knights (a squad the 3D layer never got to
+     spawn), so an index never comes back undefined. */
+  A.knightLevels = function (n) {
+    var out = [], i;
+    for (i = 0; i < knights.length; i++) out.push(knights[i].level || 1);
+    var kt = ktree();
+    var pad = kt ? kt.level() : 1;
+    for (i = out.length; i < (n || 0); i++) out.push(pad);
+    return out;
+  };
 
   function yawTo(k, x, z) {
     return Math.atan2(x - k.group.position.x, z - k.group.position.z) +
@@ -2150,7 +2205,6 @@ CHLOE.engine = CHLOE.engine || {};
       kk.anim.dashCd = ki * 1.2;
       kk.anim.sched = null;
       kk.anim.feintHold = 0;
-      kk.bob = 0;
       /* §22: everything death touched has to come back too — the blade out of
          his hand, the transparency the fade left on his plate, and the brain
          itself (a knight who reset while staggered would spawn reeling). */
@@ -2161,8 +2215,11 @@ CHLOE.engine = CHLOE.engine || {};
         kk.mats[mi].depthWrite = true;
       }
       initBrain(kk, ki);
-      // put every pivot back at rest, or last round's chop comes back with him
-      if (kk.rig) { for (var rk in kk.rig) kk.rig[rk].rotation.set(0, 0, 0); }
+      /* Put every BONE back at rest, or last round's chop comes back with
+         him. knightanim.reset also clears the pattern it was mid-way through,
+         which the old loop over pivot rotations could not: a knight killed
+         inside a thrust_combo used to come back still holding stab two. */
+      if (KANIM()) KANIM().reset(kk.rig);
     }
     for (var sh = 0; sh < shocks.length; sh++) shocks[sh].mesh.visible = false;
     if (camera) {
@@ -2704,21 +2761,74 @@ CHLOE.engine = CHLOE.engine || {};
      makes "a feint must never damage during the hold" true BY CONSTRUCTION
      rather than by a guard someone can forget to write.
      Times come back in seconds, on the un-held clock, plus the hold to add. */
-  function hitSchedule(pattern, holdS) {
+  /* §28 A2: `speed` divides every time in the schedule. It is ONE number for
+     the whole pattern (see patternSpeed) precisely so a round-scaled swing
+     cannot land earlier than it looks — a per-window scalar would let jab two
+     arrive on a different clock from the picture of jab two. */
+  function hitSchedule(pattern, holdS, speed) {
     var out = [], i, h;
+    speed = speed || 1;
     if (pattern.hits && pattern.hits.length) {
       for (i = 0; i < pattern.hits.length; i++) {
         h = pattern.hits[i];
-        out.push({ at: (h.atMs != null ? h.atMs : (pattern.telegraphMs || 1500)) / 1000,
+        out.push({ at: (h.atMs != null ? h.atMs : (pattern.telegraphMs || 1500)) / 1000 / speed,
                    power: h.power != null ? h.power : pattern.power,
                    lunge: h.lunge || 0 });
       }
     } else {
-      out.push({ at: (pattern.telegraphMs || 1500) / 1000,
+      out.push({ at: (pattern.telegraphMs || 1500) / 1000 / speed,
                  power: pattern.power, lunge: 0 });
     }
     for (i = 0; i < out.length; i++) out[i].fireAt = out[i].at + holdS;
     return out;
+  }
+
+  /* §28 A: he cannot throw a swing he has not learned. ui/battle3d.js rolls
+     out of the ROUND's pool (knighttree.patterns(level())), which is still
+     the right pool to roll FROM — it is what the round is worth — but the
+     knight handed the result has his own level, and a level-1 knight
+     answering with a ground_slam would make the whole spread invisible. The
+     downgrade happens HERE, the only place that knows which knight it is.
+
+     TWO RULES, AND BOTH EXIST TO KEEP THE CALLER HONEST. ui/battle3d.js
+     closes over the pattern IT rolled: it prints that pattern's evade hint
+     and expects that pattern's number of hit windows. So a substitute must
+
+       (1) SHARE THE EVADE. The hint is a promise about which way to move —
+           "SIDESTEP!" over an attack that is really a crouch-under slash is
+           the telegraph lying, which is the one thing §18 and §22 both refuse
+           to do. Downgrading inside an evade family keeps the promise true.
+       (2) HAVE NO MORE HIT WINDOWS than the request. thrust_combo is the only
+           multi-window pattern; putting it in place of a single-window swing
+           would fire the damage callback three times against a caller that
+           warned once, i.e. triple damage off one warning. The reverse
+           (thrust_combo downgraded to a single stab) is safe: the caller's
+           extra warnings expire on their own windowWaitMs, and the player
+           takes less, not more.
+
+     No candidate passes both -> the request goes through UNCHANGED, because a
+     knight who declines to attack reads as a bug rather than as a weak
+     knight. In practice that leaves exactly one gap: ground_slam is the only
+     'backoff' pattern, so a knight below level 5 handed one throws it. It can
+     only be rolled from round 5 onward (it unlocks at level 5 = round 5), and
+     by ~35s of a round-5 fight every temperament has climbed past level 5, so
+     the gap is the opening seconds of a late round. Closing it properly means
+     rolling the pattern per knight, which is ui/battle3d.js's call to make:
+     `kt.patterns(a3d.knightLevels()[who])` after `who` is chosen. */
+  function windowsOf(p) { return (p && p.hits && p.hits.length) ? p.hits.length : 1; }
+  function patternForKnight(k, pattern) {
+    var kt = ktree();
+    if (!kt || !pattern || !pattern.id) return pattern;
+    var known = kt.patterns(k.level || 1);
+    if (known.indexOf(pattern.id) >= 0) return pattern;
+    var all = D().patterns || {};
+    var want = windowsOf(pattern), best = null;
+    for (var i = 0; i < known.length; i++) {
+      var p = all[known[i]];
+      if (!p || p.evade !== pattern.evade || windowsOf(p) > want) continue;
+      if (!best || (p.power || 0) > (best.power || 0)) best = p;
+    }
+    return best || pattern;
   }
 
   A.telegraph = function (pattern, cb, index) {
@@ -2730,6 +2840,12 @@ CHLOE.engine = CHLOE.engine || {};
        instead of leaving a prompt up for a swing that will never come. */
     var bs = brainOf(k);
     if (bs.staggerT > 0) { if (cb) cb({ hit: false, pattern: pattern, staggered: true }); return; }
+    /* §28 A: swap in something he actually knows BEFORE anything reads the
+       pattern, so the schedule, the pose and the damage all agree about which
+       swing this is. The caller is told which one it got — ui/battle3d.js
+       prints the hint off `r.pattern`, and a "SIDESTEP!" over a slash is a
+       telegraph that lies. */
+    pattern = patternForKnight(k, pattern);
     var atk = k.atk;
     clearAttack(k);
     atk.mode = 'telegraph';
@@ -2737,6 +2853,14 @@ CHLOE.engine = CHLOE.engine || {};
     atk.cb = cb || null;
     atk.t0 = performance.now();
     bs.atkCd = bs.tune.attackCooldownMs / 1000;
+    /* §28 A2: ONE scalar for the whole swing, held back if the full
+       round multiplier would take this pattern's wind-up under the
+       readability floor. Everything below divides by it — swingDur, the hit
+       schedule, recoverDur and the setTimeout that fires the damage — so the
+       picture and the damage shorten together or not at all (§21). The
+       pattern object itself is never touched: it is shared data, and scaling
+       it in place would compound every round. */
+    var speed = patternSpeed(pattern);
     /* Arm the pose HERE rather than leaving it to a latch the frame loop
        notices. swingDur is telegraphMs EXACTLY - no 1.25 multiplier - which is
        what puts the visual impact on the damage frame. recoverDur folds in the
@@ -2744,22 +2868,27 @@ CHLOE.engine = CHLOE.engine || {};
     var stA = k.anim;
     stA.swinging = true;
     stA.swingT = 0;
-    stA.swingDur = (pattern.telegraphMs || 1500) / 1000;
-    stA.recoverDur = ((pattern.recoverMs || 800) + 220) / 1000;
+    stA.swingDur = (pattern.telegraphMs || 1500) / 1000 / speed;
+    stA.recoverDur = ((pattern.recoverMs || 800) / speed + 220) / 1000;
+    stA.speed = speed;
     var fe = pattern.feint;
-    var holdS = (fe && fe.chance > 0 && Math.random() < fe.chance) ? (fe.holdMs || 0) / 1000 : 0;
-    var sched = hitSchedule(pattern, holdS);
+    var holdS = (fe && fe.chance > 0 && Math.random() < fe.chance) ? (fe.holdMs || 0) / 1000 / speed : 0;
+    var sched = hitSchedule(pattern, holdS, speed);
     stA.feintHold = holdS;
     stA.sched = [];
     for (var hi = 0; hi < sched.length; hi++) stA.sched.push(sched[hi].at);
     atk.hits = sched;
-    /* Each pattern gets its own curve. charge is a lunging THRUST, not a chop
-       (it and overhead share evade:'sidestep', so evade alone cannot tell them
-       apart), and §22's two additions are named outright — falling back to the
-       evade kind would have played ground_slam as an overhead chop. */
-    stA.swingKind = SWINGS[pattern.id] ? pattern.id
-                  : (pattern.id === 'charge') ? 'thrust'
-                  : (pattern.evade === 'crouch' ? 'sweep' : 'overhead');
+    /* Each pattern gets its own pose pair, named by its own id. §28 dropped
+       the alias layer this used to carry (charge -> 'thrust', crouch ->
+       'sweep'): knightanim keys its table on the pattern ids in
+       data/arena3d.js directly, so adding a pattern there and a pose pair
+       there is now the whole job. The FALLBACK still splits on evade rather
+       than defaulting blind, because a crouch-evade attack played as an
+       overhead chop is a telegraph that lies about which way to move. */
+    var KAt = KANIM();
+    stA.swingKind = (KAt && KAt._patterns[pattern.id]) ? pattern.id
+                  : (pattern.evade === 'crouch' ? 'slash' : 'overhead');
+    if (KAt) KAt.play(k.rig, stA.swingKind);
     // aim locked at windup start: dodge by MOVING after the windup begins
     var kx = k.group ? k.group.position.x : 0;
     var kz = k.group ? k.group.position.z : 0;
@@ -2800,11 +2929,15 @@ CHLOE.engine = CHLOE.engine || {};
     if (last) {
       atk.cb = null;
       if (atk.hits.length > 1 && k.brain) k.brain.comboDone = true;   // §22: back off after a combo
-      // brief recover, then idle
+      /* Brief recover, then idle — on the SAME round-speed scalar the
+         wind-up used (k.anim.speed), or a round-9 knight would snap through
+         a 1.30x wind-up and then stand in a full-length recover the pose
+         driver has already finished playing. */
+      var rsp = k.anim.speed || 1;
       window.setTimeout(function () {
         if (atk.mode === 'strike') { atk.mode = 'recover'; }
         window.setTimeout(function () { if (atk.mode === 'recover') clearAttack(k); },
-          (pattern && pattern.recoverMs) || 800);
+          ((pattern && pattern.recoverMs) || 800) / rsp);
       }, 220);
     } else {
       /* Back to winding for the next stab, and the lane is re-taken from where
@@ -2820,12 +2953,27 @@ CHLOE.engine = CHLOE.engine || {};
       atk.lockYaw = k.baseRot;
     }
     if (cb) {
+      /* §28 A: WHICH knight this blow belongs to, for the length of the
+         callback and not one frame longer. engine/combat3.js prices the
+         damage off the striker's own levelled `atk`, and ui/battle3d.js —
+         which is where the call comes from — does not forward an index. It
+         is cleared in `finally` rather than left standing, so a caller who
+         defers its takeHit() reads -1 and prices off the round baseline
+         instead of silently billing the wrong knight. A stale striker would
+         be invisible and permanently wrong; an absent one is merely
+         approximate, and says so. */
+      strikerIndex = knights.indexOf(k);
       try {
         cb({ hit: hit, pattern: pattern, window: idx, windows: atk.hits.length,
-             power: win.power, feint: !!k.anim.feintHold });
+             power: win.power, feint: !!k.anim.feintHold, index: strikerIndex,
+             level: k.level || 1 });
       } catch (e) { console.warn('[arena3d] telegraph cb failed', e); }
+      finally { strikerIndex = -1; }
     }
   }
+  /* -1 whenever no strike callback is on the stack. See the note above. */
+  var strikerIndex = -1;
+  A.striker = function () { return strikerIndex; };
 
   function hitTest(k, pattern) {
     if (!pattern || !k.group) return false;
@@ -3068,43 +3216,24 @@ CHLOE.engine = CHLOE.engine || {};
      over-closes by 12% at 60fps, 25% at 30fps and 39% at the 0.05s dt clamp,
      so the knight got SNAPPIER the worse your machine ran. */
   function alpha(rate, dt) { return 1 - Math.exp(-rate * dt); }
-  function blend(o, prop, target, a) { o[prop] += (target - o[prop]) * a; }
-  function lerpN(a, b, u) { return a + (b - a) * u; }
+  /* `blend` and `lerpN` went with §28's pose rewrite: their only callers were
+     the per-channel eases inside the old poseKnight, and knightanim slerps
+     bone quaternions instead. `alpha` stays — the sword drop, the light and
+     the yaw all still ease on it. */
   function seg(t, a, b) { return t <= a ? 0 : (t >= b ? 1 : (t - a) / (b - a)); }
   function easeIn(u) { return u * u * u; }                      // into the hit
   function easeOut(u) { var v = 1 - u; return 1 - v * v * v; }  // into the apex
 
-  /* Per-joint response, so the body reads as mass rather than one rigid
-     object: the head LEADS (he keeps his eyes on you), the torso is heaviest,
-     the legs sit between. One shared rate drove all eight channels before. */
-  var RATE_ARM = 18, RATE_LEG = 16, RATE_TORSO = 10, RATE_HEAD = 22, RATE_BOB = 12;
-
-  /* Swing shape, in fractions of telegraphMs. IMPACT IS p = 1.0 BY
-     CONSTRUCTION - that is the frame the strike timer fires on, so retiming a
-     pattern in data/arena3d.js retimes the picture with it.
-     Returns +1 at the wound apex, -1 on the damage frame, past -1 on the
-     follow-through. Anticipation (a small counter-move the wrong way), a
-     decelerating wind-up, an apex you can actually READ, then the whole arc
-     spent in the last 12% so the hit has a frame of its own. */
-  function swingEnvelope(p) {
-    if (p < 0.12) return -0.12 * easeIn(p / 0.12);                   // anticipation
-    if (p < 0.78) return -0.12 + 1.12 * easeOut(seg(p, 0.12, 0.78)); // wind up
-    if (p < 1.00) return (p < 0.88) ? 1                              // apex HOLD
-                                    : 1 - 2 * easeIn(seg(p, 0.88, 1.00));
-    if (p < 1.06) return -1 - 0.15 * seg(p, 1.00, 1.06);             // overshoot
-    return -1.15;                                                     // follow-through
-  }
-  /* Where the envelope reaches its apex. This is a property of the CURVE
-     above, not a tunable: it is the frame a feint freezes on, so if the shape
-     is ever retimed this moves with it or the lie stops reading as a wind-up. */
+  /* WHERE THE WIND-UP ENDS AND THE STRIKE BEGINS, as a fraction of the hit
+     window. This survived §28's move of the pose library into knightanim.js
+     because it is not a look, it is a CONTRACT between three things that must
+     agree: the feint freezes here (swingClock), the telegraph pose is
+     stretched over 0..this and the strike pose over this..1 (poseKnight), and
+     the impact frame stays pinned to 1.0 either way. §21's envelope used to
+     own it; knightanim now eases the strike in on a quartic, which keeps the
+     same readable near-still apex through the first half of the window.
+     Move this and all three move together — that is the point of one name. */
   var SWING_APEX_P = 0.78;
-  /* Amplitudes may omit a channel (nothing but ground_slam uses `bY`), and an
-     undefined channel used to arrive as NaN and poison the whole pivot. */
-  function swingCh(mix, w, st2, name) {
-    var v = (mix >= 0) ? w[name] : st2[name];
-    if (v == null) return 0;
-    return mix >= 0 ? mix * v : -mix * v;
-  }
 
   /* ---- §22 multi-window swings and feints -------------------------------
      A pattern's `hits` schedule is stored on the anim as `sched`, in seconds
@@ -3131,6 +3260,20 @@ CHLOE.engine = CHLOE.engine || {};
     if (t <= apex) return t;
     return (t < apex + st.feintHold) ? apex : t - st.feintHold;
   }
+  /* When the CURRENT hit window opened, on the same un-held clock. Only
+     thrust_combo has more than one, and it is the reason this exists: see the
+     `take` ramp in poseKnight. A single-window pattern always answers 0, so
+     nothing else in the file changes behaviour. */
+  function windowStart(st) {
+    var s = st.sched;
+    if (!s || s.length < 2) return 0;
+    var t = swingClock(st), prev = 0;
+    for (var i = 0; i < s.length; i++) {
+      if (t <= s[i]) return prev;
+      prev = s[i];
+    }
+    return prev;
+  }
   // phase INSIDE the current hit window: 1.0 is its impact frame
   function swingLocalP(st) {
     var t = swingClock(st);
@@ -3144,273 +3287,156 @@ CHLOE.engine = CHLOE.engine || {};
     return 1;
   }
 
-  /* {wound} is the apex the telegraph holds, {struck} is where the blade is on
-     the damage frame; the envelope owns everything between. Channels: aX/aY/aZ
-     shoulder, eX elbow (RELATIVE - it is a child of the shoulder), lX off-hand,
-     tX/tY torso, hX/hY head, gL/gR legs. Amplitudes are deliberately modest:
-     the gambeson is ONE mesh containing both sleeves and it lives in `torso`,
-     so plate travelling far from a static sleeve is the cost of a big angle. */
-  var SWINGS = {
-    overhead: {   // cock behind the shoulder, drive forward and down
-      wound:  { aX:  1.30, aY:  0.00, aZ: -0.18, eX:  1.20, lX: -0.30, tX: -0.26, tY: -0.18, hX: -0.10, hY:  0.10, gL:  0.10, gR: -0.18 },
-      struck: { aX: -0.85, aY:  0.10, aZ:  0.08, eX: -0.15, lX:  0.26, tX:  0.42, tY:  0.06, hX:  0.14, hY: -0.04, gL: -0.16, gR:  0.30 }
-    },
-    sweep: {      // horizontal arc at chest height - the one you CROUCH under
-      wound:  { aX:  0.35, aY: -0.75, aZ: -0.55, eX:  0.85, lX: -0.25, tX: -0.10, tY: -0.55, hX: -0.04, hY:  0.30, gL:  0.08, gR: -0.14 },
-      struck: { aX: -0.10, aY:  1.05, aZ: -0.30, eX: -0.10, lX:  0.35, tX:  0.18, tY:  0.60, hX:  0.06, hY: -0.25, gL: -0.12, gR:  0.22 }
-    },
-    thrust: {     // charge: arm cocked like a piston, body drives over the front foot
-      wound:  { aX:  0.55, aY: -0.20, aZ: -0.10, eX:  1.45, lX: -0.40, tX: -0.22, tY: -0.30, hX: -0.06, hY:  0.12, gL:  0.14, gR: -0.22 },
-      struck: { aX: -0.45, aY:  0.10, aZ: -0.05, eX: -0.05, lX:  0.45, tX:  0.50, tY:  0.15, hX:  0.08, hY: -0.05, gL: -0.22, gR:  0.34 }
-    },
-    /* §22 thrust_combo: two jabs and a step-through, ALL ON ONE CURVE — each
-       hit window replays this shape inside its own slice of the schedule, so
-       the jabs are the same stab played fast (300ms) and the third is the same
-       stab played long. Deliberately tighter than `thrust`: a jab that winds
-       up as far as a charge is not a jab, and the elbow does most of the work
-       so the blade travels without the shoulder having to wheel. */
-    thrust_combo: {
-      wound:  { aX:  0.34, aY: -0.14, aZ: -0.06, eX:  1.60, lX: -0.20, tX: -0.14, tY: -0.24, hX: -0.03, hY:  0.09, gL:  0.10, gR: -0.15 },
-      struck: { aX: -0.28, aY:  0.06, aZ: -0.03, eX: -0.12, lX:  0.28, tX:  0.36, tY:  0.12, hX:  0.05, hY: -0.03, gL: -0.18, gR:  0.28 }
-    },
-    /* §22 ground_slam: both hands go up on the hilt — the off-arm MIRRORS the
-       sword arm (same sign, unlike every other swing here, where lX is a
-       counterweight) — and the whole body comes down with it. `bY` drops the
-       body itself, and both legs folding forward together is the only knee
-       bend a rig with one hinge per leg can give you; without the drop he
-       reads as bowing rather than smashing the floor. */
-    ground_slam: {
-      wound:  { aX:  1.72, aY:  0.04, aZ: -0.08, eX:  0.50, lX:  1.58, tX: -0.32, tY:  0.00, hX: -0.18, hY:  0.00, gL:  0.08, gR:  0.08, bY:  0.09 },
-      struck: { aX: -1.10, aY:  0.00, aZ:  0.04, eX:  0.08, lX: -1.00, tX:  0.60, tY:  0.00, hX:  0.24, hY:  0.00, gL:  0.34, gR:  0.34, bY: -0.22 }
-    }
-  };
-  /* Where he settles after a swing: blade up, weight back, still watching you.
-     recoverMs governed NOTHING visual before - the sword arm stepped 1.4rad
-     straight back to "breathe" the frame the swing clock hit zero. */
-  var GUARD = { aX: 0.45, aY: -0.25, aZ: -0.35, eX: 0.75, lX: 0.15, tX: -0.08, tY: -0.20, hX: 0.02, hY: 0.10, gL: 0.02, gR: -0.06 };
+  /* §28 C: THE POSE LIBRARY LIVES IN engine/knightanim.js NOW.
+     What used to sit here was a second animation system: a `SWINGS` table of
+     per-channel amplitudes (aX/aY/aZ/eX/lX/tX/tY/hX/hY/gL/gR/bY), a `GUARD`
+     row, and a 220-line `poseKnight` that rebuilt eleven scalars every frame
+     and eased them onto six sibling pivot Groups. It is gone, all of it —
+     §28 B is explicit that two rigs must not end up fighting over the same
+     103 meshes, and a channel table is a rig.
 
-  /* §18/§21: pose the limb pivots. An attack owns the whole upper body while
-     it plays; walking and breathing own it otherwise. */
+     What is left in this file is the part arena3d actually owns: WHICH state
+     the knight is in and HOW FAR THROUGH it he is. knightanim owns what that
+     looks like. The split matters because of the §21 one-clock rule — the
+     phase handed over below is measured off `st.swingT`, which is the same
+     `atk.t0` stamp the strike timer counts from, so the picture cannot drift
+     from the damage. There is no second timer anywhere in this function:
+     `swingClock`, `swingLocalP` and `swingEnd` above are the same three
+     helpers the hit test and the light pulse read.
+
+     Mapping from §22's states to the library, so the six survive the move:
+       walk/dash    -> walk (amp + lean, dash is the same cycle run harder)
+       strafe       -> strafe (dir from the brain's held circling sign)
+       backpedal    -> backpedal            turnInPlace -> turnInPlace (dir from yaw error)
+       coil         -> coil (the dash tell)  taunt      -> taunt
+       press        -> press (the weight shift, on pressSwayMs)
+       stagger      -> stagger, f = the punish window's own remaining fraction
+       death        -> die(), t = progress through brain.deathMs
+     plus the hit flinch, laid OVER whatever he was doing rather than
+     replacing it, so a blow never cancels a swing already in flight. */
+  var GAIT = { walk: { amp: 1, lean: 8, rate: 7 }, dash: { amp: 1.5, lean: 19, rate: 13 } };
+  function KANIM() { return CHLOE.engine.knightanim; }
+
+  /* Which hit window the swing clock is inside. thrust_combo's third stab is
+     the one that steps through, and the pose has to lean into that one only —
+     `sched` is already the schedule, so this is a read, not a second clock. */
+  function swingWindow(st) {
+    var s = st.sched;
+    if (!s || !s.length) return 0;
+    var t = swingClock(st);
+    for (var i = 0; i < s.length; i++) if (t <= s[i]) return i;
+    return s.length - 1;
+  }
+
   function poseKnight(k, dt) {
-    var r = k.rig;
-    if (!r) return;
-    var st = k.anim;
-    var t = elapsed + st.phase;
-
-    var b = k.brain;
-
-    // ---- targets, rebuilt each frame from the current state ----
-    var armLx = 0, armLz = 0, armRx = 0, armRy = 0, armRz = 0;
-    var elbowLx = 0.18, elbowRx = 0.18;      // arms are never dead straight
-    var legLx = 0, legRx = 0;
-    var torsoX = 0, torsoY = 0, headX = 0, headY = 0, headZ = 0, bob = 0;
-
-    var breathe = Math.sin(t * 1.6) * 0.03;
-    armLx = breathe; armRx = -breathe;
-
-    if (st.state === 'walk' || st.state === 'dash') {
-      var fast = st.state === 'dash' ? 1.5 : 1;
-      st.stride += dt * (st.state === 'dash' ? 13 : 7);
-      var sw = Math.sin(st.stride);
-      /* The "legs" are BOOTS - nothing above local y 0.64 is in a leg group,
-         and the dress hem sits far below that, so most of the boot is behind
-         a skirt that never moves. The old +/-0.55rad swung them clear of it.
-         Boots peeking under a hem need very little. */
-      legLx = sw * 0.28 * fast;
-      legRx = -sw * 0.28 * fast;
-      armLx = -sw * 0.42 * fast;
-      armRx = sw * 0.34 * fast;
-      elbowLx = 0.25 + sw * 0.10;
-      elbowRx = 0.25 - sw * 0.10;
-      bob = Math.abs(Math.cos(st.stride)) * 0.05 * fast;
-      torsoX = (st.state === 'dash' ? 0.34 : 0.08);
-      torsoY = sw * 0.09;
-      /* headX stays 0: the pivots are SIBLINGS under `model`, not a chain, so
-         the head never inherited the torso lean - the old -torsoX*0.5 was not
-         counter-rotating anything, it just tipped him back while walking. */
-    } else if (st.state === 'strafe') {
-      /* §22 CROSSOVER SIDE GAIT. The feet go sideways and cross; the torso
-         stays OPEN to you and the blade tracks you the whole way round, which
-         is the difference between circling a fight and wandering off. */
-      var dirS = b ? b.strafeSign : 1;
-      st.stride += dt * 6;
-      var sws = Math.sin(st.stride);
-      legLx = sws * 0.22 + dirS * 0.10;      // the crossing foot leads
-      legRx = -sws * 0.22 - dirS * 0.10;
-      torsoY = -dirS * 0.26;
-      torsoX = 0.04;
-      armRx = 0.52 + sws * 0.06;
-      armRy = -0.30 * dirS;
-      armRz = -0.30;
-      elbowRx = 0.85;
-      armLx = 0.16; armLz = -0.12 * dirS;
-      headY = dirS * 0.12;
-      bob = Math.abs(Math.cos(st.stride)) * 0.03;
-    } else if (st.state === 'backpedal') {
-      /* §22 HEEL-FIRST RETREAT, guard high. He is giving ground on purpose,
-         so the blade never leaves the space between you — a retreat with the
-         sword down reads as a rout, and he is not routing. */
-      st.stride += dt * 5;
-      var swb = Math.sin(st.stride);
-      legLx = -swb * 0.24;
-      legRx = swb * 0.24;
-      torsoX = -0.10;                        // weight back over the heels
-      armRx = GUARD.aX + 0.35; armRy = GUARD.aY; armRz = GUARD.aZ;
-      elbowRx = GUARD.eX + 0.35;
-      armLx = GUARD.lX + 0.25;
-      headX = -0.04;
-      bob = Math.abs(Math.cos(st.stride)) * 0.025;
-    } else if (st.state === 'turnInPlace') {
-      /* §22 PLANT AND PIVOT past brain.turnThreshold: the feet split, the
-         shoulders lead the hips round. Before this he could rotate 180° with
-         his boots welded facing forward, which is why big yaw changes read as
-         the whole model being spun by a hand rather than a man turning. */
-      var ts = (st.turnErr > 0) ? 1 : -1;
-      legLx = 0.20 * ts;
-      legRx = -0.20 * ts;
-      torsoY = 0.22 * ts;
-      torsoX = 0.03;
-      armRx = 0.40; armRz = -0.28; elbowRx = 0.70;
-      armLx = 0.14;
-      headY = 0.18 * ts;
-    } else if (st.state === 'coil') {
-      /* §22 the DASH TELL. dashTellMs of this before he launches: he drops,
-         both knees fold, the blade cocks behind him — a silhouette that says
-         "he is about to cross the room" from anywhere in the nave. */
-      legLx = 0.30; legRx = 0.30;
-      torsoX = 0.28;
-      bob = -0.10;
-      armRx = 0.95; armRz = -0.45; elbowRx = 1.25;
-      armLx = -0.35;
-      headX = -0.14;                         // eyes still up, on you
-    } else if (st.state === 'taunt') {
-      // §22: blade raised, off-hand open, head cocked. A beat of contempt.
-      armRx = 1.45; armRy = 0.10; armRz = -0.22; elbowRx = 0.30;
-      armLx = -0.28; armLz = 0.30;
-      torsoX = -0.14; torsoY = 0.10;
-      headX = -0.12; headZ = 0.26;
-      bob = Math.sin(t * 3.1) * 0.012;
-    } else if (st.state === 'idle' && b && b.state === 'press') {
-      /* §22: waiting is not standing still. He shifts his weight foot to foot
-         over pressSwayMs — the cheapest possible signal that he is choosing a
-         moment rather than buffering. */
-      var per = Math.max(0.1, b.tune.pressSwayMs / 1000);
-      var sy = Math.sin(b.t * Math.PI * 2 / per);
-      legLx = sy * 0.09; legRx = -sy * 0.09;
-      torsoY = sy * 0.10;
-      armRx = GUARD.aX * 0.6; armRz = GUARD.aZ * 0.6; elbowRx = GUARD.eX * 0.7;
-      armLx = GUARD.lX;
-      headY = sy * 0.06;
-      bob = Math.abs(sy) * 0.012;
-    }
+    var rig = k.rig;
+    var KA = KANIM();
+    if (!rig || !KA) return;          // unrigged fallback totem: he stands there
+    var st = k.anim, b = k.brain, atk = k.atk;
+    /* One options object per knight, reused. A round-6 squad at 60fps would
+       otherwise allocate 360 of these a second for no reason. */
+    var o = k.poseOpt || (k.poseOpt = {});
+    o.dt = dt; o.take = 0; o.cycle = elapsed + st.phase;
+    o.dir = 1; o.amp = 1; o.lean = 0; o.f = 1; o.lunge = 0;
 
     if (st.state === 'death' && b) {
-      /* §22 DEATH, replacing the sink through the floor — which read as a
-         collision bug every single time, because a body falling through stone
-         is exactly what a collision bug looks like. Knees buckle, the torso
-         pitches over them, the body settles; updateDeath drops the sword and
-         only then starts the fade. */
-      var df = Math.min(1, b.deathT / Math.max(0.1, b.tune.deathMs / 1000));
-      var buckle = easeOut(seg(df, 0.00, 0.30));
-      var pitchF = easeIn(seg(df, 0.22, 0.62));
-      var settle = seg(df, 0.62, 0.80);
-      legLx = 0.95 * buckle; legRx = 1.05 * buckle;
-      torsoX = 0.55 * buckle + 0.85 * pitchF;
-      torsoY = 0.12 * pitchF;
-      armRx = -0.55 * buckle - 0.55 * pitchF; armRz = 0.30 * pitchF;
-      elbowRx = 0.10;
-      armLx = -0.30 * buckle - 0.45 * pitchF; armLz = 0.35 * pitchF;
-      headX = 0.30 * buckle + 0.55 * pitchF;
-      headZ = 0.18 * pitchF;
-      bob = -(0.55 * buckle + 0.30 * pitchF) + 0.03 * settle;
+      KA.die(rig, b.deathT / Math.max(0.1, b.tune.deathMs / 1000), o);
     } else if (st.state === 'stagger' && b) {
-      /* §22 STAGGER: head snapped back, arms flung wide, weight on the back
-         foot. The amplitude decays with the timer so the recoil eases out
-         instead of releasing him in one frame — and while this pose is up he
-         is not turning, which is the whole punish window. */
-      var sf = Math.max(0, Math.min(1, b.staggerT / Math.max(0.1, b.tune.staggerMs / 1000)));
-      var wob = Math.sin((1 - sf) * Math.PI * 3) * 0.10 * sf;   // still finding his feet
-      armLx = -0.85 * sf; armLz = 0.55 * sf;
-      armRx = -0.70 * sf; armRy = 0.35 * sf; armRz = 0.60 * sf;
-      elbowLx = 0.10; elbowRx = 0.15;
-      torsoX = -0.42 * sf + wob;
-      torsoY = 0.18 * sf;
-      headX = -0.55 * sf; headZ = 0.20 * sf;
-      legLx = -0.26 * sf; legRx = 0.30 * sf;
-      bob = -0.05 * sf;
+      /* Amplitude decays with the timer that OWNS the punish window, so the
+         recoil eases out instead of releasing him in one frame. Clamped at 1
+         because §23's stun sets staggerT from the ability (1.5s) and may
+         legitimately exceed his own staggerMs (1.2s). */
+      o.f = Math.max(0, Math.min(1, b.staggerT / Math.max(0.1, b.tune.staggerMs / 1000)));
+      KA.pose(rig, 'stagger', o);
     } else if (st.swinging) {
-      var sp = SWINGS[st.swingKind] || SWINGS.overhead;
-      var w = sp.wound, sk = sp.struck;
-      var mix = swingEnvelope(swingLocalP(st));
-      /* recoverMs finally drives something: once the follow-through has
-         landed, settle into GUARD across the pattern's own recover window.
-         §22: measured off the LAST hit window, not the first, or a combo
-         starts settling into guard between its own stabs. */
-      var swEnd = swingEnd(st) * 1.06;
-      var gu = seg(swingClock(st), swEnd, swEnd + st.recoverDur);
-      armRx   = lerpN(swingCh(mix, w, sk, 'aX'), GUARD.aX, gu);
-      armRy   = lerpN(swingCh(mix, w, sk, 'aY'), GUARD.aY, gu);
-      armRz   = lerpN(swingCh(mix, w, sk, 'aZ'), GUARD.aZ, gu);
-      elbowRx = lerpN(swingCh(mix, w, sk, 'eX'), GUARD.eX, gu);
-      armLx   = lerpN(swingCh(mix, w, sk, 'lX'), GUARD.lX, gu);
-      elbowLx = 0.22;
-      torsoX  = lerpN(swingCh(mix, w, sk, 'tX'), GUARD.tX, gu);
-      torsoY  = lerpN(swingCh(mix, w, sk, 'tY'), GUARD.tY, gu);
-      headX   = lerpN(swingCh(mix, w, sk, 'hX'), GUARD.hX, gu);
-      headY   = lerpN(swingCh(mix, w, sk, 'hY'), GUARD.hY, gu);
-      /* Plant the front foot and roll the weight onto it through the chop.
-         The legs used to be left at 0 for the whole wind-up - a stiff
-         parallel stance under a winding torso. A weight shift is the cheapest
-         thing there is that gives a swing mass. */
-      legLx   = lerpN(swingCh(mix, w, sk, 'gL'), GUARD.gL, gu);
-      legRx   = lerpN(swingCh(mix, w, sk, 'gR'), GUARD.gR, gu);
-      /* `bY` is the body itself dropping. Only ground_slam uses it — a rig
-         with one hinge per leg cannot bend a knee, so the smash gets its
-         weight from the whole silhouette going down with the blade. */
-      bob     = lerpN(swingCh(mix, w, sk, 'bY'), 0, gu);
+      /* A swing curve is already shaped on a wall clock; running it through a
+         ~70ms first-order lag is what smeared §21's impact frame across a
+         fifth of the wind-up. `take` is a FLOOR on the blend that makes the
+         driver take the curve straight — ramped in over the first 100ms so a
+         knight caught mid-stride does not pop.
+
+         THE RAMP RESTARTS ON EVERY HIT WINDOW, not once per attack. It used
+         to run off `st.swingT`, which is the clock for the WHOLE swing, so by
+         the second stab of a thrust_combo it was pinned at 1 — and each new
+         window opens on its own telegraph at lp 0, whose target is very near
+         idle. Taken straight, that retracts the blade from full extension to
+         a guard in a single frame. Measured: the sword TIP moved 2.35m
+         between two consecutive frames, twice per combo, against a 0.31m
+         worst case anywhere else in the pose library. Ramping from the
+         window's own start gives the retraction the joint rates (~55ms) and
+         cannot touch the impact frame, which is 200ms+ later at lp 1.0. */
+      o.take = Math.min(1, (swingClock(st) - windowStart(st)) / 0.10);
+      var clk = swingClock(st);
+      var swEnd = swingEnd(st);
+      var apexT = Math.max(0.05, st.swingDur) * SWING_APEX_P;
+      var lp = swingLocalP(st);
+      if (clk >= swEnd) {
+        /* recoverMs finally drives something (§21): he settles into the guard
+           over the pattern's own recover window. Measured off the LAST hit,
+           not the first, or a combo starts sheathing between its own stabs. */
+        KA.phase(rig, 'recover', (clk - swEnd) / Math.max(0.05, st.recoverDur), o);
+      } else if (st.feintHold > 0 && st.swingT > apexT && st.swingT < apexT + st.feintHold) {
+        /* THE FEINT. swingClock has already frozen, so this branch only picks
+           the pose that says "held": alive, but not advancing. The strike
+           timers were pushed back by the same hold, which is what makes "a
+           feint must never damage during the hold" true by construction. */
+        KA.phase(rig, 'hold', 1, o);
+      } else if (lp <= SWING_APEX_P) {
+        KA.phase(rig, 'telegraph', lp / SWING_APEX_P, o);
+      } else {
+        /* The last 22% of the window is the strike, and knightanim eases it in
+           on a quartic, so the apex is still nearly still at p 0.88 and the
+           whole arc is spent in the final frames. IMPACT IS lp = 1.0 BY
+           CONSTRUCTION — that is what swingLocalP means. */
+        var win = atk.hits ? atk.hits[swingWindow(st)] : null;
+        /* Hand over the LEAN, never the metre count: `atk.lunge` pays the real
+           displacement onto k.group where the navgrid can stop him, and a root
+           that also walked the full 1.6m would be a step no stone could
+           block. Capped, because the lean is a body attitude, not travel. */
+        o.lunge = (win && win.lunge) ? Math.min(0.28, win.lunge * 0.18) : 0;
+        KA.phase(rig, 'strike', (lp - SWING_APEX_P) / (1 - SWING_APEX_P), o);
+      }
+    } else if (st.state === 'walk' || st.state === 'dash') {
+      /* §22 capped the boot swing at 0.28rad because the "legs" are boots and
+         the dress hem above them never moved, so a real stride swung bare
+         boots out from under a static skirt. `hips` carries the hem now, and
+         knightanim's walk opens back up to 30deg (45 at a dash). */
+      var g = GAIT[st.state];
+      st.stride += dt * g.rate;
+      o.cycle = st.stride; o.amp = g.amp; o.lean = g.lean;
+      KA.pose(rig, 'walk', o);
+    } else if (st.state === 'strafe') {
+      st.stride += dt * 6;
+      o.cycle = st.stride;
+      o.dir = b ? b.strafeSign : 1;
+      KA.pose(rig, 'strafe', o);
+    } else if (st.state === 'backpedal') {
+      st.stride += dt * 5;
+      o.cycle = st.stride;
+      KA.pose(rig, 'backpedal', o);
+    } else if (st.state === 'turnInPlace') {
+      o.dir = (st.turnErr > 0) ? 1 : -1;
+      KA.pose(rig, 'turnInPlace', o);
+    } else if (st.state === 'coil' || st.state === 'taunt') {
+      KA.pose(rig, st.state, o);
+    } else if (b && b.state === 'press') {
+      // waiting is not standing still: the weight shift runs on pressSwayMs
+      o.cycle = b.t * Math.PI * 2 / Math.max(0.1, b.tune.pressSwayMs / 1000);
+      KA.pose(rig, 'press', o);
+    } else {
+      KA.pose(rig, 'idle', o);
     }
 
-    /* §22 HIT FLASH. Every damaging blow reads, stagger or not — a hit that
-       changes nothing but a number is a hit the player is not sure they
-       landed. Laid OVER whatever he was doing rather than replacing it, so a
-       flinch never eats a swing that is already in flight. */
+    /* §22 HIT FLASH: every damaging blow reads, stagger or not. Squared so it
+       is sharp on the impact frame and gone fast, and additive so it never
+       eats a swing in flight. */
     if (b && b.hitFlash > 0 && st.state !== 'stagger' && st.state !== 'death') {
       var hf = b.hitFlash / Math.max(0.02, b.tune.hitFlashMs / 1000);
-      var kick = hf * hf;             // sharp on the impact frame, gone fast
-      torsoX -= 0.20 * kick;
-      headX -= 0.26 * kick;
-      armLx -= 0.16 * kick;
-      armRx -= 0.10 * kick;
-      bob -= 0.03 * kick;
+      KA.flinch(rig, hf * hf);
     }
-
-    /* A swing curve is already shaped on a wall clock; running it through a
-       ~70ms first-order lag is exactly what smeared the old impact frame
-       across a fifth of the wind-up. Take it straight - but ramp INTO it over
-       the first 100ms so a knight caught mid-stride does not pop - and keep
-       the exponential blend for the idle/walk cross-fades it exists for. */
-    var take = st.swinging ? Math.min(1, st.swingT / 0.10) : 0;
-    var aUp = Math.max(alpha(RATE_ARM, dt), take);
-    var aLg = Math.max(alpha(RATE_LEG, dt), take);
-    var aTr = Math.max(alpha(RATE_TORSO, dt), take);
-    var aHd = Math.max(alpha(RATE_HEAD, dt), take);
-    blend(r.armL.rotation, 'x', armLx, aUp);
-    blend(r.armL.rotation, 'z', armLz, aUp);   // §22: the off-arm flings wide
-    blend(r.armR.rotation, 'x', armRx, aUp);
-    blend(r.armR.rotation, 'y', armRy, aUp);
-    blend(r.armR.rotation, 'z', armRz, aUp);
-    if (r.elbowL) blend(r.elbowL.rotation, 'x', elbowLx, aUp);
-    if (r.elbowR) blend(r.elbowR.rotation, 'x', elbowRx, aUp);
-    blend(r.legL.rotation, 'x', legLx, aLg);
-    blend(r.legR.rotation, 'x', legRx, aLg);
-    blend(r.torso.rotation, 'x', torsoX, aTr);
-    blend(r.torso.rotation, 'y', torsoY, aTr);
-    blend(r.head.rotation, 'x', headX, aHd);
-    blend(r.head.rotation, 'y', headY, aHd);
-    blend(r.head.rotation, 'z', headZ, aHd);   // §22: the taunt's tilt, the stagger's snap
-    /* bob was assigned raw, so the frame he stopped walking - or a telegraph
-       forced state='idle' - the whole body dropped up to 10cm in one frame. */
-    k.bob += (bob - k.bob) * alpha(RATE_BOB, dt);
+    /* Last, always: advances the rig's own clock and holds the breathing idle
+       for anything that did not drive it this frame. */
+    KA.update(rig, dt);
   }
 
   /* ------------------------------------------------------- §22 the brain
@@ -3449,15 +3475,57 @@ CHLOE.engine = CHLOE.engine || {};
     staggerMs: 1200, staggerTakeMult: 1.5
   };
   function brainCfg() { return (D().knight && D().knight.brain) || {}; }
+  function ktree() { return CHLOE.engine.knighttree || null; }
+  function roundNow() { var kt = ktree(); return kt && kt.round ? kt.round() : 1; }
+
+  /* §28 A2: the round's contribution to difficulty, now that levels start at
+     1. One scalar, read from data, capped there, and applied in exactly two
+     places — the movement speeds below and the swing schedule in telegraph().
+     Rounds before `fromRound` get a hard 1, so nothing about the early game
+     moves at all. */
+  var SPEED_DEFAULT = { fromRound: 5, perRound: 0.06, max: 1.35, telegraphFloorMs: 900 };
+  function speedCfg() {
+    var src = brainCfg().roundSpeed || {}, out = {}, k;
+    for (k in SPEED_DEFAULT) out[k] = (typeof src[k] === 'number') ? src[k] : SPEED_DEFAULT[k];
+    return out;
+  }
+  function roundSpeed(r) {
+    var c = speedCfg();
+    r = (r == null) ? roundNow() : r;
+    if (r < c.fromRound) return 1;
+    var m = 1 + (r - (c.fromRound - 1)) * c.perRound;
+    return m > c.max ? c.max : m;
+  }
+  /* The same scalar, reduced for ONE pattern if the full multiplier would
+     push its wind-up under the readability floor. Returning a per-pattern
+     number rather than clamping telegraphMs alone is what keeps §21's one
+     clock: the whole schedule — telegraph, every hit time, the recover — is
+     divided by this single value, so the picture and the damage shorten by
+     exactly the same factor or neither does. */
+  function patternSpeed(pattern, r) {
+    var m = roundSpeed(r);
+    if (m <= 1) return 1;
+    var floor = speedCfg().telegraphFloorMs;
+    var tel = (pattern && pattern.telegraphMs) || 1500;
+    if (tel / m < floor) m = tel / floor;
+    return m < 1 ? 1 : m;
+  }
 
   /* Resolve one knight's tuning ONCE, at spawn. A per-frame merge of two
-     objects for every knight in a round-6 squad is pure garbage collection. */
+     objects for every knight in a round-6 squad is pure garbage collection.
+     The round-speed multiplier is baked in HERE for the same reason — and
+     because a squad spawns once per round, so the round it was spawned for is
+     the round it fights in. */
+  var SPED_KEYS = ['walkSpeed', 'strafeSpeed', 'backpedalSpeed', 'dashSpeed'];
   function buildTune(personality) {
     var src = brainCfg(), t = {}, key;
     for (key in BRAIN_DEFAULTS) t[key] = BRAIN_DEFAULTS[key];
     for (key in src) if (typeof src[key] === 'number') t[key] = src[key];
     var p = (src.personalities || {})[personality];
     for (key in p) if (typeof p[key] === 'number') t[key] = p[key];
+    var sp = roundSpeed();
+    if (sp > 1) for (var i = 0; i < SPED_KEYS.length; i++) t[SPED_KEYS[i]] *= sp;
+    t.roundSpeed = sp;
     return t;
   }
 
@@ -3499,7 +3567,45 @@ CHLOE.engine = CHLOE.engine || {};
       repFrom: 0, repStuck: false, comboDone: false, wantsAttack: false
     };
     k.staggerMeter = 0;
+    /* §28 A: a fresh ladder with the fresh brain. The personality was dealt
+       one line above, and it is what sets both where he starts and how fast
+       he climbs — so this has to happen here, after the deal, and not at
+       makeKnightState() time when he has no temperament yet. */
+    var kt = ktree();
+    k.level = kt ? kt.spawnLevel(name) : 1;
+    k.levelT = 0;
+    k.levelTell = 0;
     return k.brain;
+  }
+
+  /* Advance one knight's own ladder. ALIVE knights only — a corpse stops
+     earning, which is also what stops a cleared floor from quietly climbing
+     behind the victory card while the render loop keeps turning. */
+  function updateLevel(k, dt) {
+    var kt = ktree();
+    if (!kt || !k.alive || !k.brain) return;
+    k.levelT += dt;
+    if (k.levelTell > 0) k.levelTell = Math.max(0, k.levelTell - dt);
+    var want = kt.levelFor(k.brain.personality, k.levelT, roundNow());
+    if (want === k.level) return;
+    k.level = want;
+    /* THE TELL. Not a pose — a pose would interrupt whatever he is doing and
+       a knight who freezes to celebrate is a free hit. The armour brightens
+       for tellMs and his own light swells with it, which reads across the
+       nave and costs the fight nothing. */
+    k.levelTell = kt.tellMs() / 1000;
+    for (var m = 0; m < k.mats.length; m++) {
+      var mm = k.mats[m];
+      if (mm.emissive) { mm.emissive.setHex(0xffb038); mm.emissiveIntensity = 1.4; }
+    }
+    (function (kk) {
+      window.setTimeout(function () {
+        for (var j = 0; j < kk.mats.length; j++) {
+          var mj = kk.mats[j];
+          if (mj.emissive) { mj.emissive.setHex(0x000000); mj.emissiveIntensity = 1.0; }
+        }
+      }, kt.tellMs());
+    })(k);
   }
   function brainOf(k) {
     if (k.brain) return k.brain;
@@ -3641,9 +3747,13 @@ CHLOE.engine = CHLOE.engine || {};
      back exactly where it was. A sword left loose in the scene would outlive
      the round it was dropped in. */
   function dropSword(k) {
-    if (k.dropped || !k.rig || !k.rig.elbowR || !k.group) return;
+    if (k.dropped || !k.rig || !k.rig.bones.sword || !k.group) return;
+    /* §28: take everything on the SWORD BONE, not everything under the elbow
+       whose name matches /Sword/. The bone is the manifest's own answer to
+       "what is the sword" — five merged meshes, blade through pommel — so the
+       drop no longer depends on a name regex agreeing with an artist. */
     var list = [];
-    k.rig.elbowR.traverse(function (o) { if (o.isMesh && /Sword/i.test(o.name || '')) list.push(o); });
+    k.rig.bones.sword.group.traverse(function (o) { if (o.isMesh) list.push(o); });
     k.dropped = [];
     for (var i = 0; i < list.length; i++) {
       var o = list[i];
@@ -3690,7 +3800,10 @@ CHLOE.engine = CHLOE.engine || {};
     }
     if (k.light) k.light.intensity = k.light.intensity * (1 - alpha(2.2, dt));
     poseKnight(k, dt);
-    k.group.position.y = (k.bob || 0);
+    /* The body's vertical rides the rig's own `_root` now — the death pose
+       drops him as the knees buckle — so the group stays on the floor. It
+       used to carry `k.bob`, which went with the sibling pivots. */
+    k.group.position.y = 0;
     /* Fade LAST, and only once he has settled: a corpse that starts
        dissolving while it is still falling reads as a despawn, not a death. */
     var fade = seg(f, 0.80, 1.00);
@@ -3724,6 +3837,7 @@ CHLOE.engine = CHLOE.engine || {};
     if (!k.alive) { updateDeath(k, dt); return; }
 
     var st = k.anim, b = brainOf(k), t = b.tune;
+    updateLevel(k, dt);               // §28 A: his own ladder, on seconds alive
     var kx = k.group.position.x, kz = k.group.position.z;
     var dx = pos.x - kx, dz = pos.z - kz;
     var dist = Math.sqrt(dx * dx + dz * dz) || 0.001;
@@ -4029,10 +4143,23 @@ CHLOE.engine = CHLOE.engine || {};
     } else if (k.light) {
       k.light.intensity = (0.55 + Math.sin((elapsed + st.phase) * 5.3) * 0.1) * LIGHT_SCALE;
     }
+    /* §28 A: the level-up tell rides ON TOP of whatever the light was doing,
+       so it reads mid-swing as well as mid-stroll — and decays with its own
+       timer rather than overwriting the state the next frame restores. */
+    if (k.levelTell > 0 && k.light) {
+      var kt2 = ktree();
+      var tf = k.levelTell / Math.max(0.05, (kt2 ? kt2.tellMs() : 800) / 1000);
+      k.light.intensity += 2.6 * tf * tf * LIGHT_SCALE;
+    }
 
     poseKnight(k, dt);
-    var breathe = Math.sin((elapsed + st.phase) * 1.1) * 0.012;
-    k.group.position.y = (k.bob || 0) + breathe;
+    /* No bob and no breathe here any more: both are `_root` offsets inside
+       knightanim's own poses, applied to rig.root — where they move the BODY
+       rather than sliding the whole group, and with it his light, his shadow
+       and the origin every hit test measures from, up and down underneath
+       him. `st.phase` still offsets the cycle so a squad does not breathe as
+       one organism; it is passed to the pose instead of used here. */
+    k.group.position.y = 0;
   }
 
   /* Drive every knight on the floor. */
@@ -4366,6 +4493,16 @@ CHLOE.engine = CHLOE.engine || {};
       churchLoaded: churchLoaded, knightLoaded: knightLoaded,
       envMap: envMapOk,
       knightRig: knight.rigInfo || null,
+      /* §28 A: the SPREAD, made measurable. `knightLevels[i]` is what that
+         knight is right now; `roundLevel` is the baseline the round is worth
+         and what the poster/HUD still name. A verifier watching these two
+         diverge over a fight is watching the whole feature work. */
+      roundLevel: ktree() ? ktree().level() : 1,
+      levelCap: ktree() ? ktree().capForRound(roundNow()) : 1,
+      knightLevels: knights.map(function (k) { return k.level || 1; }),
+      knightLevelT: knights.map(function (k) { return +(k.levelT || 0).toFixed(1); }),
+      // §28 A2: the round's speed multiplier, and what it is doing to a swing
+      roundSpeed: +roundSpeed().toFixed(3),
       squad: knights.length,
       squadAlive: knights.filter(function (k) { return k.alive; }).length,
       knightState: knight.anim ? knight.anim.state : null,
@@ -4735,16 +4872,32 @@ CHLOE.engine = CHLOE.engine || {};
              free: function (x, z, r) { return navFree(x, z, r); } };
   };
 
-  /* Rig geometry check: where each pivot actually sits in the world versus
-     the hand/limb it is supposed to swing. A big gap means the pivot was
-     measured in the wrong space and the limb swings on a lever, not a joint. */
+  /* Rig geometry check: where each BONE actually sits in the world versus the
+     limb it is supposed to swing. A big gap means the bone was measured in the
+     wrong space and the limb swings on a lever, not a joint (§21's 5.9m
+     shoulder). `height` is the §28 acceptance number — the knight's real
+     on-screen height, which must still be 2.15m after the reparenting. */
   A._rigProbe = function (index) {
     var k = knights[index || 0];
     if (!k || !k.rig) return null;
     function r3(v) { return +v.toFixed(3); }
     var v = new THREE.Vector3(), cv = new THREE.Vector3();
+    var box = new THREE.Box3().setFromObject(k.rig.root);
     var out = {
       counts: k.rigInfo || null, mode: k.atk.mode, kind: k.anim.swingKind,
+      /* TWO heights, and the difference matters. `heightAtSpawn` is the §28
+         acceptance number — measured once, at rest, right after the
+         reparenting — and it is the one a test asserts 2.15m against.
+         `heightNow` is the live bounding box, which is NOT that number and
+         must not be treated as it: it is a POSED body, so a mid-stride
+         measurement legitimately reads ~1.94m (the raised boot is the lowest
+         point of the box, and it is 0.08m off the floor). Reading the live
+         box and expecting 2.15 is the same class of mistake as §17's "Box3
+         lies", one level up. */
+      heightAtSpawn: (k.rigInfo && k.rigInfo.height) || null,
+      heightNow: r3(box.max.y - box.min.y),
+      rootScale: r3(k.rig.root.scale.x),
+      moved: k.rig.moved, missingMeshes: k.rig.missing,
       swinging: k.anim.swinging, swingT: r3(k.anim.swingT),
       swingDur: r3(k.anim.swingDur), recoverDur: r3(k.anim.recoverDur),
       /* §22: swingP is the phase inside the CURRENT hit window (1.0 is its
@@ -4762,8 +4915,8 @@ CHLOE.engine = CHLOE.engine || {};
       dropped: k.dropped ? k.dropped.length : 0,
       pivots: {}, rot: {}, lever: {}, meshes: {}
     };
-    for (var key in k.rig) {
-      var g = k.rig[key];
+    for (var key in k.rig.bones) {
+      var g = k.rig.bones[key].group;
       out.pivots[key] = [r3(g.position.x), r3(g.position.y), r3(g.position.z)];
       out.rot[key] = [r3(g.rotation.x), r3(g.rotation.y), r3(g.rotation.z)];
       g.getWorldPosition(v);
@@ -4777,6 +4930,33 @@ CHLOE.engine = CHLOE.engine || {};
       });
       out.lever[key] = r3(far);
       out.meshes[key] = n;
+    }
+    /* §28's acceptance number: where the POINT of the sword actually is, in
+       world metres, and how far that is from the knight's own origin across
+       the floor. The blade is the furthest mesh from the grip by construction
+       (the generator's sword anatomy table orders them blade, collar, guard,
+       grip, pommel), so "furthest under the sword bone" is the tip without
+       naming a mesh. This is the number the hit volumes in data/arena3d.js
+       were reconciled against — a swing whose visible tip stops a metre short
+       of its own `reach` is the defect §28 B2 asks a test to catch, and it
+       cannot be seen from any of the joint angles above. */
+    var sw = k.rig.bones.sword;
+    if (sw) {
+      sw.group.getWorldPosition(v);
+      var tip = null, tipD = -1;
+      sw.group.traverse(function (o) {
+        if (!o.isMesh) return;
+        o.getWorldPosition(cv);
+        var d = cv.distanceTo(v);
+        if (d > tipD) { tipD = d; tip = cv.clone(); }
+      });
+      if (tip) {
+        var ox = k.group ? k.group.position.x : 0, oz = k.group ? k.group.position.z : 0;
+        out.tip = [r3(tip.x), r3(tip.y), r3(tip.z)];
+        out.tipReach = r3(Math.sqrt((tip.x - ox) * (tip.x - ox) + (tip.z - oz) * (tip.z - oz)));
+        out.bladeLen = r3(tipD);
+        out.gripAt = [r3(v.x), r3(v.y), r3(v.z)];
+      }
     }
     return out;
   };

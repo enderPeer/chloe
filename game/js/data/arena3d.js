@@ -161,9 +161,15 @@ CHLOE.data.arena3d = {
           keepDistance: 1.8, pressWeight: 6, strafeWeight: 1,
           repositionWeight: 0.5, tauntChance: 0.3
         },
-        // fights at the edge of your reach: circles, backs off, waits you out
+        /* Fights at the edge of your reach: circles, backs off, waits you out.
+           keepDistance was 2.4 and is now 2.1. §28 B2 measured the blade: the
+           furthest any swing puts the TIP is 1.90m from his own origin, so a
+           knight who holds 2.4m is standing outside his own reach and every
+           swing he throws from `press` whiffs by a third of a metre. He is
+           still the furthest-standing of the three; he is no longer standing
+           somewhere he cannot hit you from. */
         cautious: {
-          walkSpeed: 1.45, strafeSpeed: 1.5, keepDistance: 2.4,
+          walkSpeed: 1.45, strafeSpeed: 1.5, keepDistance: 2.1,
           attackCooldownMs: 1200, strafeHoldMs: 1500, repositionDist: 5.2,
           pressWeight: 2, strafeWeight: 4, repositionWeight: 2.5
         },
@@ -173,6 +179,45 @@ CHLOE.data.arena3d = {
           dashTellMs: 480, dashCooldownMs: 5000, staggerDamage: 130,
           staggerBuildup: 300, strafeWeight: 0.5, pressWeight: 5
         }
+      },
+
+      /* --- §28 A2: FROM ROUND 5, THE KNIGHTS GET FASTER ----------------
+         Levels start at 1 now (§28 A), so the round's own contribution to
+         difficulty had to move somewhere the player FEELS rather than reads
+         off a stat block. From `fromRound` on, every knight gains one
+         multiplier that touches both halves of the fight:
+
+           MOVEMENT  walkSpeed / strafeSpeed / backpedalSpeed / dashSpeed are
+                     multiplied by it, so he closes, circles and lunges
+                     faster. Applied once when the tune is resolved at spawn,
+                     never per frame.
+           WIND-UP   telegraphMs, every hits[].atMs and recoverMs are DIVIDED
+                     by it, so the swing arrives sooner.
+
+         ONE CLOCK (§21). The wind-up is not shortened by editing the pattern:
+         the engine derives a single scalar and divides EVERY time in the
+         pattern by it together, and the pose driver is stretched over the
+         result. If the telegraph shortens, the picture shortens with it,
+         because both read the same numbers.
+
+           round:   1-4     5      6      7      8      9     10+
+           mult:    1.00   1.06   1.12   1.18   1.24   1.30   1.35 (max)
+
+         `telegraphFloorMs` IS THE READABILITY GUARANTEE and it is the one
+         number here nobody may quietly lower. A wind-up you cannot see is not
+         a hard attack, it is an unfair one. No pattern's telegraph is ever
+         scaled below 900ms; the scalar for that pattern is reduced until it
+         is not. Measured against the shipped patterns, only `thrust_combo`
+         (1100ms) ever reaches the floor — at the 1.35 ceiling it would want
+         815ms, so its own multiplier is held at 1.22 and its whole schedule
+         with it, while a slash at 1500ms scales the full 1.35 to 1111ms.
+         That is deliberate: the fastest attack in the set is the one that
+         stops getting faster first. */
+      roundSpeed: {
+        fromRound: 5,
+        perRound: 0.06,        // added per round past fromRound - 1
+        max: 1.35,             // ceiling; reached at round 10
+        telegraphFloorMs: 900  // no wind-up ever scales below this
       }
     }
   },
@@ -227,19 +272,62 @@ CHLOE.data.arena3d = {
      (14%) are the rarer commitments that reshape where you are standing.
      Roughly half the swings still want a sidestep, which is what keeps the
      fight mobile. Remember data/knighttree.js gates patterns by his LEVEL,
-     so an early round rolls from a smaller table than this. */
+     so an early round rolls from a smaller table than this.
+
+     ===================================================================
+     §28 B2 — THE VOLUMES WERE RECONCILED AGAINST THE MEASURED BLADE
+     ===================================================================
+     `reach`, `length` and `radius` here are measured from the KNIGHT'S OWN
+     ORIGIN to the PLAYER'S CENTRE. They were authored against §18's rig,
+     whose sword pivot sat 0.129m off the blade's own centre line — nobody
+     could measure what the tip did, so the numbers were set by feel, and by
+     feel they were set far too long.
+
+     They are now derived. `arena3d._rigProbe(i).tipReach` reports where the
+     point of the sword actually is at the strike frame; the player's body
+     radius is 0.35m; so the honest volume is tipReach + 0.35, i.e. "the
+     blade touches you". Measured through the shipped engine at the impact
+     frame of each pattern:
+
+       pattern        tip reach   + body   was     now    change
+       slash            1.85       2.20    3.4     2.2    -35%
+       overhead         1.78       2.13    4.4     2.1    -52%
+       charge           1.90       2.25    7.5     2.6    -65%
+       thrust_combo     1.77       2.12    3.6     2.1    -42%
+       ground_slam       n/a        n/a    4.2     4.2     none
+
+     THE WIDTHS ARE UNCHANGED. What was wrong was the LANE LENGTH, not how
+     far you must step aside — the arcs really do sweep that wide, and
+     narrowing them as well would have made sidestep a free answer.
+
+     `ground_slam` keeps 4.2 because its volume is not the blade: the ring
+     spawnShock draws IS the hit test, expanding to exactly `radius`, and the
+     blade only has to reach the floor to justify it. Measured, the tip
+     finishes at y 0.166 — on the flags. Nothing to reconcile.
+
+     SAY THE BALANCE OUT LOUD. The charge losing 4.9m of lane is the biggest
+     single nerf in this file's history. It was also the biggest lie: he
+     crossed the nave at 7.6 m/s and then hit anything within seven and a half
+     metres of where he stopped, with a blade that reaches 1.9. The danger
+     band against a knight who holds `keepDistance` 2.0 goes from "safe only
+     past 3.4m" to "safe past 2.2m", which is about a third of a second of
+     backing away — and he closes faster every round from 5 (see
+     brain.roundSpeed). Combined with §28 A's level-1 spawns this is a real
+     easing of round 6 at t=0 and a real escalation after ~30s; that
+     crossover is documented in data/knighttree.js and is the number to
+     re-measure if either half of this is retuned. */
   patterns: {
     slash: {
       id: 'slash', name: 'Wide Slash', hint: 'CROUCH!',
       telegraphMs: 1500, recoverMs: 700,
-      reach: 3.4, evade: 'crouch',
+      reach: 2.2, evade: 'crouch',   // 1.84m of blade + the 0.35m body
       power: 110, weight: 4,
       feint: { chance: 0.20, holdMs: 320 }
     },
     overhead: {
       id: 'overhead', name: 'Overhead Ruin', hint: 'SIDESTEP!',
       telegraphMs: 1700, recoverMs: 900,
-      width: 1.7, length: 4.4, evade: 'sidestep',
+      width: 1.7, length: 2.1, evade: 'sidestep',   // 1.73m of blade + the body
       power: 145, weight: 3,
       // the longest, highest apex — the pose that can afford the biggest lie
       feint: { chance: 0.30, holdMs: 420 }
@@ -247,7 +335,7 @@ CHLOE.data.arena3d = {
     charge: {
       id: 'charge', name: 'Hollow Charge', hint: 'MOVE!',
       telegraphMs: 1900, recoverMs: 1100,
-      width: 1.9, length: 7.5, evade: 'sidestep',
+      width: 1.9, length: 2.6, evade: 'sidestep',   // 1.90m of blade + the body, plus the lunge he is still carrying
       power: 170, weight: 2,
       // he is already lunging in the last quarter of the wind-up (§21), so
       // keep the hold short or the feint reads as a stumble
@@ -265,7 +353,7 @@ CHLOE.data.arena3d = {
     thrust_combo: {
       id: 'thrust_combo', name: 'Hollow Thrust', hint: 'SIDESTEP!',
       telegraphMs: 1100, recoverMs: 850,
-      width: 1.0, length: 3.6, reach: 3.6, evade: 'sidestep',
+      width: 1.0, length: 2.1, reach: 2.1, evade: 'sidestep',   // 1.63m of blade + the body (`reach` is vestigial here: sidestep patterns test the lane)
       power: 70,
       hits: [
         { atMs: 1100, power: 70 },              // jab
