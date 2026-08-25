@@ -296,11 +296,17 @@ CHLOE.engine.combat3 = (function () {
        waste the key) or you cleared it on purpose. */
     /* §31 added the third condition. The comment above has always promised
        "unless it is already bound elsewhere", but the check only ever looked
-       at `out` — the KEY array — and a button was invisible to it. Nothing
-       could put an ability on a button at run start until party.newGame began
-       seeding the fist onto LMB, so the gap was unreachable rather than
-       harmless; the moment it was reachable, punch sat on both LMB and key 1
-       and wasted the key exactly as the comment warned. */
+       at `out` — the KEY array — and a button was invisible to it.
+
+       IT WAS NEVER UNREACHABLE, and an earlier version of this comment said
+       so wrongly. bind() clears an entry off its key when you move it to a
+       button, and the next binds() read re-places known[0] on key 1 because
+       the default cannot see the button — so any player who put their first
+       ability on the mouse has been getting a duplicate, and wasting the key
+       this comment exists to protect, since §27B shipped.
+       §31 changed the ODDS, not the possibility: seeding the fist onto LMB
+       makes it the opening state of every run rather than something you had
+       to go and do. */
     if (!out[0] && known.length && out.indexOf(known[0]) === -1 &&
         mouseEntries(charId).indexOf(known[0]) === -1 &&
         clearedOf(charId).indexOf(known[0]) === -1) {
