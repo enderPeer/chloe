@@ -113,7 +113,13 @@ This repo has verification *contracts*, not vibes. Before you call something don
    `combat3.snapshot()` is `null` outside a round.
 3. **Check the spec's own hooks.** Recent `GAME_SPEC.md` sections end with a **Verification**
    block naming what a change must *prove*. Prove those.
-4. **A test that never advanced a frame is a failing test.** A headless check with a frozen
+4. **Make the probe fail on purpose before you trust it.** Feed it something you know is broken —
+   a misspelled personality, a function name with a typo, an out-of-range index — and confirm it
+   complains. This codebase degrades rather than throws at almost every boundary, so a probe with
+   no failure path hands back a plausible number instead of an error, and you cannot tell that
+   output from a real measurement. Six ways it happens, with the tell for each, in
+   [`docs/debugging.md`](docs/debugging.md).
+5. **A test that never advanced a frame is a failing test.** A headless check with a frozen
    `requestAnimationFrame` will happily report success while nothing ticked. Confirm frames moved.
 
 Full list of hooks and traps: [`docs/debugging.md`](docs/debugging.md).
