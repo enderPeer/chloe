@@ -1,0 +1,32 @@
+#!/bin/sh
+# CHLOE pre-commit: bump the build number the game shows on screen.
+#
+# The version is a PROMISE to the player that what they are looking at
+# changed, so it must not depend on anyone remembering to bump it. This runs
+# the bumper and stages only version.js, so the bump rides along in the very
+# commit that changes the game.
+#
+# Enable (once per clone):  git config core.hooksPath tools/hooks
+# Skip for one commit:      SKIP_VERSION_BUMP=1 git commit ...
+# Never blocks a commit: if node is missing or the bump fails, it warns and
+# lets the commit through — a broken hook must not hold the repo hostage.
+[ -n "$SKIP_VERSION_BUMP" ] && exit 0
+
+# Don't bump when version.js is the ONLY thing staged (that is the bumper's
+# own commit, or a hand edit to the label) — otherwise amending loops.
+staged=$(git diff --cached --name-only)
+[ "$staged" = "game/js/data/version.js" ] && exit 0
+
+for node in "node" "/c/Program Files/nodejs/node.exe" "/usr/bin/node"; do
+  if command -v "$node" >/dev/null 2>&1 || [ -x "$node" ]; then
+    v=$("$node" tools/bump-version.js 2>&1) && {
+      git add game/js/data/version.js
+      echo "CHLOE: version bumped to $v"
+      exit 0
+    }
+    echo "CHLOE: version bump failed ($v) — committing anyway" >&2
+    exit 0
+  fi
+done
+echo "CHLOE: node not found — version NOT bumped" >&2
+exit 0

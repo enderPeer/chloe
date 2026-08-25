@@ -2,7 +2,12 @@
    Assign known abilities to number keys 1-9 before a fight. Slots beyond the
    unlocked count are shown locked, so it is obvious that levelling is what
    widens the hotbar. Renders into the menu overlay's Moves tab, alongside the
-   level ladder (§21). */
+   level ladder (§21).
+   §23 adds pockets: consumables are their own group here and bind exactly like
+   an ability, encoded into the same bind list as 'item:<itemId>'. Every slot
+   is generic — the two extra keys the ladder hands you are NOT drawn as
+   special "pocket" keys, because any key takes either kind and drawing them
+   apart would teach a rule that does not exist. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -12,9 +17,73 @@ CHLOE.ui.binds = (function () {
 
   function C3() { return CHLOE.engine.combat3; }
   function ABIL() { return CHLOE.data.abilities || {}; }
+  function ITEMS() { return CHLOE.data.items || {}; }
   function typeColor(t) {
     var c = (CHLOE.data.types && CHLOE.data.types.colors) || {};
     return c[t] || '#9a939c';
+  }
+
+  /* ------------------------------------------------------------- §23 pockets
+     A bind entry is either a bare ability id or the string 'item:<itemId>'.
+     combat3 owns that encoding and publishes `itemIdOf`/`itemKey` so this
+     screen never has to spell it — but it also has to keep rendering against
+     an engine that has not grown them yet, so each one falls back to the
+     literal prefix. Read the encoding, never ask "is this the new build". */
+  function itemIdOf(bind) {
+    var c = C3();
+    if (c && typeof c.itemIdOf === 'function') return c.itemIdOf(bind) || null;
+    return (typeof bind === 'string' && bind.indexOf('item:') === 0) ? bind.slice(5) : null;
+  }
+  function itemKey(id) {
+    var c = C3();
+    return (c && typeof c.itemKey === 'function') ? c.itemKey(id) : ('item:' + id);
+  }
+  function bagCount(id) {
+    var inv = CHLOE.engine.inventory;
+    return (inv && typeof inv.count === 'function') ? (inv.count(id) || 0) : 0;
+  }
+
+  /* Which items may sit on a key. The rule lives in data/items.js as a
+     property of the EFFECT (§23) — ask it, never name ids here, or a future
+     potion needs an edit in three files. The fallback repeats the same rule
+     rather than a list, for the same reason. */
+  function bindableItems() {
+    var rules = CHLOE.data.itemRules || CHLOE.data.items;
+    var ids;
+    if (rules && typeof rules.combatUsableIds === 'function') {
+      ids = rules.combatUsableIds();
+    } else {
+      ids = [];
+      var t = ITEMS();
+      for (var id in t) {
+        if (!Object.prototype.hasOwnProperty.call(t, id)) continue;
+        var eff = t[id] && t[id].effect;
+        if (eff && (eff.hp > 0 || eff.mp > 0)) ids.push(id);
+      }
+    }
+    /* If the engine will vet the bind, vet the LIST by the same predicate —
+       offering a card that bind() is going to refuse is worse than not
+       offering it. */
+    var c = C3();
+    if (c && typeof c.bindableItem === 'function') {
+      ids = ids.filter(function (x) { return c.bindableItem(x); });
+    }
+    return ids;
+  }
+
+  /* One line of feedback that survives the rerender — a refused bind has to
+     say why, and every click here redraws the whole tab. */
+  var notice = '';
+
+  /* Write a slot and read it straight back. bind() can refuse outright, and it
+     can also accept and then validate the entry away on the next read (an
+     engine that does not know about 'item:' yet drops it as an unknown
+     ability). Only the read-back proves the key actually holds it. */
+  function put(charId, slot, entry) {
+    var r = C3().bind(charId, slot, entry);
+    var back = C3().binds(charId)[slot];
+    notice = (back === (entry || null)) ? ''
+      : ((r && r.reason) || 'Key ' + (slot + 1) + ' would not take that.');
   }
 
   function activeChar() {
@@ -43,9 +112,10 @@ CHLOE.ui.binds = (function () {
     var maxSlots = (CHLOE.data.abilityConfig && CHLOE.data.abilityConfig.maxSlots) || 9;
 
     body.appendChild(ui.el('div', 'menu-note',
-      'Bind abilities to number keys. In the fight: 1-9 to strike, SPACE to evade, ' +
-      'Shift to sprint, Ctrl or C to crouch. New moves arrive already bound — ' +
-      'rearrange them here if you want them somewhere else.'));
+      'Bind abilities and pocket items to number keys. In the fight: 1-9 to use, ' +
+      'SPACE to evade, Shift to sprint, Ctrl or C to crouch. New moves arrive ' +
+      'already bound — rearrange them here if you want them somewhere else.'));
+    if (notice) body.appendChild(ui.el('div', 'menu-note warn', notice));
 
     /* §21: party members walk the ladder on their OWN level, so the tab has to
        say whose keys and whose levels you are looking at. */
@@ -65,12 +135,17 @@ CHLOE.ui.binds = (function () {
       body.appendChild(strip);
     }
 
-    // --- the 9 keys ---
+    /* --- the 9 keys ---
+       §23: an unlocked key is an unlocked key. The last two are the pocket
+       slots, but they carry no badge, no tint and no separate heading, because
+       any slot takes either kind — the pockets exist so that carrying a
+       bandage costs you no ability, not so that two keys become item-only. */
     var row = ui.el('div', 'bind-slots');
     for (var i = 0; i < maxSlots; i++) {
       var unlocked = i < slots.length;
       var id = unlocked ? slots[i] : null;
-      var a = id ? ABIL()[id] : null;
+      var itemId = itemIdOf(id);
+      var a = (id && !itemId) ? ABIL()[id] : null;
       var d = ui.el('div', 'bind-slot' +
         (unlocked ? '' : ' locked') + (sel.slot === i ? ' sel' : ''));
       d.appendChild(ui.el('span', 'key', String(i + 1)));
@@ -78,6 +153,18 @@ CHLOE.ui.binds = (function () {
         d.appendChild(ui.el('span', 'icon', '🔒'));
         d.appendChild(ui.el('span', 'nm', 'locked'));
         d.title = 'Locked — the ladder hands you more keys as you level';
+      } else if (itemId) {
+        /* A carried item on a key. The count is the only extra it gets: it is
+           what tells you the key is live, and a 0 here still keeps the bind —
+           finding another re-arms it. */
+        var idef = ITEMS()[itemId] || {};
+        var n = bagCount(itemId);
+        d.classList.add('item');
+        if (n <= 0) d.classList.add('out');
+        d.appendChild(ui.el('span', 'icon', idef.icon || '🎒'));
+        d.appendChild(ui.el('span', 'nm', idef.name || itemId));
+        d.appendChild(ui.el('span', 'ct', '×' + n));
+        d.title = (idef.name || itemId) + ' — ' + n + ' carried';
       } else if (a) {
         var ic = ui.el('span', 'icon', a.icon || '•');
         ic.style.color = typeColor(a.type);
@@ -123,21 +210,71 @@ CHLOE.ui.binds = (function () {
       meta.appendChild(ui.el('span', null, (a.hits || 1) + (a.hits > 1 ? ' hits' : ' hit')));
       card.appendChild(meta);
       card.addEventListener('click', function () {
-        C3().bind(charId, sel.slot, id);
+        put(charId, sel.slot, id);
         rerender(body, opts);
       });
       grid.appendChild(card);
     });
     body.appendChild(grid);
 
+    renderPockets(body, opts, charId, slots);
+
     var clear = ui.el('button', null, 'Clear key ' + (sel.slot + 1));
     clear.addEventListener('click', function () {
-      C3().bind(charId, sel.slot, null);
+      put(charId, sel.slot, null);
       rerender(body, opts);
     });
     body.appendChild(clear);
 
     renderLadder(body, charId);
+  }
+
+  /* ------------------------------------------------------------ the pockets
+     §23. Its own group beside the abilities, and deliberately the SAME card
+     shape: a consumable binds by exactly the same gesture (pick a key, tap a
+     card) because it goes on exactly the same kind of key. What it shows
+     instead of a cost is what you are carrying — a bandage's whole question is
+     "how many", and an item you own none of is still bindable, since the bind
+     is what makes the next one you find usable without a trip back here. */
+  function renderPockets(body, opts, charId, slots) {
+    var ids = bindableItems();
+    if (!ids.length) return;
+
+    body.appendChild(ui.el('div', 'bind-head',
+      'Pockets — tap one to put it on key ' + (sel.slot + 1)));
+    body.appendChild(ui.el('div', 'menu-note',
+      'Any key takes an item instead of a move. Using one costs no magic or ' +
+      'stamina — but it locks every pocket for a moment, and you can be hit ' +
+      'while you do it.'));
+
+    var grid = ui.el('div', 'bind-grid pockets');
+    ids.forEach(function (id) {
+      var it = ITEMS()[id];
+      if (!it) return;
+      var entry = itemKey(id);
+      var n = bagCount(id);
+      var boundAt = slots.indexOf(entry);
+      var card = ui.el('div', 'bind-card item' +
+        (boundAt === sel.slot ? ' on' : '') + (n <= 0 ? ' out' : ''));
+      var head = ui.el('div', 'bind-card-head');
+      head.appendChild(ui.el('span', 'icon', it.icon || '🎒'));
+      head.appendChild(ui.el('span', 'nm', it.name || id));
+      if (boundAt >= 0) head.appendChild(ui.el('span', 'at', 'key ' + (boundAt + 1)));
+      card.appendChild(head);
+      card.appendChild(ui.el('div', 'ds', it.desc || ''));
+      var meta = ui.el('div', 'bind-meta');
+      meta.appendChild(ui.el('span', 'ct', 'carried ×' + n));
+      var eff = it.effect || {};
+      if (eff.hp > 0) meta.appendChild(ui.el('span', null, '+' + eff.hp + ' life'));
+      if (eff.mp > 0) meta.appendChild(ui.el('span', null, '+' + eff.mp + ' magic'));
+      card.appendChild(meta);
+      card.addEventListener('click', function () {
+        put(charId, sel.slot, entry);
+        rerender(body, opts);
+      });
+      grid.appendChild(card);
+    });
+    body.appendChild(grid);
   }
 
   /* ------------------------------------------------------------- the ladder

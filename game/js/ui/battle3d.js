@@ -4,7 +4,10 @@
    cooldown sweeps, evade readiness, cast bar and floating damage.
    Rules live in engine/combat3.js; the 3D layer answers hit tests. Ends funnel
    through CHLOE.ui.scene.onBattleEnd(result) exactly like the 2D battle screen,
-   so ui/room3d.js's wrapper handles the roguelike outcomes (§15). */
+   so ui/room3d.js's wrapper handles the roguelike outcomes (§15).
+   §23 adds pockets: a hotbar key may hold a consumable instead of an ability,
+   and the asteroid's impact stun floats its own label over the knights it
+   catches. Both read the engine defensively — see slotView() and floatStun(). */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -27,6 +30,99 @@ CHLOE.ui.battle3d = (function () {
   function typeColor(t) {
     var c = (CHLOE.data.types && CHLOE.data.types.colors) || {};
     return c[t] || '#9a939c';
+  }
+  function nowMs() { return window.performance ? performance.now() : Date.now(); }
+
+  /* ---------------------------------------------- §23 pockets: reading a slot
+     A hotbar key may now carry a consumable. The engine publishes a resolved
+     slot list for it, but this screen has to keep working against an engine
+     that has not grown that surface yet — so nothing here asks "is this the
+     new build", it asks "did anyone tell me this slot is an item", and when
+     nobody did it falls through to the ability rendering that has always run.
+
+     Every spelling we accept, and why each one exists:
+       s.kind === 'item'   the resolved slot list, once it lands
+       s.itemId            the same list, if it separates id from kind
+       s.id = 'item:<id>'  §23's bind encoding leaking through unparsed
+       binds[i]            the bind string read straight out of party state,
+                           for a snapshot that only reports {key, id:null}
+     Counts, names and icons work the same way: take what the slot says, and
+     otherwise ask the bag and data/items.js directly. */
+  function ITEMS() { return CHLOE.data.items || {}; }
+  function itemDef(id) { return ITEMS()[id] || null; }
+  function bagCount(id) {
+    var inv = CHLOE.engine.inventory;
+    return (inv && typeof inv.count === 'function') ? (inv.count(id) || 0) : 0;
+  }
+  function stripItem(v) {
+    return (typeof v === 'string' && v.indexOf('item:') === 0) ? v.slice(5) : null;
+  }
+  function boundRaw(i) {
+    var s = (C3 && C3.get) ? C3.get() : null;
+    var binds = (party && party.state && party.state.binds) || null;
+    var list = (s && s.charId && binds) ? binds[s.charId] : null;
+    return (list && typeof list[i] === 'string') ? list[i] : null;
+  }
+  function itemIdOf(s, i) {
+    if (!s) return null;
+    /* When the slot says it is an item, `id` is the ITEM id — the 'item:'
+       encoding stops at the engine boundary — so take it as-is. Falling
+       through to stripItem here (an early version did) quietly re-classified
+       every pocket as an ability, which renders the icon but prices it like a
+       spell: no count, and permanently "broke". */
+    if (s.kind === 'item') return s.itemId || stripItem(s.id) || s.id || null;
+    if (typeof s.itemId === 'string' && s.itemId) return s.itemId;
+    return stripItem(s.id) || stripItem(boundRaw(i));
+  }
+
+  /* The shared consumable cooldown, mirrored locally. The engine owns it, but
+     if it never publishes one per slot the pockets would sit there looking
+     armed through the whole lockout — so a successful press starts a shadow
+     timer and the engine's own number wins the moment there is one. */
+  var itemCd = { until: 0, span: 0 };
+  function itemCooldownMs() {
+    var g = CHLOE.data.config || {}, a = CHLOE.data.abilityConfig || {};
+    return g.itemCooldownMs || a.itemCooldownMs || 2500;
+  }
+  function shadowCd() {
+    var left = (itemCd.until - nowMs()) / 1000;
+    if (left <= 0) return { pct: 0, left: 0 };
+    return { pct: Math.max(0, Math.min(1, left / Math.max(0.001, itemCd.span / 1000))), left: left };
+  }
+
+  /* One uniform view of a slot for both build and refresh. Ability slots pass
+     through untouched (`raw` is the snapshot entry the old code already knew
+     how to read); item slots arrive resolved. */
+  function slotView(s, i) {
+    var v = { key: (s && s.key) || (i + 1), kind: 'ability', id: s ? s.id : null, raw: s };
+    var id = itemIdOf(s, i);
+    if (!id) return v;
+    var def = itemDef(id) || {};
+    var n = (s && typeof s.count === 'number') ? s.count : bagCount(id);
+    var cd = shadowCd();
+    v.kind = 'item';
+    v.id = id;
+    v.name = (s && s.name) || def.name || id;
+    v.icon = (s && s.icon) || def.icon || '🎒';
+    v.desc = def.desc || '';
+    v.count = n;
+    v.cdPct = (s && s.cdPct > 0) ? s.cdPct : cd.pct;
+    v.cdLeft = (s && s.cdLeft > 0) ? s.cdLeft : cd.left;
+    /* Dim on either half of the rule: nothing left to drink, or the shared
+       lockout is still running. An engine that says `ready:false` for a reason
+       of its own (mid-use lock) is believed; one that says nothing is not
+       assumed to mean no. */
+    v.ready = n > 0 && v.cdPct <= 0 && (!s || s.ready !== false);
+    v.reason = (s && s.reason) || (n <= 0 ? 'None left.' : (v.cdPct > 0 ? 'Still fumbling.' : ''));
+    return v;
+  }
+  function slotViews(snap) {
+    return (snap && snap.slots ? snap.slots : []).map(slotView);
+  }
+  /* What the hotbar was BUILT for. A pocket key appearing (or an item bind
+     changing) has to rebuild the DOM; a count ticking down must not. */
+  function hotbarSig(views) {
+    return views.map(function (v) { return v.kind + ':' + (v.id || '-'); }).join('|');
   }
 
   /* ---------- screen ---------- */
@@ -92,7 +188,22 @@ CHLOE.ui.battle3d = (function () {
     r.appendChild(els.log);
 
     r.appendChild(ui.el('div', 'b3d-controls',
-      'WASD move · mouse look · Shift sprint · Ctrl/C crouch · SPACE evade · 1-9 abilities'));
+      'WASD move · mouse look · Shift sprint · Ctrl/C crouch · SPACE evade · 1-9 abilities & pockets'));
+
+    /* The canvas is sized ONCE, in begin(). Drag the window while the fight is
+       running and the CSS box follows but the drawing buffer does not, so the
+       church stretches and the crosshair stops sitting where the hit test
+       thinks it does. ui/room3d.js has always had this listener; the arena
+       never did. Bound here rather than in begin() because build() runs once
+       per page — begin() runs once per fight, and nine rounds would stack nine
+       listeners on the same window. Guarded on `built` for the same reason
+       every other a3d call here is: a resize can arrive before the first
+       fight, or after a stop(). */
+    window.addEventListener('resize', function () {
+      if (!built || !a3d || typeof a3d.resize !== 'function') return;
+      if (ui.current() !== 'battle3d') return;
+      try { a3d.resize(); } catch (e) {}
+    });
 
     built = true;
   }
@@ -117,12 +228,18 @@ CHLOE.ui.battle3d = (function () {
   }
 
   /* ---------- hotbar ---------- */
+  var builtSig = null;
+
   function buildHotbar(snap) {
     ui.clear(els.hotbar);
     slotEls = [];
-    snap.slots.forEach(function (s, i) {
+    var views = slotViews(snap);
+    builtSig = hotbarSig(views);
+    views.forEach(function (v, i) {
+      if (v.kind === 'item') { els.hotbar.appendChild(buildItemSlot(v, i)); return; }
+      var s = v.raw || {};
       var d = ui.el('div', 'b3d-slot' + (s.id ? '' : ' empty'));
-      d.appendChild(ui.el('span', 'key', String(s.key)));
+      d.appendChild(ui.el('span', 'key', String(v.key)));
       if (s.id) {
         var ic = ui.el('span', 'icon', s.icon || '•');
         ic.style.color = typeColor(s.type);
@@ -149,10 +266,58 @@ CHLOE.ui.battle3d = (function () {
     });
   }
 
+  /* §23: a pocket key. The item's icon sits where the ability icon sits and
+     its REMAINING COUNT takes the corner the cost chip owns on an ability —
+     a consumable's only question is how many are left, and the two labels
+     must never fight for the same strip. The slot keeps the cooldown sweep
+     because the shared lockout is exactly the thing that stops you chugging
+     three bandages in a second, and it has to be visible while it runs. */
+  function buildItemSlot(v, i) {
+    var d = ui.el('div', 'b3d-slot item');
+    d.appendChild(ui.el('span', 'key', String(v.key)));
+    d.appendChild(ui.el('span', 'icon', v.icon));
+    d.appendChild(ui.el('span', 'nm', v.name));
+    var cnt = ui.el('span', 'cost count', '');
+    d.appendChild(cnt);
+    var sweep = ui.el('div', 'sweep');
+    d.appendChild(sweep);
+    var cd = ui.el('span', 'cd', '');
+    d.appendChild(cd);
+    d._count = cnt; d._sweep = sweep; d._cd = cd; d._item = v.id;
+    d.addEventListener('click', function () { fire(i); });
+    slotEls.push(d);
+    paintItemSlot(d, v);
+    return d;
+  }
+
+  /* Called every frame, so the count is live: it drops the moment one is
+     drunk and climbs again the moment one is picked up, without rebuilding
+     the bar. An emptied slot stays BOUND — icon, name and key all remain, it
+     just reads as spent — because the bind is a decision the player made and
+     finding another bandage must re-arm it, not ask them to bind it again. */
+  function paintItemSlot(d, v) {
+    if (d._count) d._count.textContent = '×' + v.count;
+    if (d._sweep) d._sweep.style.height = Math.round(v.cdPct * 100) + '%';
+    if (d._cd) d._cd.textContent = v.cdLeft > 0.05 ? v.cdLeft.toFixed(1) : '';
+    d.classList.toggle('ready', !!v.ready);
+    d.classList.toggle('cooling', v.cdPct > 0);
+    d.classList.toggle('out', v.count <= 0);
+    d.classList.toggle('dim', !v.ready);
+    d.title = v.name + ' — ' + v.count + ' carried' + (v.reason ? ' · ' + v.reason : '') +
+              (v.desc ? '\n' + v.desc : '');
+  }
+
   function refreshHotbar(snap) {
-    for (var i = 0; i < slotEls.length && i < snap.slots.length; i++) {
-      var s = snap.slots[i], d = slotEls[i];
-      if (!s.id) continue;
+    var views = slotViews(snap);
+    /* A key can change WHAT it holds mid-fight — pocket slots arriving on a
+       level-up, a leader swap, an item bind. Rebuild only when the shape
+       actually changed, never for a count tick. */
+    if (hotbarSig(views) !== builtSig) { buildHotbar(snap); return; }
+    for (var i = 0; i < slotEls.length && i < views.length; i++) {
+      var v = views[i], d = slotEls[i];
+      if (v.kind === 'item') { paintItemSlot(d, v); continue; }
+      var s = v.raw;
+      if (!s || !s.id) continue;
       d.classList.toggle('ready', !!s.ready);
       d.classList.toggle('cooling', s.cdPct > 0);
       d.classList.toggle('broke', !s.affordable && s.cdPct <= 0);
@@ -242,6 +407,93 @@ CHLOE.ui.battle3d = (function () {
     later(function () { if (s.parentNode) s.parentNode.removeChild(s); }, 1100);
   }
 
+  /* ------------------------------------------------- §23 the "STUNNED" float
+     The rock does not just hurt: everyone in the crater drops what they were
+     winding up and cannot act for `stun.ms`. That has to read as its OWN
+     thing. §22's stagger is a punish window you EARNED with one heavy hit and
+     it prints amber "STAGGERED"; the stun is a crowd-control effect you BOUGHT
+     with a key, it lands on several knights at once, and it is cold white-blue
+     and heavier. Same fight, two different rules — if the two labels looked
+     alike the player would never learn which one the rock is for.
+
+     Where it goes: over the knight, not in the centre where the damage splash
+     already lives. arena3d publishes no projection helper and no per-knight
+     world position on its public surface, so this anchors on what IS public —
+     the crater (`asteroidPoint`), which by definition is within splashRadius
+     of every knight it stunned — and fans a squad around it so N labels read
+     as N knights. If the engine ever grows a real projection or a per-knight
+     point, they win: this is the floor, not the design. */
+  var FOV_Y = 72;   // must match arena3d's PerspectiveCamera(72, ...)
+
+  /* World -> percentage of the canvas. Built the same way arena3d builds the
+     camera: forward is (-sin yaw, -cos yaw), rotation order YXZ. Percentages
+     rather than pixels so a resize mid-float does not strand the label. */
+  function project(x, y, z) {
+    var d = a3d.debug ? a3d.debug() : null;
+    if (!d || !els.canvas || typeof d.x !== 'number' || typeof d.yaw !== 'number') return null;
+    var vx = x - d.x, vy = y - (typeof d.eye === 'number' ? d.eye : 1.6), vz = z - d.z;
+    var cy = Math.cos(d.yaw), sy = Math.sin(d.yaw);
+    var ux = vx * cy - vz * sy;
+    var uz = vx * sy + vz * cy;
+    var p = d.pitch || 0, cp = Math.cos(p), sp = Math.sin(p);
+    var wy = vy * cp + uz * sp;
+    var depth = vy * sp - uz * cp;          // camera looks down -Z
+    if (!(depth > 0.4)) return null;        // behind you, or on the lens
+    var W = els.canvas.clientWidth || 1, H = els.canvas.clientHeight || 1;
+    var f = (H / 2) / Math.tan((FOV_Y * Math.PI / 180) / 2);
+    return {
+      x: 100 * (W / 2 + f * (ux / depth)) / W,
+      y: 100 * (H / 2 - f * (wy / depth)) / H
+    };
+  }
+
+  function knightAnchor(index, ordinal) {
+    var pt = null;
+    if (typeof a3d.knightPoint === 'function') pt = a3d.knightPoint(index);
+    /* debug() publishes the LEADER's position and only his, so it is exact for
+       index 0 — which is the whole fight for the first rounds, and the rounds
+       where you first meet the rock. */
+    if (!pt && index === 0 && a3d.debug) {
+      var dbg = a3d.debug();
+      if (dbg && dbg.knightPos) pt = { x: dbg.knightPos[0], z: dbg.knightPos[1] };
+    }
+    if (!pt && typeof a3d.asteroidPoint === 'function') {
+      var c = a3d.asteroidPoint();
+      if (c) {
+        var ang = ordinal * 2.4;            // ~137°, so the fan never doubles up
+        var rad = ordinal ? 1.5 : 0;
+        pt = { x: c.x + Math.cos(ang) * rad, z: c.z + Math.sin(ang) * rad };
+      }
+    }
+    var s = pt ? project(pt.x, (pt.y != null ? pt.y : 1.85), pt.z) : null;
+    /* Nothing to project — the crater is behind you, or the 3D layer is the
+       no-WebGL stub. Fan them across the upper band instead: the label still
+       has to appear, because "he cannot swing for 1.5s" is the whole reason
+       you spent the key. */
+    if (!s) s = { x: 50 + ((ordinal % 3) - 1) * 16, y: 26 + Math.floor(ordinal / 3) * 7 };
+    return {
+      x: Math.max(6, Math.min(94, s.x)),
+      y: Math.max(8, Math.min(80, s.y))
+    };
+  }
+
+  function floatStun(index, ordinal) {
+    var p = knightAnchor(index, ordinal);
+    var e = ui.el('div', 'b3d-float stunned', 'STUNNED');
+    e.style.left = p.x.toFixed(2) + '%';
+    e.style.top = p.y.toFixed(2) + '%';
+    root().appendChild(e);
+    later(function () { if (e.parentNode) e.parentNode.removeChild(e); }, 1400);
+  }
+
+  /* How long this ability stuns, in seconds. Read off the ability data rather
+     than the id, so the next thing that stuns needs no code here. */
+  function stunSeconds(abilityId) {
+    var ab = (CHLOE.data.abilities || {})[abilityId];
+    var ms = ab && ab.stun && ab.stun.ms;
+    return ms > 0 ? ms / 1000 : 0;
+  }
+
   function flashHurt() {
     els.hurt.classList.remove('on');
     void els.hurt.offsetWidth;
@@ -251,9 +503,20 @@ CHLOE.ui.battle3d = (function () {
   /* ---------- actions ---------- */
   function fire(slotIndex) {
     if (!active || C3.isOver()) return;
+    var snapNow = C3.snapshot();
+    var view = snapNow ? slotView(snapNow.slots[slotIndex], slotIndex) : null;
     var r = C3.press(slotIndex);
     if (!r.ok) { log(r.reason || 'Not ready.'); return; }
+    /* §23: a pocket key does not cast. An item press comes back with the same
+       {ok, reason} shape but no `ability`, and reaching for a.hitAtMs on it
+       would throw mid-fight — so the branch is decided by what the RESULT
+       carries first and what we thought was bound only second. */
+    if (r.kind === 'item' || r.item || r.itemId || (!r.ability && view && view.kind === 'item')) {
+      itemUsed(r, view);
+      return;
+    }
     var a = r.ability;
+    if (!a) { log('Nothing happens.'); return; }   // unknown press shape: no crash, no lie
     var total = (a.hitAtMs && a.hitAtMs.length) ? a.hitAtMs[a.hitAtMs.length - 1] : a.castMs;
     if (a.cast === 'sign') {
       // §18: raise the hand and trace the sigil; the funnel drops on the
@@ -263,6 +526,29 @@ CHLOE.ui.battle3d = (function () {
       a3d.playAbility(a.id, a.anim, a.animSpeed, total + (a.recoverMs || 0));
     }
     log(a.name);
+  }
+
+  /* One consumable went down. The bag is the engine's to decrement — this only
+     reports it and starts the local shadow of the shared lockout, so the other
+     pockets grey out on the same frame even if the engine publishes nothing
+     per-slot. No cast, no animation: the cost of a bandage is that you are
+     standing still and hittable while you use it. */
+  function itemUsed(r, view) {
+    var id = r.itemId || (r.item && r.item.id) || (view && view.id);
+    var def = itemDef(id) || (r.item || {});
+    var name = def.name || (view && view.name) || 'Item';
+    var span = (typeof r.cooldownMs === 'number' && r.cooldownMs > 0) ? r.cooldownMs : itemCooldownMs();
+    itemCd.span = span;
+    itemCd.until = nowMs() + span;
+    /* The engine names the magic it gave back `mana`; data/items.js spells the
+       same pool `mp` in its effect block. Read both — the number in the log is
+       the only proof the drink did anything. */
+    var mag = (r.mana > 0) ? r.mana : (r.mp > 0 ? r.mp : 0);
+    var gain = [];
+    if (r.hp > 0) gain.push('+' + Math.round(r.hp) + ' life');
+    if (mag > 0) gain.push('+' + Math.round(mag) + ' magic');
+    log(name + (gain.length ? ' — ' + gain.join(', ') : ' used') + '.');
+    refresh();
   }
 
   function doEvade() {
@@ -301,6 +587,17 @@ CHLOE.ui.battle3d = (function () {
   function applyHits(abilityId, targets, tag) {
     if (!targets || !targets.length) { splash('miss', 'miss'); return; }
     var shown = 0;
+    /* §23: what the rock does after the damage. combat3.hitEnemy owns this —
+       it reads the ability's own `stun` block and has already called
+       arena3d.stun — and it says so in `res.stunned`. So the label follows the
+       ENGINE's answer rather than guessing from the data, and only falls back
+       to applying the stun here when the result is silent about it (an engine
+       that predates §23). arena3d.stun refreshes rather than stacks by
+       contract, so neither path can double up. A dead knight is never stunned;
+       he is dead, and the death animation owns that body. */
+    var stunSecs = stunSeconds(abilityId);
+    var canStun = stunSecs > 0 && typeof a3d.stun === 'function';
+    var stunned = 0, stunShown = stunSecs;
     targets.forEach(function (ti) {
       /* §22: a reeling knight takes staggerTakeMult more, and this is the only
          place that can price it. The 3D layer knows he is reeling but not what
@@ -318,9 +615,24 @@ CHLOE.ui.battle3d = (function () {
                (targets.length > 1 ? ' x' + targets.length : ''),
                res.mult >= 2 ? 'super' : 'dmg');
       }
+      var didStun = (res.stunned === true);
+      if (res.stunned === undefined && canStun && !res.killed) {
+        didStun = a3d.stun(ti, stunSecs) !== false;
+      }
+      if (didStun) {
+        if (res.stunMs > 0) stunShown = res.stunMs / 1000;
+        floatStun(ti, stunned++);
+      }
       if (res.killed) log('A Hollow Knight falls. ' + C3.aliveCount() + ' left.');
     });
     if (tag && targets.length > 1) log(tag + ' — ' + targets.length + ' caught in it.');
+    /* The stun line owns the log last, on purpose: it is the only one that
+       tells you how long the opening lasts, and it is worded apart from §22's
+       stagger for the same reason the label is coloured apart. */
+    if (stunned) {
+      log(stunned + (stunned === 1 ? ' knight is STUNNED' : ' knights are STUNNED') +
+          ' — no swing, no step for ' + stunShown.toFixed(1) + 's.');
+    }
   }
 
   function scheduleSwing(now) {
@@ -706,6 +1018,32 @@ CHLOE.ui.battle3d = (function () {
         ? els.prompt.textContent : '';
     },
     _hint: evadeHint,
+    /* The damage+stun resolve for one hit window. Exported for the same reason
+       _finish is: everything that leads here runs off rAF, which is frozen in
+       any tab that is not compositing, so without it "the crater stuns every
+       knight in it and floats one label each" cannot be checked headlessly. */
+    _hits: applyHits,
+    /* §23: what the hotbar believes it is showing, so "the pocket key shows a
+       count and dims when it runs out" is a measurement. Mirrors the DOM, not
+       the engine: it reports what was RENDERED. */
+    _slots: function () {
+      var snap = C3 && C3.snapshot ? C3.snapshot() : null;
+      return slotViews(snap).map(function (v, i) {
+        var d = slotEls[i];
+        return {
+          key: v.key, kind: v.kind, id: v.id, count: v.count, ready: v.ready,
+          badge: (d && d._count) ? d._count.textContent : null,
+          dim: !!(d && d.classList.contains('dim')),
+          out: !!(d && d.classList.contains('out'))
+        };
+      });
+    },
+    /* How many "STUNNED" labels are on screen right now — distinct element and
+       distinct class from anything §22 puts up. */
+    _stunFloats: function () {
+      if (!ui || !built) return 0;
+      return root().querySelectorAll('.b3d-float.stunned').length;
+    },
     /* The resolve path only runs off rAF, which is frozen whenever the tab
        is not compositing — so without this the victory/defeat card and the
        mode switch that goes with it cannot be tested headlessly at all. */

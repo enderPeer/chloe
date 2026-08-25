@@ -22,6 +22,10 @@ CHLOE.engine.party = (function(){
     shards: 0,
     flags: {},
     loadouts: {},  // charId -> { phaseId: [<=5 moveIds] }  (Combat v2)
+    binds: {},     // charId -> [entry|null] per number key  (Combat v3 §17;
+                   //  an entry is an ability id or 'item:<id>' — §23 pockets)
+    autoBound: {}, // charId -> entries already offered a key once (§21/§23)
+    pocketAt: {},  // charId -> {'item:<id>': slot} auto-bind lent it (§23)
     skillPoints: {}, // charId -> unspent skill points        (Progression v3)
     tree: {},        // charId -> [owned nodeIds]             (Progression v3)
     runStats: { kills: 0, round: 1, trophies: [] } // this run only — shown on the death panel (§15)
@@ -78,7 +82,16 @@ CHLOE.engine.party = (function(){
     state.skillPoints = {};
     state.tree = {};
     state.runStats = { kills: 0, round: 1, trophies: [] };
-    state.autoBound = {};   // §21: which abilities have been auto-keyed
+    /* Both halves of the hotbar are run-scoped (§15), and they must be cleared
+       TOGETHER. Clearing only `autoBound` was survivable while a slot could
+       only hold an ability — a level-1 character knows nothing but punch, so
+       last run's binds were dropped as unknown on the next read. §23 item
+       binds are not: 'item:bandage' validates against the item table, which
+       has no idea a new run started, so a stale pocket layout would follow you
+       into the next run and the auto-bind would refuse to redo it. */
+    state.binds = {};
+    state.autoBound = {};   // §21/§23: which entries have been auto-keyed once
+    state.pocketAt = {};    // §23: where auto-bind lent a key to a consumable
     // §11: new game starts solo Chloe; Ash joins once the Room is cleared.
     var m = makeMember('chloe');
     if (m) { state.members.push(m); ensureLoadout(m); ensureProgress(m); }

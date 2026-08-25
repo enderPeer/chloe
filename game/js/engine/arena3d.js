@@ -58,6 +58,11 @@ CHLOE.engine = CHLOE.engine || {};
        that comes back undefined multiplies damage into NaN. */
     A.staggerMult = function () { return 1; };
     A.isStaggered = function () { return false; };
+    /* §23 asteroid impact stun. combat3 calls this from the damage path, so
+       it must exist before init and on a machine with no WebGL at all — an
+       unguarded call here is a fight that throws instead of degrading. */
+    A.stun = function () { return false; };
+    A.isStunned = function () { return false; };
     A.taunt = noop;
   }
 
@@ -2155,6 +2160,7 @@ CHLOE.engine = CHLOE.engine || {};
       b.deathT = 0;
       b.state = 'death';
       b.staggerT = 0;
+      b.stunT = 0;              // §23: dying outranks being stunned
       k.staggerMeter = 0;
       clearAttack(k);
       k.anim.state = 'death';
@@ -2167,7 +2173,11 @@ CHLOE.engine = CHLOE.engine || {};
       k.staggerMeter += dmg;
       if (dmg >= t.staggerDamage || k.staggerMeter >= t.staggerBuildup) {
         k.staggerMeter = 0;
-        b.staggerT = t.staggerMs / 1000;
+        /* max, not assignment: §23 stuns run off the same timer and are
+           LONGER than his own staggerMs, so a plain write meant the asteroid's
+           own damage-stagger cut its 1.5s stun down to 1.2s the instant it
+           landed. A stagger may extend a reel, never shorten one. */
+        b.staggerT = Math.max(b.staggerT, t.staggerMs / 1000);
         clearAttack(k);        // a reeling knight drops the swing he was winding
       }
     }
@@ -2195,6 +2205,49 @@ CHLOE.engine = CHLOE.engine || {};
   A.isStaggered = function (index) {
     var k = knights[index || 0];
     return !!(k && k.brain && k.brain.staggerT > 0);
+  };
+
+  /* §23: the asteroid's impact stun. This is NOT a new status — it drives the
+     §22 `stagger` state, so the reeling pose, "cannot attack, cannot turn" and
+     the staggerTakeMult damage bonus are the ones he already has, and the HUD
+     gets a punish window it already knows how to read.
+
+     Deliberately separate from `flinch`, which is where a stagger is EARNED
+     (one heavy hit, or a full buildup meter). This one is granted outright by
+     an ability, so it must leave `staggerMeter` completely alone: banking the
+     stun into the meter would hand the very next chip hit a free second
+     stagger, and quietly break "chip damage never accumulates into a stun".
+
+     REFRESH, never stack. Two rocks landing a beat apart would otherwise add
+     up to three seconds of a knight standing still, which stops being a punish
+     window and becomes a delete button. Taking the max also means a stun can
+     never SHORTEN a longer reel already in progress.
+
+     No-op on a dead or absent knight — index 5 of a squad of two is a normal
+     call while the crater is being resolved, not a bug. */
+  A.stun = function (index, seconds) {
+    var k = knights[index == null ? 0 : index];
+    if (!k || !k.alive || !k.group) return false;
+    var s = Math.max(0, +seconds || 0);
+    if (!s) return false;
+    var b = brainOf(k);
+    b.staggerT = Math.max(b.staggerT, s);
+    /* The stun-granted portion, tracked alongside so the HUD can float
+       "STUNNED" where a damage stagger reads "STAGGERED!" — same clock, two
+       labels. updateKnight bleeds both together. */
+    b.stunT = Math.max(b.stunT || 0, s);
+    /* He drops the swing he was winding, mid-arc. Note this does NOT call the
+       pending telegraph callback: it matches the flinch-stagger path exactly,
+       where ui/battle3d.js retires its own prompt. Deviating here would double
+       up the swing scheduler. */
+    clearAttack(k);
+    return true;
+  };
+  /* Stunned is a strict subset of staggered — check isStaggered for "is he
+     open?", this for "was it the rock?". */
+  A.isStunned = function (index) {
+    var k = knights[index == null ? 0 : index];
+    return !!(k && k.brain && (k.brain.stunT || 0) > 0);
   };
 
   /* §22: roll a taunt. Called on a kill from ui/battle3d.js, and internally
@@ -2638,7 +2691,9 @@ CHLOE.engine = CHLOE.engine || {};
          instead of converging on one point. */
       arcSign: (i % 2) ? 1 : -1, arcT: 0,
       strafeSign: (Math.random() < 0.5) ? 1 : -1,
-      atkCd: 0, repCd: 0, staggerT: 0, hitFlash: 0, deathT: 0,
+      /* stunT: the §23 slice of staggerT that came from an ability rather than
+         from damage. Never longer than staggerT — it only labels it. */
+      atkCd: 0, repCd: 0, staggerT: 0, stunT: 0, hitFlash: 0, deathT: 0,
       repFrom: 0, repStuck: false, comboDone: false, wantsAttack: false
     };
     k.staggerMeter = 0;
@@ -2897,6 +2952,8 @@ CHLOE.engine = CHLOE.engine || {};
     var swingLive = (atk.mode === 'telegraph' || atk.mode === 'strike');
     if (b.staggerT > 0) {
       b.staggerT = Math.max(0, b.staggerT - dt);
+      // §23: the stun label bleeds on the same clock it was granted against
+      if (b.stunT > 0) b.stunT = Math.max(0, b.stunT - dt);
       setState(k, b, 'stagger');
     } else if (swingLive) {
       setState(k, b, 'attack');
@@ -2949,7 +3006,12 @@ CHLOE.engine = CHLOE.engine || {};
       st.state = 'dash';
     } else if (b.state === 'stagger') {
       // reeling back off the blow, decaying to a stop as he gets his feet
-      var reel = t.staggerMs > 0 ? (b.staggerT / (t.staggerMs / 1000)) : 0;
+      /* Clamped at 1: §23's stun sets staggerT from the ABILITY (1.5s) and can
+         legitimately exceed his own staggerMs (1.2s), which un-clamped would
+         make him reel BACKWARDS faster than his own backpedal for the first
+         third of a second. The pose path (poseKnight) already clamps; this one
+         moves his feet, so it has to as well. */
+      var reel = t.staggerMs > 0 ? Math.min(1, b.staggerT / (t.staggerMs / 1000)) : 0;
       mvx = -ux * t.backpedalSpeed * reel; mvz = -uz * t.backpedalSpeed * reel;
       st.state = 'stagger';
     } else if (b.state === 'coil') {
@@ -3285,7 +3347,8 @@ CHLOE.engine = CHLOE.engine || {};
           alive: k.alive,
           t: +b.t.toFixed(2), hold: +b.hold.toFixed(2), entered: b.entered,
           dashCd: +k.anim.dashCd.toFixed(2), atkCd: +b.atkCd.toFixed(2),
-          staggerT: +b.staggerT.toFixed(2), hitFlash: +b.hitFlash.toFixed(2),
+          staggerT: +b.staggerT.toFixed(2), stunT: +(b.stunT || 0).toFixed(2),
+          hitFlash: +b.hitFlash.toFixed(2),
           arcSign: b.arcSign, strafeSign: b.strafeSign,
           wantsAttack: !!b.wantsAttack
         };
@@ -3298,6 +3361,10 @@ CHLOE.engine = CHLOE.engine || {};
                  needs: b ? b.tune.staggerBuildup : null,
                  oneHit: b ? b.tune.staggerDamage : null,
                  staggered: !!(b && b.staggerT > 0),
+                 /* §23: why he is reeling. `stunned` means an ability put him
+                    there (the rock), so a test can tell an earned stagger from
+                    a granted one without timing the two apart. */
+                 stunned: !!(b && (b.stunT || 0) > 0),
                  takeMult: A.staggerMult(knights.indexOf(k)) };
       }),
       /* §22: the measured open floor. null means the navgrid never loaded and

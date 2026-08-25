@@ -7,7 +7,7 @@
    Frame contract:
      start(enemyId)            -> state
      tick(dt)                  -> events[]   (drives regen, casts, cooldowns)
-     press(slotIndex)          -> {ok, reason?, ability?}   number keys 1-9
+     press(slotIndex)          -> {ok, reason?, ability?|item?}  number keys 1-9
      evade()                   -> {ok, reason?, dirLocked?}
      spendSprint(dt)           -> bool       (false = out of stamina)
      hitEnemy(ability, mult)   -> {dmg, killed}   called by the 3D hit test
@@ -29,6 +29,36 @@ CHLOE.engine.combat3 = (function () {
   function types() { return CHLOE.data.types; }
   function ABIL() { return CHLOE.data.abilities || {}; }
   function CFG() { return CHLOE.data.abilityConfig || {}; }
+  function GCFG() { return CHLOE.data.config || {}; }
+  function ITEMS() { return CHLOE.data.items || {}; }
+
+  /* ---------- pockets: consumables on the hotbar (§23) ---------- */
+
+  /* A slot holds either a bare ability id or the string 'item:<itemId>'. One
+     flat array of strings keeps party.state.binds a dumb, printable thing —
+     and there is no save to migrate (§15), so the encoding may stay this
+     simple. Everything that reads a slot goes through here rather than
+     sniffing for a colon in five places. */
+  var ITEM_PREFIX = 'item:';
+  function itemIdOf(entry) {
+    return (typeof entry === 'string' && entry.indexOf(ITEM_PREFIX) === 0)
+      ? entry.slice(ITEM_PREFIX.length) : null;
+  }
+  function itemKey(itemId) { return ITEM_PREFIX + itemId; }
+
+  /* Whether an item may sit on a key at all. The RULE lives in data/items.js
+     (`CHLOE.data.itemRules.isCombatUsable`, mirrored onto CHLOE.data.items) so
+     that adding a bigger potion is a data edit and nothing else — never a list
+     of ids in here. The inline fallback exists only so an older data/items.js
+     degrades to "restores a pool you carry" instead of dropping every bind. */
+  function bindableItem(itemId) {
+    var def = ITEMS()[itemId];
+    if (!def) return false;
+    var rules = CHLOE.data.itemRules || ITEMS();
+    if (rules && typeof rules.isCombatUsable === 'function') return !!rules.isCombatUsable(itemId);
+    var eff = def.effect || {};
+    return (eff.hp > 0 || eff.mp > 0);
+  }
 
   /* ---------- known abilities & bound slots ---------- */
 
@@ -57,7 +87,23 @@ CHLOE.engine.combat3 = (function () {
     return out;
   }
 
-  /* How many number keys this character may use: base + tree slot nodes. */
+  /* How many number keys this character may use: base + tree slot nodes +
+     §23 POCKETS.
+
+     The pockets are keys the ladder never granted. They exist because
+     abilities and their keys arrive together (§19), so every key a character
+     owns is already spoken for and binding a bandage would cost you a move.
+     They are NOT a second, item-only hotbar: the slots are generic and the
+     player may put an ability in one, or a bandage on key 1. The extra room is
+     the whole feature.
+
+     `pocketSlots` is one named constant in data/config.js. A missing config
+     degrades to zero pockets rather than to a duplicated literal — the feature
+     quietly does not exist, which beats it silently disagreeing with data. */
+  function pocketSlots() {
+    var n = GCFG().pocketSlots;
+    return (typeof n === 'number' && n > 0) ? n : 0;
+  }
   function slotCount(charId) {
     var cfg = CFG();
     var n = cfg.baseSlots || 1;
@@ -65,12 +111,18 @@ CHLOE.engine.combat3 = (function () {
     if (sk && typeof sk.slots === 'function') n += sk.slots(charId) || 0;
     var tr = CHLOE.engine.tree;
     if (tr && typeof tr.abilitySlots === 'function') n += tr.abilitySlots(charId) || 0;
+    n += pocketSlots();
+    // the 9-key cap is untouched: pockets push you toward it, they do not lift it
     return Math.max(1, Math.min(cfg.maxSlots || 9, n));
   }
 
-  /* Bound slots live in party.state.binds[charId] = [abilityId|null, ...].
-     Invalid or no-longer-known entries are dropped; slot 0 defaults to punch
-     so a fresh run always has something on key 1. */
+  /* Bound slots live in party.state.binds[charId] = [entry|null, ...], where an
+     entry is an ability id ('punch') or a consumable ('item:bandage', §23).
+     Invalid entries are dropped: an ability the character does not know, an
+     item that does not exist, or an item whose effect is not combat-usable
+     (data/items.js owns that rule). Slot 0 still defaults to punch so a fresh
+     run always has something on key 1 — but only when it is EMPTY, so a player
+     who deliberately put a bandage there keeps it. */
   function binds(charId) {
     var p = party();
     if (!p.state.binds) p.state.binds = {};
@@ -80,12 +132,14 @@ CHLOE.engine.combat3 = (function () {
     if (!Array.isArray(cur)) cur = [];
     var out = [];
     for (var i = 0; i < n; i++) {
-      var id = cur[i];
-      out.push((id && known.indexOf(id) !== -1) ? id : null);
+      var id = cur[i], itemId = itemIdOf(id);
+      if (itemId) out.push(bindableItem(itemId) ? id : null);
+      else out.push((id && known.indexOf(id) !== -1) ? id : null);
     }
     if (!out[0] && known.length) out[0] = known[0];
     p.state.binds[charId] = out;
     autoBind(charId, known, out);
+    autoBindItems(charId, out);
     return out;
   }
 
@@ -110,14 +164,110 @@ CHLOE.engine.combat3 = (function () {
       if (seen.indexOf(id) !== -1) continue;      // already offered a key once
       seen.push(id);
       if (out.indexOf(id) !== -1) continue;       // the player already bound it
-      var slot = out.indexOf(null);
+      var slot = placeAbility(charId, out, id);
       if (slot === -1) continue;                  // no free key: leave it in the pool
-      out[slot] = id;
       placed.push({ abilityId: id, slot: slot });
     }
     p.state.autoBound[charId] = seen;
     p.state.binds[charId] = out;
     if (placed.length) lastAutoBound = { charId: charId, placed: placed };
+    return placed;
+  }
+
+  /* Where a newly granted ability goes — the first free key, EXCEPT when a
+     pocket is squatting on a lower one.
+
+     The ladder does not just hand you asteroid, it hands you "asteroid, key 3"
+     (§21), and the level screen says so in those words. Pockets exist from
+     level 1, so they get to keys 2 and 3 long before the abilities that were
+     promised them, and without this the level-3 reward silently landed on
+     key 5 while the bandage kept key 2. Abilities settle LEFT and pockets are
+     pushed right.
+
+     The item is MOVED, never dropped: the same level that grants an ability
+     grants its key, so there is always a free slot to move the bandage into.
+     If there genuinely is no free key (the 9-cap, deep in the generated
+     levels), nothing is displaced and the ability waits in the pool exactly as
+     it did before — a bar that full is one the player is already curating.
+
+     Only a pocket WE placed is moved, checked against `pocketAt`: if the
+     player has since dragged that bandage somewhere themselves, the record no
+     longer matches the slot and their choice is left alone. Same principle as
+     the `autoBound` memory — the engine offers, it never overrules. */
+  function pocketAt(charId) {
+    var p = party();
+    if (!p.state.pocketAt) p.state.pocketAt = {};
+    if (!p.state.pocketAt[charId]) p.state.pocketAt[charId] = {};
+    return p.state.pocketAt[charId];
+  }
+  function rememberPocket(charId, entry, slot) { pocketAt(charId)[entry] = slot; }
+  function lentPocketSlot(out, charId, below) {
+    var at = pocketAt(charId);
+    for (var i = 0; i < out.length && i < below; i++) {
+      if (itemIdOf(out[i]) && at[out[i]] === i) return i;
+    }
+    return -1;
+  }
+  function placeAbility(charId, out, id) {
+    var free = out.indexOf(null);
+    if (free === -1) return -1;
+    var lent = lentPocketSlot(out, charId, free);
+    if (lent !== -1) {
+      out[free] = out[lent];                 // the pocket shuffles right
+      rememberPocket(charId, out[free], free);
+      out[lent] = id;
+      return lent;
+    }
+    out[free] = id;
+    return free;
+  }
+
+  /* §23: pockets are only a feature if you find them. A run starts holding two
+     bandages and an energy drink, and a key nobody knows to press is an
+     undiscovered feature — so the consumables bind themselves into whatever
+     keys are still free once the abilities have had their pick.
+
+     ABILITIES ALWAYS WIN. This runs AFTER autoBind() and only ever writes into
+     a null slot, so a consumable can never be evicting a move — which is the
+     failure this whole design exists to avoid. When the ladder eventually
+     fills every key, the items simply stop being placed; the player decides
+     from there whether a bandage is worth a move.
+
+     Order comes from data/items.js (`combatUsableIds()` walks the table in
+     declaration order: bandage, then energy_drink), so no ids appear here.
+
+     It shares autoBind's `autoBound` memory, keyed by the full 'item:<id>'
+     string. Same reason as abilities: without that memory, clearing a bandage
+     key would be impossible, because the next call to binds() would put it
+     straight back. */
+  function autoBindItems(charId, out) {
+    var p = party();
+    var rules = CHLOE.data.itemRules || ITEMS();
+    var ids = (rules && typeof rules.combatUsableIds === 'function')
+      ? (rules.combatUsableIds() || []) : [];
+    if (!ids.length) return [];
+    if (!p.state.autoBound) p.state.autoBound = {};
+    var seen = p.state.autoBound[charId];
+    if (!Array.isArray(seen)) seen = [];
+
+    var placed = [];
+    for (var i = 0; i < ids.length; i++) {
+      var key = itemKey(ids[i]);
+      if (seen.indexOf(key) !== -1) continue;     // already offered a key once
+      seen.push(key);
+      if (out.indexOf(key) !== -1) continue;      // the player already bound it
+      var slot = out.indexOf(null);
+      if (slot === -1) continue;                  // no free key: the moves won
+      out[slot] = key;
+      rememberPocket(charId, key, slot);          // ours to shuffle, until moved
+      placed.push({ itemId: ids[i], slot: slot });
+    }
+    p.state.autoBound[charId] = seen;
+    p.state.binds[charId] = out;
+    /* Deliberately NOT reported through takeAutoBound(): that feed is the
+       victory card announcing "your new move went on key 4", and it reads
+       `abilityId`. Pockets fill at run start, not on a level-up, so there is
+       no card to put them on. */
     return placed;
   }
 
@@ -129,17 +279,32 @@ CHLOE.engine.combat3 = (function () {
     return v;
   }
 
-  function bind(charId, slot, abilityId) {
+  /* `entry` is an ability id, an 'item:<id>' string (§23), or null to clear.
+     Named `abilityId` for years and kept callable exactly as before. */
+  function bind(charId, slot, entry) {
     var list = binds(charId);
     if (slot < 0 || slot >= list.length) return { ok: false, reason: 'No such slot.' };
-    if (abilityId && knownAbilities(charId).indexOf(abilityId) === -1) {
+    var itemId = itemIdOf(entry);
+    if (itemId) {
+      if (!ITEMS()[itemId]) return { ok: false, reason: 'No such item.' };
+      // "carried" is not the test — an empty slot stays bound and re-arms when
+      // you find another. Whether it CAN be used in a fight is (data/items.js).
+      if (!bindableItem(itemId)) return { ok: false, reason: 'Not usable in a fight.' };
+    } else if (entry && knownAbilities(charId).indexOf(entry) === -1) {
       return { ok: false, reason: 'Not learned yet.' };
     }
-    // an ability lives in one slot at a time
-    if (abilityId) {
-      for (var i = 0; i < list.length; i++) if (list[i] === abilityId) list[i] = null;
+    // an ability — or an item — lives in one slot at a time
+    if (entry) {
+      for (var i = 0; i < list.length; i++) if (list[i] === entry) list[i] = null;
     }
-    list[slot] = abilityId || null;
+    /* Touching a key by hand makes the player's placement authoritative: drop
+       our "we lent this pocket that slot" record for both the entry going in
+       and whatever was sitting there, so placeAbility will never shuffle a
+       bandage the player put somewhere on purpose. */
+    var at = pocketAt(charId);
+    if (entry) delete at[entry];
+    if (list[slot]) delete at[list[slot]];
+    list[slot] = entry || null;
     party().state.binds[charId] = list;
     return { ok: true, binds: list.slice() };
   }
@@ -183,6 +348,10 @@ CHLOE.engine.combat3 = (function () {
       cast: null,            // {id, t, dur, hitsDone, recoverUntil}
       lockUntil: 0,          // cast+recover lock
       cd: {},                // abilityId -> {charges, nextAt}
+      /* §23: ONE cooldown across every consumable key. It belongs to your
+         hands, not to the item, which is why it is a single timer and why a
+         leader swap does not clear it — the bag is the party's. */
+      itemReadyAt: 0,
       evadeReadyAt: 0,
       iframeUntil: 0,
       lastSpendAt: 0,
@@ -248,7 +417,8 @@ CHLOE.engine.combat3 = (function () {
   }
   function slotAbility(i) {
     var id = liveSlots()[i];
-    return id ? ABIL()[id] : null;
+    if (!id || itemIdOf(id)) return null;    // §23: an item is not an ability
+    return ABIL()[id];
   }
 
   function readiness(id) {
@@ -274,12 +444,72 @@ CHLOE.engine.combat3 = (function () {
     return Math.max(0, Math.min(1, left / span));
   }
 
+  /* ---------- using a consumable (§23) ---------- */
+
+  /* Everything about this path is deliberately NOT the ability path: no
+     readiness check, no charges, no mana or stamina. What it costs is TIME
+     while you are standing in his reach.
+
+     The clamp is done here rather than through engine/inventory.js's use(),
+     which is the out-of-battle path: it clamps against `member.mp`, and
+     combat3 does not keep that in step during a fight — only `m.hp` is
+     mirrored (see takeHit). st.mana is the live magic pool, so an energy drink
+     routed through use() would compare against a resting-full member.mp,
+     restore nothing, and refuse itself as "wasted" while your real pool sat
+     empty. The pools that matter mid-fight live in `st`, so the clamp lives
+     here too, and inventory is asked only to count and to remove. */
+  function useItem(itemId) {
+    var def = ITEMS()[itemId];
+    if (!def) return { ok: false, reason: 'Nothing bound to that key.' };
+    var inv = CHLOE.engine.inventory;
+    var have = (inv && typeof inv.count === 'function') ? inv.count(itemId) : 0;
+    /* Checked BEFORE the cooldown, so an empty pocket reads "None left." (go
+       find one) rather than "cooling down" (wait), which would be a lie. */
+    if (have <= 0) return { ok: false, reason: 'None left.' };
+    if (st.now < st.itemReadyAt) return { ok: false, reason: 'Pockets cooling down' };
+
+    var eff = def.effect || {};
+    var hp = Math.max(0, Math.min(st.max.hp - st.hp, eff.hp || 0));
+    var mana = Math.max(0, Math.min(st.max.mana - st.mana, eff.mp || 0));
+    /* Refuse before consuming, never after. A bandage pressed at full life is
+       a fumbled key, not a decision, and eating the last one for zero healing
+       is the single most annoying thing this feature could do. "Never refund
+       on a failed press" is satisfied by never taking it in the first place. */
+    if (hp <= 0 && mana <= 0) return { ok: false, reason: 'Already full.' };
+
+    st.hp += hp;
+    st.mana += mana;
+    var m = party().get(st.charId);
+    if (m) m.hp = st.hp;          // same mirror takeHit keeps
+    inv.remove(itemId, 1);
+
+    var cfg = GCFG();
+    /* The lock is the whole price: it uses the SAME lockUntil abilities pay
+       into, so a bandage cannot be cancelled into a punch — and it does not
+       grant i-frames, so his swing lands on you while you wrap it. That is
+       the point (§23), not an oversight. */
+    st.lockUntil = st.now + (cfg.itemUseMs || 350);
+    st.itemReadyAt = st.now + (cfg.itemCooldownMs || 2500);
+    /* Regen is untouched on purpose: an item costs no mana or stamina, so it
+       must not push out `lastSpendAt` and stall the pools it did not spend. */
+    /* `kind` and `cooldownMs` are for the HUD: it has to tell an item press
+       from a cast without re-reading the bind, and it sweeps the pocket dial
+       against the same span this pressed. */
+    return { ok: true, kind: 'item', item: def, itemId: itemId,
+             hp: hp, mana: mana, count: inv.count(itemId),
+             lockMs: (cfg.itemUseMs || 350), cooldownMs: (cfg.itemCooldownMs || 2500) };
+  }
+
   /* Number key pressed. Returns {ok} and, on success, starts the cast — the
-     3D layer plays the animation and calls hitEnemy() at each hit moment. */
+     3D layer plays the animation and calls hitEnemy() at each hit moment.
+     §23: the same key may hold a consumable, which takes the useItem() path
+     and never touches ability readiness or cost. */
   function press(slotIndex) {
     if (isOver()) return { ok: false, reason: 'The fight is over.' };
     if (st.cast) return { ok: false, reason: 'Already casting.' };
     if (st.now < st.lockUntil) return { ok: false, reason: 'Recovering.' };
+    var itemId = itemIdOf(liveSlots()[slotIndex]);
+    if (itemId) return useItem(itemId);
     var a = slotAbility(slotIndex);
     if (!a) return { ok: false, reason: 'Nothing bound to that key.' };
     var r = readiness(a.id);
@@ -338,8 +568,30 @@ CHLOE.engine.combat3 = (function () {
     e.life = Math.max(0, e.life - dmg);
     var killed = e.life <= 0;
     if (killed) e.alive = false;
+
+    /* §23: an ability may STUN what it damaged — the asteroid does, and that,
+       not its damage, is what makes the rock worth one of the nine keys
+       against a squad. Read off the ability's own `stun` block, so a future
+       splash weapon inherits this by being data and no id is named here.
+
+       Why in combat3 and not at the splash call site: this is the ONLY place
+       that knows both which knight was actually damaged and by what. It is a
+       one-way, fully-guarded poke at the 3D layer (which owns the §22 stagger
+       state) — the same direction as the flinch the UI already forwards, and
+       it degrades to nothing on the no-WebGL surface. Seconds, not ms, because
+       arena3d's timers are all seconds.
+
+       Not applied to a knight the hit KILLED: he is already going down and
+       stunning a corpse would fight the death animation for the same body. */
+    var stunMs = (a.stun && a.stun.ms) || 0;
+    if (stunMs && !killed) {
+      var a3d = CHLOE.engine.arena3d;
+      if (a3d && typeof a3d.stun === 'function') a3d.stun(idx, stunMs / 1000);
+    }
     if (allDown()) victory();
-    return { dmg: dmg, killed: killed, mult: chart, index: idx, cleared: allDown() };
+    return { dmg: dmg, killed: killed, mult: chart, index: idx, cleared: allDown(),
+             // so the HUD can float "STUNNED" without re-reading the ability
+             stunned: !!(stunMs && !killed), stunMs: killed ? 0 : stunMs };
   }
 
   /* The knight's swing landed (or was evaded). */
@@ -494,16 +746,44 @@ CHLOE.engine.combat3 = (function () {
     return { fled: true };
   }
 
-  /* ---------- HUD snapshot ---------- */
-  function snapshot() {
-    if (!st) return null;
-    var slots = [];
-    var live = liveSlots();
-    for (var i = 0; i < live.length; i++) {
-      var id = live[i];
-      var a = id ? ABIL()[id] : null;
-      slots.push(a ? {
-        key: i + 1, id: id, name: a.name, icon: a.icon, type: a.type,
+  /* ---------- resolved hotbar ---------- */
+  /* ONE builder for the HUD and for tests, so what a test asserts is exactly
+     what ui/battle3d.js draws. Every slot carries `slot`, `key` and `kind`;
+     `kind` is 'ability', 'item' or null for an empty key. `id` is the ability
+     id or the ITEM id (never the raw 'item:' string — that encoding stops at
+     this boundary). Ability entries keep every field they have always had. */
+  function resolvedSlots() {
+    if (!st) return [];
+    var out = [], live = liveSlots(), i;
+    for (i = 0; i < live.length; i++) {
+      var entry = live[i], itemId = itemIdOf(entry);
+      if (itemId) {
+        var def = ITEMS()[itemId] || {};
+        var inv = CHLOE.engine.inventory;
+        var have = (inv && typeof inv.count === 'function') ? inv.count(itemId) : 0;
+        var cdLeft = Math.max(0, (st.itemReadyAt - st.now) / 1000);
+        var span = (GCFG().itemCooldownMs || 2500);
+        /* An empty pocket stays BOUND and greys out — it re-arms the moment
+           you pick another one up, so the key never moves under the player. */
+        var ready = have > 0 && st.now >= st.itemReadyAt;
+        out.push({
+          slot: i, key: i + 1, kind: 'item', id: itemId,
+          name: def.name || itemId, icon: def.icon || '•',
+          desc: def.desc || '', effect: def.effect || {},
+          count: have,
+          cdPct: Math.max(0, Math.min(1, cdLeft * 1000 / span)),
+          cdLeft: cdLeft,
+          ready: ready,
+          reason: ready ? null : (have <= 0 ? 'None left.' : 'Pockets cooling down')
+        });
+        continue;
+      }
+      var a = entry ? ABIL()[entry] : null;
+      if (!a) { out.push({ slot: i, key: i + 1, kind: null, id: null, ready: false }); continue; }
+      var r = readiness(entry);
+      out.push({
+        slot: i, key: i + 1, kind: 'ability',
+        id: entry, name: a.name, icon: a.icon, type: a.type,
         cost: a.cost || {},
         // "8 STA" / "14 MAG" / "14 MAG + 6 STA" for the HUD chip
         costText: (function (c) {
@@ -512,14 +792,22 @@ CHLOE.engine.combat3 = (function () {
           if (c.sta) b.push(c.sta + ' STA');
           return b.join(' + ') || 'free';
         })(a.cost || {}),
-        charges: st.cd[id] ? st.cd[id].charges : 0,
+        charges: st.cd[entry] ? st.cd[entry].charges : 0,
         maxCharges: a.charges || 1,
-        cdPct: cooldownPct(id),
-        cdLeft: st.cd[id] ? Math.max(0, (st.cd[id].nextAt - st.now) / 1000) : 0,
+        cdPct: cooldownPct(entry),
+        cdLeft: st.cd[entry] ? Math.max(0, (st.cd[entry].nextAt - st.now) / 1000) : 0,
         affordable: canPay(a.cost),
-        ready: readiness(id).ready
-      } : { key: i + 1, id: null });
+        ready: r.ready,
+        reason: r.ready ? null : r.reason
+      });
     }
+    return out;
+  }
+
+  /* ---------- HUD snapshot ---------- */
+  function snapshot() {
+    if (!st) return null;
+    var slots = resolvedSlots();
     var cfg = CFG().evade || {};
     return {
       hp: st.hp, mana: st.mana, sta: st.sta, max: st.max,
@@ -554,6 +842,13 @@ CHLOE.engine.combat3 = (function () {
     flee: flee, snapshot: snapshot,
     knownAbilities: knownAbilities, slotCount: slotCount, binds: binds, bind: bind,
     takeAutoBound: takeAutoBound,
+    /* §23 verification/HUD surface: the hotbar as it actually resolves, item
+       entries included. Empty outside a fight — it prices readiness against
+       live pools and cooldowns, which only exist while one is running. */
+    slots: resolvedSlots,
+    /* Predicates the bind screen needs, so it never has to know the encoding.
+       itemKey('bandage') -> 'item:bandage' is the string bind() expects. */
+    itemKey: itemKey, itemIdOf: itemIdOf, bindableItem: bindableItem,
     readiness: function (id) { return st ? readiness(id) : { ready: false }; }
   };
 })();

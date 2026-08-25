@@ -28,7 +28,9 @@ CHLOE.ui.title = (function(){
     root.appendChild(inner);
 
     var foot = ui.el('div', 'title-foot',
-      'The Velvet District after midnight · v' + ((CHLOE.data.config && CHLOE.data.config.version) || 1));
+      'The Velvet District after midnight · ' +
+      /* from data/version.js, bumped on every push by tools/hooks/pre-commit */
+      (CHLOE.data.version ? CHLOE.data.version.full() : 'v?'));
     root.appendChild(foot);
   }
 
