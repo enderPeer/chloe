@@ -7,7 +7,9 @@
    Frame contract:
      start(enemyId)            -> state
      tick(dt)                  -> events[]   (drives regen, casts, cooldowns)
-     press(slotIndex)          -> {ok, reason?, ability?|item?}  number keys 1-9
+     press(slot)               -> {ok, reason?, ability?|item?}  slot is a key
+                                  index 0-8 or 'mouseL'/'mouseR' (§27B)
+     mousePress(side)          -> {handled, result?}  the ROOM/ARENA split
      evade()                   -> {ok, reason?, dirLocked?}
      spendSprint(dt)           -> bool       (false = out of stamina)
      hitEnemy(ability, mult)   -> {dmg, killed}   called by the 3D hit test
@@ -51,13 +53,38 @@ CHLOE.engine.combat3 = (function () {
      that adding a bigger potion is a data edit and nothing else — never a list
      of ids in here. The inline fallback exists only so an older data/items.js
      degrades to "restores a pool you carry" instead of dropping every bind. */
+  function rules() { return CHLOE.data.itemRules || ITEMS(); }
   function bindableItem(itemId) {
     var def = ITEMS()[itemId];
     if (!def) return false;
-    var rules = CHLOE.data.itemRules || ITEMS();
-    if (rules && typeof rules.isCombatUsable === 'function') return !!rules.isCombatUsable(itemId);
+    var r = rules();
+    if (r && typeof r.isCombatUsable === 'function') return !!r.isCombatUsable(itemId);
+    var eff = def.effect || {};
+    return (eff.hp > 0 || eff.mp > 0 || (eff.self && eff.revivePct > 0));
+  }
+
+  /* §27C splits "bindable" in two. A PRESSABLE item answers a key press by
+     putting a number back in a pool. A PASSIVE one answers nothing: it sits
+     there armed and spends itself when the killing blow lands. Both are
+     bindable; only one is pressable, and useItem() has to refuse the other or
+     a fumbled key would burn the most expensive item in the game for nothing.
+     Same story as bindableItem: the rule is data, the fallback is the same
+     rule spelled inline for an older data/items.js. */
+  function pressableItem(itemId) {
+    var def = ITEMS()[itemId];
+    if (!def) return false;
+    var r = rules();
+    if (r && typeof r.isPressable === 'function') return !!r.isPressable(itemId);
     var eff = def.effect || {};
     return (eff.hp > 0 || eff.mp > 0);
+  }
+  function passiveItem(itemId) {
+    var def = ITEMS()[itemId];
+    if (!def) return false;
+    var r = rules();
+    if (r && typeof r.isPassiveCombat === 'function') return !!r.isPassiveCombat(itemId);
+    var eff = def.effect || {};
+    return !!(eff.self && eff.revivePct > 0);
   }
 
   /* ---------- known abilities & bound slots ---------- */
@@ -116,13 +143,138 @@ CHLOE.engine.combat3 = (function () {
     return Math.max(1, Math.min(cfg.maxSlots || 9, n));
   }
 
+  /* ---------- mouse slots (§27B) ---------- */
+
+  /* LMB and RMB are bind targets alongside keys 1-9: 9 + 2 = 11 slots, any of
+     which may hold an ability OR an item.
+
+     THEY ARE IDS, NOT INDICES. 'mouseL'/'mouseR', never 9 and 10 — see the
+     comment on config.mouseSlots for why a numeric encoding here is the kind
+     of off-by-one that fires the wrong ability instead of failing. Everything
+     below treats a slot as "a number, or one of these two strings", and a
+     number that is out of range is refused rather than reinterpreted.
+
+     They are also OUTSIDE abilityConfig.maxSlots on purpose: that cap counts
+     number keys the ladder may grant (data/skilltree.js does the arithmetic
+     against it), and slotCount() is untouched by any of this. */
+  function MOUSE_SLOTS() {
+    var m = GCFG().mouseSlots;
+    return (m && m.length) ? m : ['mouseL', 'mouseR'];
+  }
+  function isMouseSlot(slot) {
+    return typeof slot === 'string' && MOUSE_SLOTS().indexOf(slot) !== -1;
+  }
+  function mouseLabel(slot) {
+    var l = GCFG().mouseSlotLabels || {};
+    return l[slot] || (slot === 'mouseR' ? 'RMB' : 'LMB');
+  }
+  /* 'l'/'r', 'left'/'right', or a DOM MouseEvent.button (0 / 2) -> a slot id.
+     The input layer speaks all three depending on where the click came from,
+     and this is the only place that has to know that. */
+  function mouseSlotOf(side) {
+    if (isMouseSlot(side)) return side;
+    if (side === 0 || side === 'l' || side === 'left' || side === 'L') return 'mouseL';
+    if (side === 2 || side === 'r' || side === 'right' || side === 'R') return 'mouseR';
+    return null;
+  }
+  /* {mouseL, mouseR} for one character, validated the same way the number keys
+     are: an ability they no longer know, or an item the rules refuse, is
+     dropped rather than left to fire into nothing. */
+  function mouseBinds(charId) {
+    var p = party();
+    if (!p.state.mouseBinds || typeof p.state.mouseBinds !== 'object') p.state.mouseBinds = {};
+    var cur = p.state.mouseBinds[charId];
+    if (!cur || typeof cur !== 'object') cur = {};
+    var known = knownAbilities(charId), ids = MOUSE_SLOTS(), out = {};
+    for (var i = 0; i < ids.length; i++) {
+      var entry = cur[ids[i]], itemId = itemIdOf(entry);
+      if (itemId) out[ids[i]] = bindableItem(itemId) ? entry : null;
+      else out[ids[i]] = (entry && known.indexOf(entry) !== -1) ? entry : null;
+    }
+    p.state.mouseBinds[charId] = out;
+    return out;
+  }
+  /* Every slot id this character has, keys first then buttons — the order the
+     HUD and the bind screen draw them in. */
+  function slotIds(charId) {
+    var out = [], n = slotCount(charId), i;
+    for (i = 0; i < n; i++) out.push(i);
+    var m = MOUSE_SLOTS();
+    for (i = 0; i < m.length; i++) out.push(m[i]);
+    return out;
+  }
+  /* What is on one slot, whichever kind of slot it is. */
+  function entryAt(charId, slot) {
+    if (isMouseSlot(slot)) return mouseBinds(charId)[slot] || null;
+    var list = binds(charId);
+    return (typeof slot === 'number' && slot >= 0 && slot < list.length) ? list[slot] : null;
+  }
+  /* Every entry bound anywhere — used by the §27C revive scan, which does not
+     care whether your potion is on key 4 or on RMB. */
+  function allEntries(charId) {
+    return binds(charId).concat(mouseEntries(charId));
+  }
+
+  /* ---------- the player's own memory (§27A) ---------- */
+
+  /* `bindsCleared` is "the player emptied this off a key on purpose", and it is
+     DELIBERATELY a different list from `autoBound`.
+
+     That conflation was the bug. One list meaning "already offered once" had to
+     answer two different questions — "is this new?" and "did they say no?" —
+     and answered both with the same yes, so an ability that went missing for
+     any reason at all was indistinguishable from one the player had thrown
+     away, and never came back. Split in two, each list answers only its own
+     question and the self-heal below can be aggressive without ever overruling
+     a choice. */
+  function clearedOf(charId) {
+    var p = party();
+    if (!p.state.bindsCleared || typeof p.state.bindsCleared !== 'object') p.state.bindsCleared = {};
+    var list = p.state.bindsCleared[charId];
+    if (!Array.isArray(list)) list = [];
+    p.state.bindsCleared[charId] = list;
+    return list;
+  }
+  function markCleared(charId, entry) {
+    if (!entry) return;
+    var list = clearedOf(charId);
+    if (list.indexOf(entry) === -1) list.push(entry);
+  }
+  function unmarkCleared(charId, entry) {
+    if (!entry) return;
+    var list = clearedOf(charId), i = list.indexOf(entry);
+    if (i !== -1) list.splice(i, 1);
+  }
+  function autoBoundOf(charId) {
+    var p = party();
+    if (!p.state.autoBound || typeof p.state.autoBound !== 'object') p.state.autoBound = {};
+    var list = p.state.autoBound[charId];
+    if (!Array.isArray(list)) list = [];
+    p.state.autoBound[charId] = list;
+    return list;
+  }
+
   /* Bound slots live in party.state.binds[charId] = [entry|null, ...], where an
      entry is an ability id ('punch') or a consumable ('item:bandage', §23).
      Invalid entries are dropped: an ability the character does not know, an
      item that does not exist, or an item whose effect is not combat-usable
      (data/items.js owns that rule). Slot 0 still defaults to punch so a fresh
      run always has something on key 1 — but only when it is EMPTY, so a player
-     who deliberately put a bandage there keeps it. */
+     who deliberately put a bandage there keeps it.
+
+     §27A: THIS READ SELF-HEALS. Any ability the character knows that is not on
+     a key, while a key is free, gets placed — every time, not once. The old
+     code placed each ability exactly once ever and remembered that it had, so
+     any path that rebuilt the array afterwards left every earlier ability
+     marked "done" with nowhere to be. That is not a hypothetical: the ladder
+     fills the bar EXACTLY (7 abilities + 2 pockets = 9 = maxSlots at level 9,
+     and it is exact at every ability level below that too), so the cheapest
+     everyday way to hit it is the Moves screen — drag a move onto a key that
+     already holds another one and the displaced move used to be gone for the
+     rest of the run. Now it lands in whatever key was freed by the same drag.
+
+     The player's own "no" still wins: bindsCleared is checked first and is
+     never written by anything except an explicit clear. */
   function binds(charId) {
     var p = party();
     if (!p.state.binds) p.state.binds = {};
@@ -136,11 +288,40 @@ CHLOE.engine.combat3 = (function () {
       if (itemId) out.push(bindableItem(itemId) ? id : null);
       else out.push((id && known.indexOf(id) !== -1) ? id : null);
     }
-    if (!out[0] && known.length) out[0] = known[0];
+    /* Key 1 defaults to the first thing you know — unless it is already bound
+       elsewhere (putting punch on key 5 used to leave a duplicate on key 1 and
+       waste the key) or you cleared it on purpose. */
+    if (!out[0] && known.length && out.indexOf(known[0]) === -1 &&
+        clearedOf(charId).indexOf(known[0]) === -1) {
+      out[0] = known[0];
+    }
     p.state.binds[charId] = out;
-    autoBind(charId, known, out);
-    autoBindItems(charId, out);
+    /* A button counts as bound (§27B). Without this the self-heal would look
+       at a hotbar whose asteroid is on RMB, decide asteroid has no slot, and
+       helpfully put a SECOND copy on a key — one entry, two slots, which is
+       the rule bind() has always enforced. */
+    var onMouse = mouseEntries(charId);
+    autoBind(charId, known, out, onMouse);
+    autoBindItems(charId, out, onMouse);
+    /* Last line: a character with NOTHING to press cannot fight, and that is
+       worse than overriding one clear. Only reachable if the player has
+       emptied every ability off every slot by hand. */
+    if (!hasAnyAbility(out.concat(onMouse), known) && known.length) {
+      var free = out.indexOf(null);
+      if (free !== -1) out[free] = known[0];
+    }
     return out;
+  }
+  function mouseEntries(charId) {
+    var mb = mouseBinds(charId), ids = MOUSE_SLOTS(), out = [];
+    for (var i = 0; i < ids.length; i++) if (mb[ids[i]]) out.push(mb[ids[i]]);
+    return out;
+  }
+  function hasAnyAbility(list, known) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && !itemIdOf(list[i]) && known.indexOf(list[i]) !== -1) return true;
+    }
+    return false;
   }
 
   /* §21: a level that hands you a move should hand it to you READY. The
@@ -148,25 +329,36 @@ CHLOE.engine.combat3 = (function () {
      drops straight onto the new key and you can use it the moment you walk
      back into the church - no trip through the menu to arm your reward.
 
-     Each ability is auto-placed ONCE, remembered in `autoBound`. Without that
-     memory, deliberately clearing a key would be impossible: the next call to
-     binds() would helpfully put the ability straight back. Run-scoped like
-     everything else - it dies with the run. */
-  function autoBind(charId, known, out) {
+     §27A made this the SELF-HEAL rather than a one-shot: it runs on every read
+     and places any known, uncleared ability that has no key while a key is
+     free. `autoBound` survives, but it no longer decides whether to place —
+     only whether to ANNOUNCE. An entry in it has been placed before, so the
+     victory card must not call it a new move; an entry missing from it is
+     genuinely new and gets reported to takeAutoBound(). That is the whole of
+     what that memory is for now, and it is why it can no longer strand a move.
+
+     Mouse slots are deliberately not auto-filled: a mouse button already has a
+     job in the room (§16 hands and grab), so the engine may offer a key it
+     granted you and must not quietly take a button you use for something else.
+     LMB/RMB are opt-in, from the bind screen. */
+  function autoBind(charId, known, out, onMouse) {
     var p = party();
-    if (!p.state.autoBound) p.state.autoBound = {};
-    var seen = p.state.autoBound[charId];
-    if (!Array.isArray(seen)) seen = [];
+    var seen = autoBoundOf(charId);
+    var cleared = clearedOf(charId);
+    onMouse = onMouse || [];
 
     var placed = [];
     for (var k = 0; k < known.length; k++) {
       var id = known[k];
-      if (seen.indexOf(id) !== -1) continue;      // already offered a key once
-      seen.push(id);
-      if (out.indexOf(id) !== -1) continue;       // the player already bound it
+      if (out.indexOf(id) !== -1) continue;       // already on a key
+      if (onMouse.indexOf(id) !== -1) continue;   // already on a button (§27B)
+      if (cleared.indexOf(id) !== -1) continue;   // the player said no
       var slot = placeAbility(charId, out, id);
       if (slot === -1) continue;                  // no free key: leave it in the pool
-      placed.push({ abilityId: id, slot: slot });
+      var isNew = seen.indexOf(id) === -1;
+      if (isNew) seen.push(id);
+      // only a first placement is a REWARD; a re-place is a repair, silently
+      if (isNew) placed.push({ abilityId: id, slot: slot });
     }
     p.state.autoBound[charId] = seen;
     p.state.binds[charId] = out;
@@ -233,32 +425,52 @@ CHLOE.engine.combat3 = (function () {
      fills every key, the items simply stop being placed; the player decides
      from there whether a bandage is worth a move.
 
-     Order comes from data/items.js (`combatUsableIds()` walks the table in
+     Order comes from data/items.js (`pressableIds()` walks the table in
      declaration order: bandage, then energy_drink), so no ids appear here.
 
-     It shares autoBind's `autoBound` memory, keyed by the full 'item:<id>'
-     string. Same reason as abilities: without that memory, clearing a bandage
-     key would be impossible, because the next call to binds() would put it
-     straight back. */
-  function autoBindItems(charId, out) {
+     PRESSABLE ONLY, and that is a §27C decision. A passive like the revive
+     potion is bindable but not pressable, and there are exactly two pocket
+     keys — letting a potion you have not bought yet reserve one of them would
+     spend the feature's whole budget on an empty slot. A passive is a shop
+     purchase, and a shop purchase gets a key you chose.
+
+     §27A: THIS SELF-HEALS TOO, for the same reason the abilities do — "the
+     pockets are lost as well" was half of the reported bug. A bandage that has
+     no key while a key is free goes back on one, every read, not once ever.
+     The old once-ever gate could also be spent WITHOUT the item ever landing
+     (marked "offered" while the bar was full), which is the never-comes-back
+     trap in miniature.
+
+     It is safe to be this eager only because the list is PRESSABLE ids. The
+     two things it can ever place are the bandage and the drink you start the
+     run holding, so the worst case is that the feature works. Walking every
+     bindable id instead would let a passive you do not own drop itself onto
+     the key you just deliberately emptied, which is the engine filling in
+     space the player made on purpose.
+
+     `autoBound` still records what has landed — it is announce-only now (see
+     autoBind), and pockets are deliberately never announced. */
+  function autoBindItems(charId, out, onMouse) {
     var p = party();
-    var rules = CHLOE.data.itemRules || ITEMS();
-    var ids = (rules && typeof rules.combatUsableIds === 'function')
-      ? (rules.combatUsableIds() || []) : [];
+    var r = rules();
+    onMouse = onMouse || [];
+    var ids = (r && typeof r.pressableIds === 'function')
+      ? (r.pressableIds() || [])
+      : ((r && typeof r.combatUsableIds === 'function') ? (r.combatUsableIds() || []) : []);
     if (!ids.length) return [];
-    if (!p.state.autoBound) p.state.autoBound = {};
-    var seen = p.state.autoBound[charId];
-    if (!Array.isArray(seen)) seen = [];
+    var seen = autoBoundOf(charId);
+    var cleared = clearedOf(charId);
 
     var placed = [];
     for (var i = 0; i < ids.length; i++) {
       var key = itemKey(ids[i]);
-      if (seen.indexOf(key) !== -1) continue;     // already offered a key once
-      seen.push(key);
-      if (out.indexOf(key) !== -1) continue;      // the player already bound it
+      if (cleared.indexOf(key) !== -1) continue;  // the player said no
+      if (out.indexOf(key) !== -1) continue;      // already on a key
+      if (onMouse.indexOf(key) !== -1) continue;  // already on a button (§27B)
       var slot = out.indexOf(null);
       if (slot === -1) continue;                  // no free key: the moves won
       out[slot] = key;
+      if (seen.indexOf(key) === -1) seen.push(key);
       rememberPocket(charId, key, slot);          // ours to shuffle, until moved
       placed.push({ itemId: ids[i], slot: slot });
     }
@@ -280,10 +492,15 @@ CHLOE.engine.combat3 = (function () {
   }
 
   /* `entry` is an ability id, an 'item:<id>' string (§23), or null to clear.
-     Named `abilityId` for years and kept callable exactly as before. */
+     `slot` is a key index 0-8 OR a mouse slot id (§27B) — never a number that
+     stands for a button. Named `abilityId` for years and kept callable exactly
+     as before. */
   function bind(charId, slot, entry) {
-    var list = binds(charId);
-    if (slot < 0 || slot >= list.length) return { ok: false, reason: 'No such slot.' };
+    var list = binds(charId), mouse = mouseBinds(charId);
+    var onMouse = isMouseSlot(slot);
+    if (!onMouse && !(typeof slot === 'number' && slot >= 0 && slot < list.length)) {
+      return { ok: false, reason: 'No such slot.' };
+    }
     var itemId = itemIdOf(entry);
     if (itemId) {
       if (!ITEMS()[itemId]) return { ok: false, reason: 'No such item.' };
@@ -293,20 +510,42 @@ CHLOE.engine.combat3 = (function () {
     } else if (entry && knownAbilities(charId).indexOf(entry) === -1) {
       return { ok: false, reason: 'Not learned yet.' };
     }
-    // an ability — or an item — lives in one slot at a time
+    var i, ids = MOUSE_SLOTS();
+    // an ability — or an item — lives in ONE slot at a time, across all eleven
     if (entry) {
-      for (var i = 0; i < list.length; i++) if (list[i] === entry) list[i] = null;
+      for (i = 0; i < list.length; i++) if (list[i] === entry) list[i] = null;
+      for (i = 0; i < ids.length; i++) if (mouse[ids[i]] === entry) mouse[ids[i]] = null;
     }
     /* Touching a key by hand makes the player's placement authoritative: drop
        our "we lent this pocket that slot" record for both the entry going in
        and whatever was sitting there, so placeAbility will never shuffle a
        bandage the player put somewhere on purpose. */
     var at = pocketAt(charId);
+    var was = onMouse ? mouse[slot] : list[slot];
     if (entry) delete at[entry];
-    if (list[slot]) delete at[list[slot]];
-    list[slot] = entry || null;
+    if (was) delete at[was];
+
+    /* §27A: the two halves of the player's intent, recorded separately.
+         clearing a slot (entry === null)  -> "I do not want this on a key" and
+           the self-heal must never undo it.
+         dropping something ON TOP of it   -> NOT a refusal. They wanted the new
+           thing HERE; they never said the old thing should go in the bin, so
+           it stays eligible and the self-heal parks it in whatever key this
+           move just freed. Losing a move to a rearrange was the everyday face
+           of the §27A bug.
+       Binding something also un-clears it: putting it back on a key is the
+       plainest possible statement that you want it. */
+    if (entry) unmarkCleared(charId, entry);
+    else markCleared(charId, was);
+
+    if (onMouse) mouse[slot] = entry || null;
+    else list[slot] = entry || null;
+    /* Both stores are written on every path, not just the one that changed:
+       moving an entry from key 3 to RMB edits BOTH lists above, and writing
+       back only the one the slot id pointed at is how half a move gets lost. */
     party().state.binds[charId] = list;
-    return { ok: true, binds: list.slice() };
+    party().state.mouseBinds[charId] = mouse;
+    return { ok: true, binds: list.slice(), mouse: mouse, slot: slot };
   }
 
   /* ---------- lifecycle ---------- */
@@ -415,8 +654,20 @@ CHLOE.engine.combat3 = (function () {
   function liveSlots() {
     return st ? binds(st.charId) : [];
   }
-  function slotAbility(i) {
-    var id = liveSlots()[i];
+  /* What a slot id resolves to right now — the one place that turns "key 3" or
+     "mouseR" into an entry. A number outside the key range resolves to NOTHING
+     rather than falling through to a button: §27B's whole reason for string
+     ids is that a stray 9 or 10 must fire nothing, loudly, instead of firing
+     LMB by accident. */
+  function liveEntry(slot) {
+    if (!st) return null;
+    if (isMouseSlot(slot)) return mouseBinds(st.charId)[slot] || null;
+    if (typeof slot !== 'number') return null;
+    var list = liveSlots();
+    return (slot >= 0 && slot < list.length) ? (list[slot] || null) : null;
+  }
+  function slotAbility(slot) {
+    var id = liveEntry(slot);
     if (!id || itemIdOf(id)) return null;    // §23: an item is not an ability
     return ABIL()[id];
   }
@@ -461,6 +712,15 @@ CHLOE.engine.combat3 = (function () {
   function useItem(itemId) {
     var def = ITEMS()[itemId];
     if (!def) return { ok: false, reason: 'Nothing bound to that key.' };
+    /* §27C: a passive is armed, not pressable. Refused FIRST and without
+       touching the bag, the cooldown or the lock — a fumbled key must cost the
+       most expensive item in the game exactly nothing. The reason string is
+       written to be read on the HUD: it explains the key rather than scolding
+       the press. */
+    if (passiveItem(itemId)) {
+      return { ok: false, passive: true, itemId: itemId,
+               reason: (def.name || 'It') + ' is armed — it drinks itself if you fall.' };
+    }
     var inv = CHLOE.engine.inventory;
     var have = (inv && typeof inv.count === 'function') ? inv.count(itemId) : 0;
     /* Checked BEFORE the cooldown, so an empty pocket reads "None left." (go
@@ -504,13 +764,13 @@ CHLOE.engine.combat3 = (function () {
      3D layer plays the animation and calls hitEnemy() at each hit moment.
      §23: the same key may hold a consumable, which takes the useItem() path
      and never touches ability readiness or cost. */
-  function press(slotIndex) {
+  function press(slot) {
     if (isOver()) return { ok: false, reason: 'The fight is over.' };
     if (st.cast) return { ok: false, reason: 'Already casting.' };
     if (st.now < st.lockUntil) return { ok: false, reason: 'Recovering.' };
-    var itemId = itemIdOf(liveSlots()[slotIndex]);
+    var itemId = itemIdOf(liveEntry(slot));
     if (itemId) return useItem(itemId);
-    var a = slotAbility(slotIndex);
+    var a = slotAbility(slot);
     if (!a) return { ok: false, reason: 'Nothing bound to that key.' };
     var r = readiness(a.id);
     if (!r.ready) return { ok: false, reason: r.reason };
@@ -526,6 +786,54 @@ CHLOE.engine.combat3 = (function () {
     st.cast = { id: a.id, t: 0, dur: total, hitsDone: 0 };
     st.lockUntil = st.now + total + (a.recoverMs || 0);
     return { ok: true, ability: a };
+  }
+
+  /* ---------- the mouse, and where it is allowed to fire (§27B) ----------
+
+     THE SPLIT, STATED ONCE, HERE.
+       IN THE ROOM the mouse is your hands. Left click closes the left hand,
+         right click the right, and looking at something and clicking takes it
+         (§16). That is not negotiable and it is not shared: a bind must never
+         fire in the room, because the room is where you pick things up.
+       IN THE ARENA the same two buttons are hotbar slots, and only there.
+
+     A LIVE `st` IS the arena, and the test is `isOver()`, not `st`. A finished
+     fight leaves its state object lying around until the next start(), and
+     you walk back into the room with it still there — gating on `st` alone
+     would mean a bound button ate the first grab of every trip home.
+
+     The contract for whoever owns the input layer (ui/battle3d.js, and
+     engine/world3d.js for the room) is `handled`:
+       handled === false  -> this click is NOT a bind. Do whatever you would
+                             have done: grab in the room, click-to-engage in
+                             the arena. Nothing here has run.
+       handled === true   -> the button fired its slot. Do NOT also grab and do
+                             NOT also engage; `result` is the same {ok,...}
+                             shape press() returns, refusals included, because
+                             a bound button that is on cooldown is still bound
+                             and must not fall through to grabbing something.
+     That is the whole of "a bound mouse button must not also trigger a grab,
+     and must not collide with click-to-engage": both rules fall out of one
+     boolean, and the caller never has to ask what screen it is on. */
+  function mousePress(side) {
+    var slot = mouseSlotOf(side);
+    if (!slot) return { handled: false, reason: 'Not a bindable button.' };
+    // No live fight: the room owns the mouse. §16 hands and grab, untouched.
+    if (isOver()) return { handled: false, slot: slot, reason: 'Mouse binds fire only in the arena.' };
+    var charId = st.charId;
+    if (!mouseBinds(charId)[slot]) {
+      // Nothing on this button — leave click-to-engage its click.
+      return { handled: false, slot: slot, reason: 'Nothing bound to that button.' };
+    }
+    return { handled: true, slot: slot, result: press(slot) };
+  }
+
+  /* Is this button carrying a bind for the fighter on screen right now? The
+     input layer can ask before it even builds a grab, which is the cheap way
+     to keep a bound button from starting an animation it will not finish. */
+  function mouseArmed(side) {
+    var slot = mouseSlotOf(side);
+    return !!(slot && !isOver() && mouseBinds(st.charId)[slot]);
   }
 
   /* ---------- evade ---------- */
@@ -655,6 +963,16 @@ CHLOE.engine.combat3 = (function () {
     st.hp = Math.max(0, st.hp - dmg);
     if (m) m.hp = st.hp;
 
+    /* §27C: THE ORDER HERE IS THE FEATURE.
+       The revive is checked BEFORE §19's swap, and that single line of
+       sequencing is what the potion actually buys. Swap first and the potion
+       could only ever be poured over a body that has already lost the fight —
+       it would save the corpse. Revive first and the leader stays the leader:
+       her level, her hotbar, her cooldowns, the run intact. If she has no
+       potion bound, or none left in the bag, nothing here happens at all and
+       the swap below runs exactly as it did before. */
+    var revived = (st.hp <= 0) ? tryPassiveRevive() : null;
+
     /* §19: the leader falling does NOT end the run while someone else can
        still fight — the next member takes over as leader mid-fight and the
        camera keeps going with their stats and their own hotbar. */
@@ -679,8 +997,81 @@ CHLOE.engine.combat3 = (function () {
       }
     }
     return { dmg: dmg, dead: st.hp <= 0 && !swapped, evaded: false,
-             leaderSwap: swapped };
+             leaderSwap: swapped,
+             /* Non-null only on the frame the potion fired, so the HUD can
+                splash it without diffing anything: {itemId, name, pct, hp,
+                count, charId}. */
+             revived: revived };
   }
+
+  /* ---------- §27C: the potion you never press ----------
+
+     Reached ONLY from the killing-blow branch of takeHit, which is what makes
+     "never consumed on a survivable hit" true by construction rather than by a
+     check that could drift: a hit you walk away from never gets here. And
+     because it puts hp back above zero, the next fall is a genuinely new fall
+     and takes a second potion — one per fall, exactly, with no counter to keep
+     in step.
+
+     It scans the whole eleven-slot hotbar (§27B), keys and buttons alike: the
+     potion works because it is BOUND, and which slot it is bound to is the
+     player's business. First bound one that is actually carried wins; a bind
+     with an empty bag is a slot waiting to re-arm, not a save.
+
+     Returns null when nothing saved you — the caller reads that as "carry on
+     to the leader swap". */
+  function tryPassiveRevive() {
+    var p = party();
+    var inv = CHLOE.engine.inventory;
+    if (!inv || typeof inv.count !== 'function') return null;
+    var entries = allEntries(st.charId);
+    for (var i = 0; i < entries.length; i++) {
+      var itemId = itemIdOf(entries[i]);
+      if (!itemId || !passiveItem(itemId)) continue;
+      if (inv.count(itemId) <= 0) continue;
+
+      var def = ITEMS()[itemId] || {};
+      var r = rules();
+      var pct = (r && typeof r.revivePctOf === 'function')
+        ? r.revivePctOf(itemId) : ((def.effect || {}).revivePct || 0);
+      if (!(pct > 0)) continue;
+
+      inv.remove(itemId, 1);
+      st.hp = Math.max(1, Math.round(st.max.hp * pct / 100));
+      var m = p.get(st.charId);
+      if (m) m.hp = st.hp;                       // the same mirror takeHit keeps
+      /* A breath, not a reset — see config.reviveIframeMs. Without it the very
+         next hit window of the swing that just killed you kills you again and
+         the potion bought one frame. */
+      st.iframeUntil = st.now + ((GCFG().reviveIframeMs) || 900);
+      /* The cast is dropped for the same reason the leader swap drops it: you
+         were mid-animation when you died, and coming back up finishing it
+         reads as a rewind. Resources are NOT restored — you are alive, not
+         fresh. */
+      st.cast = null;
+      st.lockUntil = 0;
+      lastRevive = {
+        charId: st.charId, itemId: itemId, name: def.name || itemId,
+        icon: def.icon || '🧿', pct: pct, hp: st.hp, max: st.max.hp,
+        count: inv.count(itemId)
+      };
+      /* Guarded, DOM-free, exactly like every other engine->UI ping in here.
+         The splash is the UI's job; this is the line in the log. */
+      try {
+        if (CHLOE.ui && typeof CHLOE.ui.toast === 'function') {
+          CHLOE.ui.toast('ADRENALINE — ' + lastRevive.name + ' brings you back at ' +
+                         st.hp + ' life.');
+        }
+      } catch (e) {}
+      return lastRevive;
+    }
+    return null;
+  }
+
+  /* What the last potion did, for a HUD that renders off snapshot() rather
+     than off the takeHit return. Read-and-clear, like takeAutoBound(). */
+  var lastRevive = null;
+  function takeRevive() { var v = lastRevive; lastRevive = null; return v; }
 
   /* ---------- tick ---------- */
   function tick(dt) {
@@ -787,54 +1178,91 @@ CHLOE.engine.combat3 = (function () {
      `kind` is 'ability', 'item' or null for an empty key. `id` is the ability
      id or the ITEM id (never the raw 'item:' string — that encoding stops at
      this boundary). Ability entries keep every field they have always had. */
-  function resolvedSlots() {
-    if (!st) return [];
-    var out = [], live = liveSlots(), i;
-    for (i = 0; i < live.length; i++) {
-      var entry = live[i], itemId = itemIdOf(entry);
-      if (itemId) {
-        var def = ITEMS()[itemId] || {};
-        var inv = CHLOE.engine.inventory;
-        var have = (inv && typeof inv.count === 'function') ? inv.count(itemId) : 0;
-        var cdLeft = Math.max(0, (st.itemReadyAt - st.now) / 1000);
-        var span = (GCFG().itemCooldownMs || 2500);
-        /* An empty pocket stays BOUND and greys out — it re-arms the moment
-           you pick another one up, so the key never moves under the player. */
-        var ready = have > 0 && st.now >= st.itemReadyAt;
-        out.push({
-          slot: i, key: i + 1, kind: 'item', id: itemId,
+  function resolveSlot(entry, slot, key) {
+    var itemId = itemIdOf(entry);
+    if (itemId) {
+      var def = ITEMS()[itemId] || {};
+      var inv = CHLOE.engine.inventory;
+      var have = (inv && typeof inv.count === 'function') ? inv.count(itemId) : 0;
+      /* §27C: a passive never reads as pressable. It has no cooldown dial (it
+         does not share the pockets' timer, because you never spend it on
+         purpose) and its state is ARMED / EMPTY, not READY / COOLING. `ready`
+         stays false so nothing that draws a pressable key lights it up, and
+         `armed` is the flag the HUD should render instead — a ring, not a
+         countdown. The count is still shown: it is how many falls you have
+         left in your pocket, which is the only number that matters. */
+      if (passiveItem(itemId)) {
+        return {
+          slot: slot, key: key, kind: 'item', id: itemId,
           name: def.name || itemId, icon: def.icon || '•',
           desc: def.desc || '', effect: def.effect || {},
           count: have,
-          cdPct: Math.max(0, Math.min(1, cdLeft * 1000 / span)),
-          cdLeft: cdLeft,
-          ready: ready,
-          reason: ready ? null : (have <= 0 ? 'None left.' : 'Pockets cooling down')
-        });
-        continue;
+          passive: true, armed: have > 0,
+          cdPct: 0, cdLeft: 0, ready: false,
+          reason: have > 0 ? 'Armed — spends itself if you fall.' : 'None left.'
+        };
       }
-      var a = entry ? ABIL()[entry] : null;
-      if (!a) { out.push({ slot: i, key: i + 1, kind: null, id: null, ready: false }); continue; }
-      var r = readiness(entry);
-      out.push({
-        slot: i, key: i + 1, kind: 'ability',
-        id: entry, name: a.name, icon: a.icon, type: a.type,
-        cost: a.cost || {},
-        // "8 STA" / "14 MAG" / "14 MAG + 6 STA" for the HUD chip
-        costText: (function (c) {
-          var b = [];
-          if (c.mana) b.push(c.mana + ' MAG');
-          if (c.sta) b.push(c.sta + ' STA');
-          return b.join(' + ') || 'free';
-        })(a.cost || {}),
-        charges: st.cd[entry] ? st.cd[entry].charges : 0,
-        maxCharges: a.charges || 1,
-        cdPct: cooldownPct(entry),
-        cdLeft: st.cd[entry] ? Math.max(0, (st.cd[entry].nextAt - st.now) / 1000) : 0,
-        affordable: canPay(a.cost),
-        ready: r.ready,
-        reason: r.ready ? null : r.reason
-      });
+      var cdLeft = Math.max(0, (st.itemReadyAt - st.now) / 1000);
+      var span = (GCFG().itemCooldownMs || 2500);
+      /* An empty pocket stays BOUND and greys out — it re-arms the moment
+         you pick another one up, so the key never moves under the player. */
+      var ready = have > 0 && st.now >= st.itemReadyAt;
+      return {
+        slot: slot, key: key, kind: 'item', id: itemId,
+        name: def.name || itemId, icon: def.icon || '•',
+        desc: def.desc || '', effect: def.effect || {},
+        count: have,
+        passive: false, armed: false,
+        cdPct: Math.max(0, Math.min(1, cdLeft * 1000 / span)),
+        cdLeft: cdLeft,
+        ready: ready,
+        reason: ready ? null : (have <= 0 ? 'None left.' : 'Pockets cooling down')
+      };
+    }
+    var a = entry ? ABIL()[entry] : null;
+    if (!a) return { slot: slot, key: key, kind: null, id: null, ready: false };
+    var r = readiness(entry);
+    return {
+      slot: slot, key: key, kind: 'ability',
+      id: entry, name: a.name, icon: a.icon, type: a.type,
+      cost: a.cost || {},
+      // "8 STA" / "14 MAG" / "14 MAG + 6 STA" for the HUD chip
+      costText: (function (c) {
+        var b = [];
+        if (c.mana) b.push(c.mana + ' MAG');
+        if (c.sta) b.push(c.sta + ' STA');
+        return b.join(' + ') || 'free';
+      })(a.cost || {}),
+      charges: st.cd[entry] ? st.cd[entry].charges : 0,
+      maxCharges: a.charges || 1,
+      cdPct: cooldownPct(entry),
+      cdLeft: st.cd[entry] ? Math.max(0, (st.cd[entry].nextAt - st.now) / 1000) : 0,
+      affordable: canPay(a.cost),
+      ready: r.ready,
+      reason: r.ready ? null : r.reason
+    };
+  }
+
+  function resolvedSlots() {
+    if (!st) return [];
+    var out = [], live = liveSlots();
+    for (var i = 0; i < live.length; i++) out.push(resolveSlot(live[i], i, i + 1));
+    return out;
+  }
+
+  /* §27B: the two mouse slots, resolved the same way and returned SEPARATELY.
+     Not appended to resolvedSlots(), and that is deliberate — ui/battle3d.js
+     draws the hotbar with the array INDEX as the thing it presses, so two
+     extra entries on the end of that array would become press(9) and press(10)
+     the moment anyone rendered them. Keeping them in their own list means a
+     caller has to reach for `.slot` ('mouseL'/'mouseR') to fire one, which is
+     exactly the encoding §27B asks for. `key` is 'LMB'/'RMB', never a number:
+     a "10" on that slot would be a lie about how you press it. */
+  function resolvedMouseSlots() {
+    if (!st) return [];
+    var mb = mouseBinds(st.charId), ids = MOUSE_SLOTS(), out = [];
+    for (var i = 0; i < ids.length; i++) {
+      out.push(resolveSlot(mb[ids[i]], ids[i], mouseLabel(ids[i])));
     }
     return out;
   }
@@ -858,6 +1286,8 @@ CHLOE.engine.combat3 = (function () {
         };
       })(),
       slots: slots,
+      // §27B: the buttons ride alongside the keys, never inside their array
+      mouseSlots: resolvedMouseSlots(),
       casting: st.cast ? { id: st.cast.id, pct: Math.min(1, st.cast.t / Math.max(1, st.cast.dur)) } : null,
       evade: {
         ready: st.now >= st.evadeReadyAt && canPay(cfg.cost),
@@ -877,6 +1307,17 @@ CHLOE.engine.combat3 = (function () {
     flee: flee, snapshot: snapshot,
     knownAbilities: knownAbilities, slotCount: slotCount, binds: binds, bind: bind,
     takeAutoBound: takeAutoBound,
+    /* §27B mouse binds. `slotIds` is the full eleven (0..n-1, 'mouseL',
+       'mouseR') in draw order; `press` and `bind` take any of them. `mousePress`
+       is the input layer's entry point and owns the room/arena split — read its
+       comment before wiring a click to anything. */
+    MOUSE_SLOTS: MOUSE_SLOTS, isMouseSlot: isMouseSlot, mouseSlotOf: mouseSlotOf,
+    mouseLabel: mouseLabel, mouseBinds: mouseBinds, mouseSlots: resolvedMouseSlots,
+    mousePress: mousePress, mouseArmed: mouseArmed,
+    slotIds: slotIds, entryAt: entryAt,
+    /* §27C. `passiveItem` is what tells a HUD to draw a slot armed instead of
+       pressable; `takeRevive` is the read-and-clear feed for a splash. */
+    passiveItem: passiveItem, pressableItem: pressableItem, takeRevive: takeRevive,
     /* §23 verification/HUD surface: the hotbar as it actually resolves, item
        entries included. Empty outside a fight — it prices readiness against
        live pools and cooldowns, which only exist while one is running. */

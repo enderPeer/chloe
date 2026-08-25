@@ -243,6 +243,8 @@ MODELS agent: game/assets/models/*, game/assets/hdri/*, tools/model-manifest.jso
 
 ## 15. Roguelike mode — no accounts, no saves (supersedes accounts/saves in sec 6, the account screen in sec 7, save v2 in sec 10, save v3/migration in sec 12, sec 13's account/PIN flow and its save/scene-migration line, sec 14's "save flow unchanged", and cloud sync everywhere)
 
+> **Narrowed by §27**: a records board may persist in `localStorage`, and `worker/` reopens for an optional records endpoint. Persistence that RESUMES a run is still dead — no accounts, no saves, no cloud progress. What §27 keeps is a record ABOUT finished runs, which restores nothing.
+
 CHLOE is a roguelike: **one run per page load, permadeath on defeat.** Nothing is ever persisted — no localStorage, no PIN, no cloud.
 
 - **Flow**: title -> Press Start -> fresh run in the 3D room (sec 13). The account screen is GONE: `game/js/ui/account.js` and `game/js/engine/save.js` are deleted, `#screen-account` removed from `game/index.html`, account/PIN CSS removed. `worker/` is dead infrastructure (never deployed; kept in the repo for reference only).
@@ -606,3 +608,30 @@ The south poster (§24) announced where the next fight happened and you took wha
 
 ### Verification hooks
 `world3d.debug()` gains `stageArrow: {which:'left'|'right', id, name} | null` — the arrow under the crosshair and the floor it would pick. A test must prove: round 1 resolves to the Ring with nobody touching the board; the painted-left arrow is the on-screen left arrow (UV mapping, not a guess); the middle of the board is not clickable; a click changes both the board canvas and what `stages.forRound(round)` answers; and the fight lands on the picked floor, not the cycled one.
+## 27. Hotbar reach, the shop, auto-revive, and the record board (fulfils the shop deferred in §6; NARROWS §15s no-localStorage rule to run saves only — a record board is not a save; extends §17 binds, §19 leader swap and §23 pockets)
+*(§26 is the other session's stage picker — do not renumber it. This section owns NOTHING in data/stages.js, engine/displays.js or ui/room3d.js.)*
+
+### A. BUG: learned abilities stop being reflected
+`party.state.autoBound` remembers which entries were "already offered a key once", so an ability is auto-placed only the FIRST time. Any path that rebuilds a character's binds while that memory survives leaves every previously-offered ability **permanently unbound**. Reproduced headlessly: with binds rebuilt at level 9, a character who knows 7 abilities is bound only `punch` + the newest one; at level 12, only `punch`. Natural level-by-level progression is unaffected, which is why it hid.
+**Fix:** binds and `autoBound` must be cleared and rebuilt as ONE unit (the file's own comment already warns they must move together). `binds(charId)` must additionally self-heal: any KNOWN ability that is unbound while a free slot exists is placed, unless the player explicitly cleared it (that explicit choice still has to survive — keep a distinct "player cleared this" memory from "never offered"). Find the live path that triggers it (leader swap, an ally joining above level 1, level-up rebuild) and name it in the commit. Regression test: for every level 1-100, and for a bind-set rebuilt from empty at each of those levels, **every known ability is bound while free slots remain**.
+
+### B. Mouse buttons are bindable
+`LMB` and `RMB` join keys 1-9 as bind targets: **11 slots**, any of which may hold an ability OR an item. Encode them as slot ids `'mouseL'`/`'mouseR'` (not indices 9/10 — a numeric off-by-one here silently fires the wrong ability).
+**They keep their room jobs.** In the ROOM the mouse still opens/closes the hands and grabs items (§16); mouse binds fire **only in the arena**. State that split in code. A bound mouse button must not also trigger a grab, and the arena's existing left-click-to-engage must not fire an ability by accident.
+`ui/binds.js` shows the two mouse slots alongside the number keys; the hotbar labels them clearly (not "10"/"11").
+
+### C. Revive potion — the one you never press
+New item `revive_potion` (buyable, §D). Bound like any consumable, but it is **passive**: when the active character would fall, if a bound `revive_potion` is carried it is consumed automatically and they get back up at `revivePct` life instead. Ordering is load-bearing: this fires **before** §19's leader swap, so the potion saves the run rather than the corpse. One per fall; the HUD slot shows its count and must visibly read as armed rather than pressable, and a clear log/splash fires when it saves you ("ADRENALINE" style). If none is carried, the leader swap proceeds exactly as today.
+
+### D. The shop — a giftbox in the room
+A **giftbox/treasure prop** in the room (`data/room3d.js`, a new furniture kind; place it where it reads as an object you can walk to, not tucked behind the couch). Looking at it shows the interaction hint; clicking opens the **shop overlay** — a new screen (`ui/shop.js` + `engine/shop.js`, NOT ui/room3d.js, which the other session holds). Spend **Shards** earned from fights: list each stocked item with icon, name, effect, price and carried count; buy decrements Shards and adds to the bag; unaffordable rows are dimmed with the shortfall shown. Stock is data-driven off `data/items.js` prices — `bandage`, `energy_drink`, `revive_potion` at minimum, plus the §12 cure items which have been unobtainable since they were authored. Closing returns to the room and resumes the 3D loop the same way the menu overlay does. Shards persist for the run only (§15 — permadeath still means you lose them).
+
+### E. The record board — top 10, in a frame on the wall
+A **new picture-frame prop** in the room (`data/room3d.js`) painted with a records canvas. Its own module (`engine/records.js`) — **do NOT add it to engine/displays.js**, which the other session is holding.
+Each record: **name · round reached · date · patch · run time**. `patch` comes from `CHLOE.data.version.string()` (§23), and run time is measured in-game from the start of the run to the moment the record is set. Top 10, sorted by round then by fastest time.
+When a run ends having reached the **highest round ever recorded**, the player is prompted to type a name (1-12 chars, sanitised, rejected if empty) and the record is inserted. Nothing else may write to the board.
+**Persistence, and an honest limit:** records live in `localStorage` under their own key. This does NOT contradict §15 — §15 removed *run/progress saves* so death means starting over; a record board is a separate artefact and must not restore any run state. Records are therefore **per-browser, not global**, and the board must label them as such until a backend exists.
+For real "world" records the repo already has `worker/` (mothballed since the roguelike pivot): add `GET /records` and `POST /records` (name, round, timeMs, patch; server-side validation, cap the table, rate-limit) and have `engine/records.js` use the remote list when `config.apiUrl` is set and fall back to local otherwise, exactly like the old cloud-save contract. **It cannot be deployed from here** — that needs the owner's one-time `wrangler login`; document the steps in `worker/README.md` and leave `apiUrl` empty so the game ships local-only and never errors.
+
+### Verification
+Prove: every known ability is bound at every level and after a rebuild; LMB/RMB fire abilities in the arena and still grab in the room; a bound revive potion resurrects you before any leader swap and is consumed exactly once; the giftbox opens a shop that actually moves Shards and stock; a record run prompts for a name and appears in the frame with the right patch and time; and the board survives a reload while granting no run progress.

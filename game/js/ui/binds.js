@@ -7,7 +7,12 @@
    an ability, encoded into the same bind list as 'item:<itemId>'. Every slot
    is generic — the two extra keys the ladder hands you are NOT drawn as
    special "pocket" keys, because any key takes either kind and drawing them
-   apart would teach a rule that does not exist. */
+   apart would teach a rule that does not exist.
+   §27B adds LMB and RMB to the same row: 9 keys + 2 buttons = 11 slots, drawn
+   the same, bound by the same gesture. They are addressed by the slot IDS
+   'mouseL'/'mouseR' throughout this file — never by an index — and labelled
+   LMB/RMB, never "10" and "11", because a number there would be a lie about
+   how you press them. `sel.slot` is therefore a slot id, not an integer. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -41,6 +46,66 @@ CHLOE.ui.binds = (function () {
   function bagCount(id) {
     var inv = CHLOE.engine.inventory;
     return (inv && typeof inv.count === 'function') ? (inv.count(id) || 0) : 0;
+  }
+
+  /* --------------------------------------------------------- §27B mouse slots
+     Everything here speaks slot IDS. A number is a key index; 'mouseL' and
+     'mouseR' are the buttons. Each helper falls back to the literal ids for an
+     engine that has not grown them yet, so this screen keeps rendering the nine
+     keys and simply shows no buttons — same defensive habit as the §23 pocket
+     helpers above. */
+  function mouseIds() {
+    var c = C3();
+    if (c && typeof c.MOUSE_SLOTS === 'function') return c.MOUSE_SLOTS() || [];
+    var cfg = (CHLOE.data.config && CHLOE.data.config.mouseSlots);
+    return cfg && cfg.length ? cfg : [];
+  }
+  function isMouseSlot(slot) {
+    return typeof slot === 'string' && mouseIds().indexOf(slot) !== -1;
+  }
+  /* What the slot is CALLED. Keys count from 1; buttons are named after the
+     button. This is the only place either label is produced. */
+  function slotLabel(slot) {
+    if (!isMouseSlot(slot)) return String(slot + 1);
+    var c = C3();
+    if (c && typeof c.mouseLabel === 'function') return c.mouseLabel(slot);
+    var l = (CHLOE.data.config && CHLOE.data.config.mouseSlotLabels) || {};
+    return l[slot] || (slot === 'mouseR' ? 'RMB' : 'LMB');
+  }
+  // "key 3" / "LMB" — for the "already bound at" chip on a card.
+  function slotChip(slot) {
+    return isMouseSlot(slot) ? slotLabel(slot) : ('key ' + slotLabel(slot));
+  }
+  function mouseBinds(charId) {
+    var c = C3();
+    if (c && typeof c.mouseBinds === 'function') return c.mouseBinds(charId) || {};
+    return {};
+  }
+  // What is on one slot, whichever kind it is.
+  function entryAt(charId, slot, slots) {
+    if (isMouseSlot(slot)) return mouseBinds(charId)[slot] || null;
+    return slots[slot] || null;
+  }
+  /* Where an entry currently lives, as a slot id, or null. Searches the keys
+     first and then the buttons, so the chip on a card matches the row order. */
+  function boundAt(charId, entry, slots) {
+    var i = slots.indexOf(entry);
+    if (i !== -1) return i;
+    var mb = mouseBinds(charId), ids = mouseIds();
+    for (var k = 0; k < ids.length; k++) if (mb[ids[k]] === entry) return ids[k];
+    return null;
+  }
+  function sameSlot(a, b) { return a === b; }
+
+  /* §27C: a passive item is bound like anything else but never pressed. The
+     card has to say so, or its lack of a "+30 life" line reads as a data bug. */
+  function isPassiveItem(id) {
+    var c = C3();
+    if (c && typeof c.passiveItem === 'function') return !!c.passiveItem(id);
+    var rules = CHLOE.data.itemRules;
+    if (rules && typeof rules.isPassiveCombat === 'function') return !!rules.isPassiveCombat(id);
+    var eff = (ITEMS()[id] || {}).effect || {};
+    return !!(eff.self && eff.revivePct > 0);
   }
 
   /* Which items may sit on a key. The rule lives in data/items.js as a
@@ -81,9 +146,9 @@ CHLOE.ui.binds = (function () {
      ability). Only the read-back proves the key actually holds it. */
   function put(charId, slot, entry) {
     var r = C3().bind(charId, slot, entry);
-    var back = C3().binds(charId)[slot];
+    var back = entryAt(charId, slot, C3().binds(charId));
     notice = (back === (entry || null)) ? ''
-      : ((r && r.reason) || 'Key ' + (slot + 1) + ' would not take that.');
+      : ((r && r.reason) || slotChip(slot) + ' would not take that.');
   }
 
   function activeChar() {
@@ -109,12 +174,27 @@ CHLOE.ui.binds = (function () {
     }
     var known = C3().knownAbilities(charId);
     var slots = C3().binds(charId);
+    /* Still the NUMBER-KEY cap (§27B keeps the buttons outside it, so the
+       ladder arithmetic in data/skilltree.js is untouched). */
     var maxSlots = (CHLOE.data.abilityConfig && CHLOE.data.abilityConfig.maxSlots) || 9;
 
+    /* Selection has to survive a character swap: Ash may not have as many keys
+       as Chloe, and a stale index would point at a locked slot that every card
+       then silently failed to bind into. Buttons are always valid. */
+    if (!isMouseSlot(sel.slot) && !(sel.slot >= 0 && sel.slot < slots.length)) sel.slot = 0;
+
     body.appendChild(ui.el('div', 'menu-note',
-      'Bind abilities and pocket items to number keys. In the fight: 1-9 to use, ' +
+      'Bind abilities and pocket items to number keys — or to the mouse. In the ' +
+      'fight: 1-9, left click and right click all fire what you put on them, ' +
       'SPACE to evade, Shift to sprint, Ctrl or C to crouch. New moves arrive ' +
       'already bound — rearrange them here if you want them somewhere else.'));
+    /* §27B: the buttons do two different jobs in two different places, and a
+       player who is not told that will think one of them is broken. */
+    if (mouseIds().length) {
+      body.appendChild(ui.el('div', 'menu-note',
+        'The mouse only fires binds in the church. Back in the room it is still ' +
+        'your hands — click to close them, and to take what you are looking at.'));
+    }
     if (notice) body.appendChild(ui.el('div', 'menu-note warn', notice));
 
     /* §21: party members walk the ladder on their OWN level, so the tab has to
@@ -135,20 +215,29 @@ CHLOE.ui.binds = (function () {
       body.appendChild(strip);
     }
 
-    /* --- the 9 keys ---
-       §23: an unlocked key is an unlocked key. The last two are the pocket
+    /* --- the eleven slots: 9 keys, then LMB and RMB (§27B) ---
+       §23: an unlocked key is an unlocked key. Two of them are the pocket
        slots, but they carry no badge, no tint and no separate heading, because
        any slot takes either kind — the pockets exist so that carrying a
-       bandage costs you no ability, not so that two keys become item-only. */
+       bandage costs you no ability, not so that two keys become item-only.
+       §27B: the buttons follow the same rule and are drawn in the same row.
+       They are never locked — you own your mouse from level 1 — and they are
+       labelled, not numbered. */
     var row = ui.el('div', 'bind-slots');
-    for (var i = 0; i < maxSlots; i++) {
-      var unlocked = i < slots.length;
-      var id = unlocked ? slots[i] : null;
+    var i, ids = [];
+    for (i = 0; i < maxSlots; i++) ids.push(i);
+    ids = ids.concat(mouseIds());
+
+    ids.forEach(function (slotId) {
+      var mouse = isMouseSlot(slotId);
+      // a number key past the ladder's grant is locked; a button never is
+      var unlocked = mouse || slotId < slots.length;
+      var id = unlocked ? entryAt(charId, slotId, slots) : null;
       var itemId = itemIdOf(id);
       var a = (id && !itemId) ? ABIL()[id] : null;
-      var d = ui.el('div', 'bind-slot' +
-        (unlocked ? '' : ' locked') + (sel.slot === i ? ' sel' : ''));
-      d.appendChild(ui.el('span', 'key', String(i + 1)));
+      var d = ui.el('div', 'bind-slot' + (mouse ? ' mouse' : '') +
+        (unlocked ? '' : ' locked') + (sameSlot(sel.slot, slotId) ? ' sel' : ''));
+      d.appendChild(ui.el('span', 'key', slotLabel(slotId)));
       if (!unlocked) {
         d.appendChild(ui.el('span', 'icon', '🔒'));
         d.appendChild(ui.el('span', 'nm', 'locked'));
@@ -159,12 +248,17 @@ CHLOE.ui.binds = (function () {
            finding another re-arms it. */
         var idef = ITEMS()[itemId] || {};
         var n = bagCount(itemId);
+        var passive = isPassiveItem(itemId);
         d.classList.add('item');
+        if (passive) d.classList.add('passive');
         if (n <= 0) d.classList.add('out');
         d.appendChild(ui.el('span', 'icon', idef.icon || '🎒'));
         d.appendChild(ui.el('span', 'nm', idef.name || itemId));
         d.appendChild(ui.el('span', 'ct', '×' + n));
-        d.title = (idef.name || itemId) + ' — ' + n + ' carried';
+        d.title = (idef.name || itemId) + ' — ' + n + ' carried' +
+          (passive ? (n > 0 ? ' · armed, spends itself if you fall'
+                            : ' · bound, but you are carrying none')
+                   : '');
       } else if (a) {
         var ic = ui.el('span', 'icon', a.icon || '•');
         ic.style.color = typeColor(a.type);
@@ -173,19 +267,18 @@ CHLOE.ui.binds = (function () {
       } else {
         d.appendChild(ui.el('span', 'icon', '·'));
         d.appendChild(ui.el('span', 'nm', 'empty'));
+        if (mouse) d.title = slotLabel(slotId) + ' — free. In the room it stays your hand.';
       }
       if (unlocked) {
-        (function (idx) {
-          d.addEventListener('click', function () { sel.slot = idx; rerender(body, opts); });
-        })(i);
+        d.addEventListener('click', function () { sel.slot = slotId; rerender(body, opts); });
       }
       row.appendChild(d);
-    }
+    });
     body.appendChild(row);
 
     // --- abilities you can put in the selected key ---
     body.appendChild(ui.el('div', 'bind-head',
-      'Abilities — tap one to bind it to key ' + (sel.slot + 1)));
+      'Abilities — tap one to bind it to ' + slotChip(sel.slot)));
     var grid = ui.el('div', 'bind-grid');
     if (!known.length) {
       grid.appendChild(ui.el('div', 'menu-note', 'Nothing learned yet.'));
@@ -193,14 +286,14 @@ CHLOE.ui.binds = (function () {
     known.forEach(function (id) {
       var a = ABIL()[id];
       if (!a) return;
-      var boundAt = slots.indexOf(id);
-      var card = ui.el('div', 'bind-card' + (boundAt === sel.slot ? ' on' : ''));
+      var at = boundAt(charId, id, slots);
+      var card = ui.el('div', 'bind-card' + (at !== null && sameSlot(at, sel.slot) ? ' on' : ''));
       var head = ui.el('div', 'bind-card-head');
       var ic = ui.el('span', 'icon', a.icon || '•');
       ic.style.color = typeColor(a.type);
       head.appendChild(ic);
       head.appendChild(ui.el('span', 'nm', a.name));
-      if (boundAt >= 0) head.appendChild(ui.el('span', 'at', 'key ' + (boundAt + 1)));
+      if (at !== null) head.appendChild(ui.el('span', 'at', slotChip(at)));
       card.appendChild(head);
       card.appendChild(ui.el('div', 'ds', a.desc || ''));
       var meta = ui.el('div', 'bind-meta');
@@ -219,7 +312,12 @@ CHLOE.ui.binds = (function () {
 
     renderPockets(body, opts, charId, slots);
 
-    var clear = ui.el('button', null, 'Clear key ' + (sel.slot + 1));
+    /* §27A: clearing is the ONE gesture that tells the engine "I do not want
+       this on a slot", and the engine keeps that memory separate from "has
+       this been auto-placed" precisely so it can honour it forever. Say so, so
+       the player knows the difference between this and dropping something else
+       on top (which just moves the old entry to a free slot). */
+    var clear = ui.el('button', null, 'Clear ' + slotChip(sel.slot));
     clear.addEventListener('click', function () {
       put(charId, sel.slot, null);
       rerender(body, opts);
@@ -241,9 +339,9 @@ CHLOE.ui.binds = (function () {
     if (!ids.length) return;
 
     body.appendChild(ui.el('div', 'bind-head',
-      'Pockets — tap one to put it on key ' + (sel.slot + 1)));
+      'Pockets — tap one to put it on ' + slotChip(sel.slot)));
     body.appendChild(ui.el('div', 'menu-note',
-      'Any key takes an item instead of a move. Using one costs no magic or ' +
+      'Any slot takes an item instead of a move. Using one costs no magic or ' +
       'stamina — but it locks every pocket for a moment, and you can be hit ' +
       'while you do it.'));
 
@@ -253,13 +351,14 @@ CHLOE.ui.binds = (function () {
       if (!it) return;
       var entry = itemKey(id);
       var n = bagCount(id);
-      var boundAt = slots.indexOf(entry);
-      var card = ui.el('div', 'bind-card item' +
-        (boundAt === sel.slot ? ' on' : '') + (n <= 0 ? ' out' : ''));
+      var passive = isPassiveItem(id);
+      var at = boundAt(charId, entry, slots);
+      var card = ui.el('div', 'bind-card item' + (passive ? ' passive' : '') +
+        (at !== null && sameSlot(at, sel.slot) ? ' on' : '') + (n <= 0 ? ' out' : ''));
       var head = ui.el('div', 'bind-card-head');
       head.appendChild(ui.el('span', 'icon', it.icon || '🎒'));
       head.appendChild(ui.el('span', 'nm', it.name || id));
-      if (boundAt >= 0) head.appendChild(ui.el('span', 'at', 'key ' + (boundAt + 1)));
+      if (at !== null) head.appendChild(ui.el('span', 'at', slotChip(at)));
       card.appendChild(head);
       card.appendChild(ui.el('div', 'ds', it.desc || ''));
       var meta = ui.el('div', 'bind-meta');
@@ -267,6 +366,17 @@ CHLOE.ui.binds = (function () {
       var eff = it.effect || {};
       if (eff.hp > 0) meta.appendChild(ui.el('span', null, '+' + eff.hp + ' life'));
       if (eff.mp > 0) meta.appendChild(ui.el('span', null, '+' + eff.mp + ' magic'));
+      /* §27C: a passive has no "+N life" to show and no key press to teach, so
+         the card says what it DOES instead. Without this line the absence of a
+         number reads as missing data rather than as the whole point. */
+      if (passive) {
+        meta.appendChild(ui.el('span', 'armed',
+          (at !== null ? 'armed' : 'arm it') + ' · back up at ' + (eff.revivePct || 0) + '% life'));
+        card.appendChild(ui.el('div', 'ds',
+          'Never pressed. Bind it and carry one: the moment a blow would put ' +
+          'you down it spends itself, and you keep the fight — you do not hand ' +
+          'it to the next bandmate.'));
+      }
       card.appendChild(meta);
       card.addEventListener('click', function () {
         put(charId, sel.slot, entry);

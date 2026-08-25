@@ -32,7 +32,7 @@ CHLOE.engine = CHLOE.engine || {};
     if (reason) console.warn('[world3d] disabled: ' + reason);
     W.init = noop; W.start = noop; W.stop = noop;
     W.setEnemyAlive = noop; W.onEngage = noop; W.onHover = noop;
-    W.resetPlayer = noop; W.onPickup = noop;
+    W.resetPlayer = noop; W.onPickup = noop; W.onGiftHover = noop;
     W.resize = noop; W.debug = deadDebug;
   }
 
@@ -337,7 +337,10 @@ CHLOE.engine = CHLOE.engine || {};
     colliders.push({ kind: 'wall_s', minX: -hw - T, maxX: hw + T, minZ: hd, maxZ: hd + T });
   }
 
-  var COLLIDABLE = { vanity: 1, couch: 1, tv: 1, lamp: 1, chair: 1 };
+  // §27D: the giftbox is a solid object standing in the open floor, so it
+  // collides like the furniture does — walking through the shop would read
+  // as a bug long before anyone tried to click it.
+  var COLLIDABLE = { vanity: 1, couch: 1, tv: 1, lamp: 1, chair: 1, giftbox: 1 };
 
   function buildFurniture() {
     var list = data.furniture || [];
@@ -767,6 +770,60 @@ CHLOE.engine = CHLOE.engine || {};
         if (f.kind === 'poster_stage') stageBoard.mesh = mesh;
         break;
 
+      /* §27D. Primitives on purpose — no new asset, and the silhouette has to
+         say "openable" from across the room: body, proud lid, a ribbon
+         crossing it, a bow. The glint sprite is the one the §16 pickups wear,
+         because that is the language this room already uses for "this one you
+         can touch", and it brightens while you look at it (see updateHover):
+         the engine may not draw DOM, so that glow IS the hint until
+         ui/room3d.js — another session's file — renders one. */
+      case 'giftbox':
+        var giftPaper = stdMat({ color: 0x7d1230, roughness: 0.55, metalness: 0.05 });
+        var giftRibbon = stdMat({ color: 0xd9c9a3, roughness: 0.35, metalness: 0.45,
+                                  emissive: 0x6a5a30, emissiveIntensity: 0.35 });
+        var giftBody = new THREE.Mesh(new THREE.BoxGeometry(f.w, f.h * 0.74, f.d), giftPaper);
+        giftBody.position.y = f.h * 0.37;
+        g.add(giftBody);
+        var giftLid = new THREE.Mesh(new THREE.BoxGeometry(f.w * 1.07, f.h * 0.2, f.d * 1.07), giftPaper);
+        giftLid.position.y = f.h * 0.84;
+        g.add(giftLid);
+        var bandX = new THREE.Mesh(new THREE.BoxGeometry(f.w * 0.13, f.h * 0.97, f.d * 1.1), giftRibbon);
+        bandX.position.y = f.h * 0.48; g.add(bandX);
+        var bandZ = new THREE.Mesh(new THREE.BoxGeometry(f.w * 1.1, f.h * 0.97, f.d * 0.13), giftRibbon);
+        bandZ.position.y = f.h * 0.48; g.add(bandZ);
+        var bowGeo = new THREE.BoxGeometry(f.w * 0.34, f.h * 0.1, f.d * 0.14);
+        var bowL = new THREE.Mesh(bowGeo, giftRibbon);
+        bowL.position.set(-f.w * 0.15, f.h * 0.98, 0); bowL.rotation.z = 0.55; g.add(bowL);
+        var bowR = new THREE.Mesh(bowGeo, giftRibbon);
+        bowR.position.set(f.w * 0.15, f.h * 0.98, 0); bowR.rotation.z = -0.55; g.add(bowR);
+        var giftGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: makeGlowTexture(), transparent: true, opacity: 0.3,
+          depthWrite: false, blending: THREE.AdditiveBlending }));
+        giftGlow.scale.set(0.8, 0.8, 1);
+        giftGlow.position.y = f.h * 0.62;
+        g.add(giftGlow);
+        // Aim targets are the real meshes (body + lid): an invisible proxy box
+        // would still be walked by the shadow pass and by any future traverse.
+        gift.group = g; gift.targets = [giftBody, giftLid];
+        gift.glow = giftGlow; gift.ribbonMat = giftRibbon;
+        break;
+
+      /* §27E. A picture frame carrying the record board. Same construction as
+         the §20 round picture (frame box, canvas floated a hair proud of it),
+         so the two read as a matched pair on the wall rather than as two
+         unrelated experiments. Hangs at the data-authored y. */
+      case 'frame_records':
+        var recY = (typeof f.y === 'number') ? f.y : 1.5;
+        var recFrame = new THREE.Mesh(
+          new THREE.BoxGeometry(f.w + 0.1, f.h + 0.1, 0.045),
+          stdMat({ color: 0x4a3a1e, roughness: 0.8, metalness: 0.15 }));
+        recFrame.position.set(0, recY, 0);
+        g.add(recFrame);
+        var recPic = new THREE.Mesh(new THREE.PlaneGeometry(f.w, f.h), recordsMaterial());
+        recPic.position.set(0, recY, 0.026);
+        g.add(recPic);
+        break;
+
       default: // unknown kind (incl. chair fallback) -> plain dark box, still placed
         mesh = new THREE.Mesh(new THREE.BoxGeometry(f.w, f.h, f.d),
           stdMat({ color: 0x221a1e, roughness: 0.95 }));
@@ -827,6 +884,84 @@ CHLOE.engine = CHLOE.engine || {};
     trophyGroup.add(pic);
 
     scene.add(trophyGroup);
+  }
+
+  /* ------------------------------------------- §27D/E giftbox + record board
+     Two props that front two modules written in PARALLEL with this file:
+     ui/shop.js (the counter) and engine/records.js (the top-10 canvas).
+     Neither is allowed to be assumed present. A build without them must still
+     get a box and a framed picture on the wall — inert, but there — because
+     an exception thrown out of buildFurniture takes the whole room down with
+     it, and a missing prop is a feature that silently never shipped (§24's
+     lesson). Both are matched by KIND out of data/room3d.js, never by their
+     position in the furniture list, for the same reason the two posters are.
+
+     The pause/resume of the room on open is NOT this file's business: the
+     overlay drives ui/room3d.js's _pause/_resume itself. world3d must never
+     stop() its own loop here — nothing in this file would start it again, and
+     a stopped room with no resume path is exactly the §22 freeze. */
+  var GIFT_DIST = 3.0;          // crosshair range at which the box is clickable
+  var gift = { group: null, targets: null, glow: null, ribbonMat: null,
+               hovered: false, warned: false };
+  var giftCooldown = 0;
+  var giftHover = null;         // {label, dist} while the box is under the aim
+  var giftHoverCb = null;
+  var recBoard = { mat: null, canvas: null, live: false };
+
+  function openShop() {
+    if (elapsed < giftCooldown) return;    // one open per click, not per frame
+    giftCooldown = elapsed + 0.4;
+    var S = CHLOE.ui && CHLOE.ui.shop;
+    if (!S || typeof S.open !== 'function') {
+      if (!gift.warned) {
+        gift.warned = true;
+        console.warn('[world3d] ui/shop.js not loaded — the giftbox stays shut.');
+      }
+      return;
+    }
+    try { S.open(); } catch (e) {
+      console.warn('[world3d] shop.open() failed: ' + e.message);
+    }
+  }
+
+  // The records canvas, or null on a build without engine/records.js.
+  function recordsCanvas() {
+    var R = CHLOE.engine && CHLOE.engine.records;
+    if (!R || typeof R.board !== 'function') return null;
+    try { return R.board(); } catch (e) {
+      console.warn('[world3d] records.board() failed: ' + e.message);
+      return null;
+    }
+  }
+
+  /* Draw the board into the canvas the material ALREADY holds — same rule as
+     the wall panels: the picture must never blink out between rounds. We own
+     that canvas rather than adopting records.board()'s, so a frame that was
+     hung inert (module absent, or absent at build time) upgrades itself the
+     first time a repaint finds the module, instead of staying dead forever. */
+  function paintRecords() {
+    if (!recBoard.mat || !recBoard.canvas) return;
+    var fresh = recordsCanvas();
+    if (!fresh) return;                    // inert: keep the dark ground
+    var ctx = recBoard.canvas.getContext('2d');
+    ctx.clearRect(0, 0, recBoard.canvas.width, recBoard.canvas.height);
+    ctx.drawImage(fresh, 0, 0, recBoard.canvas.width, recBoard.canvas.height);
+    if (recBoard.mat.map) recBoard.mat.map.needsUpdate = true;
+    recBoard.live = true;
+  }
+
+  function recordsMaterial() {
+    // 512x700 is records.board()'s own size and the posters' portrait shape.
+    var c = document.createElement('canvas');
+    c.width = 512; c.height = 700;
+    var g2 = c.getContext('2d');
+    g2.fillStyle = '#0a0a0c'; g2.fillRect(0, 0, c.width, c.height);
+    recBoard.canvas = c;
+    var tex = new THREE.CanvasTexture(c);
+    if (THREE.sRGBEncoding !== undefined) tex.encoding = THREE.sRGBEncoding;
+    recBoard.mat = new THREE.MeshBasicMaterial({ map: tex });
+    paintRecords();                        // fills it in when records.js is here
+    return recBoard.mat;
   }
 
   function buildLights() {
@@ -1241,6 +1376,7 @@ CHLOE.engine = CHLOE.engine || {};
       if (hovered) fireEngage();       // enemy engage takes priority
       else if (tvHovered) toggleTv();
       else if (stageBoard.hover) stepStage(stageBoard.hover);
+      else if (giftHover) openShop();  // §27D: the box under the crosshair
       return;
     }
     // unlocked: allow direct clicks via raycast from the click point —
@@ -1263,6 +1399,14 @@ CHLOE.engine = CHLOE.engine || {};
       }
       var arrow = boardUnder(raycaster);   // §26 the stage board's arrows
       if (arrow) { stepStage(arrow.which); return; }
+      // §27D: same rule for the giftbox, so the shop opens with the pointer
+      // unlocked too — that is the state you are in the first time you click
+      // anything in this room.
+      if (gift.targets) {
+        gift.group.updateMatrixWorld();
+        var gih = raycaster.intersectObjects(gift.targets, false);
+        if (gih.length && gih[0].distance <= GIFT_DIST) { openShop(); return; }
+      }
     }
     try {
       // modern Chrome returns a promise; swallow rejection (e.g. iframe/test docs)
@@ -1340,27 +1484,45 @@ CHLOE.engine = CHLOE.engine || {};
     vel.x += (tx - vel.x) * k;
     vel.z += (tz - vel.z) * k;
 
-    // axis-separated AABB resolve (slide along surfaces)
-    var i, c;
+    /* Axis-separated AABB resolve (slide along surfaces).
+       TWO subtleties, both exposed for the first time by the §27 giftbox — the
+       first collidable prop you can walk into head-on:
+       (1) EPS. The X pass parks the body exactly against a face, and floating
+           point leaves `pos.x - RADIUS` a hair UNDER maxX, so the Z pass still
+           read the box as overlapping and re-resolved a contact already resolved.
+       (2) Resolve by SMALLEST PENETRATION, never by which half the centre is in.
+           Walking due west gives vel.z ~ 0, so the old `else` compared centres and
+           could pick the FAR face — a 0.72m sideways snap, and on a corner
+           approach it threw the body clean out of the room (x = 5.35). Nearest
+           face out is the only choice that cannot teleport. */
+    var i, c, EPS = 1e-4, penLo, penHi;
     var nx = pos.x + vel.x * dt;
     for (i = 0; i < colliders.length; i++) {
       c = colliders[i];
-      if (nx + RADIUS > c.minX && nx - RADIUS < c.maxX &&
-          pos.z + RADIUS > c.minZ && pos.z - RADIUS < c.maxZ) {
+      if (nx + RADIUS > c.minX + EPS && nx - RADIUS < c.maxX - EPS &&
+          pos.z + RADIUS > c.minZ + EPS && pos.z - RADIUS < c.maxZ - EPS) {
         if (vel.x > 0) nx = c.minX - RADIUS;
         else if (vel.x < 0) nx = c.maxX + RADIUS;
-        else nx = (nx < (c.minX + c.maxX) / 2) ? c.minX - RADIUS : c.maxX + RADIUS;
+        else {
+          penLo = (nx + RADIUS) - c.minX;
+          penHi = c.maxX - (nx - RADIUS);
+          nx = (penLo < penHi) ? c.minX - RADIUS : c.maxX + RADIUS;
+        }
       }
     }
     pos.x = nx;
     var nz = pos.z + vel.z * dt;
     for (i = 0; i < colliders.length; i++) {
       c = colliders[i];
-      if (pos.x + RADIUS > c.minX && pos.x - RADIUS < c.maxX &&
-          nz + RADIUS > c.minZ && nz - RADIUS < c.maxZ) {
+      if (pos.x + RADIUS > c.minX + EPS && pos.x - RADIUS < c.maxX - EPS &&
+          nz + RADIUS > c.minZ + EPS && nz - RADIUS < c.maxZ - EPS) {
         if (vel.z > 0) nz = c.minZ - RADIUS;
         else if (vel.z < 0) nz = c.maxZ + RADIUS;
-        else nz = (nz < (c.minZ + c.maxZ) / 2) ? c.minZ - RADIUS : c.maxZ + RADIUS;
+        else {
+          penLo = (nz + RADIUS) - c.minZ;
+          penHi = c.maxZ - (nz - RADIUS);
+          nz = (penLo < penHi) ? c.minZ - RADIUS : c.maxZ + RADIUS;
+        }
       }
     }
     pos.z = nz;
@@ -1474,6 +1636,34 @@ CHLOE.engine = CHLOE.engine || {};
       tv.screenMesh.updateMatrixWorld();
       var th = raycaster.intersectObject(tv.screenMesh, false);
       tvHovered = !!(th.length && th[0].distance <= TV_DIST);
+    }
+    /* §27D giftbox hover — the enemy and the TV keep priority, so the box can
+       never swallow a click meant to start a fight. Kept OUT of hoverCb's
+       (enemy, dist, tv) signature on purpose: ui/room3d.js belongs to another
+       session and must not have its callback shape changed under it. It reads
+       debug().giftHover instead, which is the same {label, dist} shape as
+       pickupHover, so its hint line is one branch when it wants one. */
+    var wasGift = giftHover;
+    giftHover = null;
+    if (!hovered && !tvHovered && gift.targets) {
+      gift.group.updateMatrixWorld();
+      var gh = raycaster.intersectObjects(gift.targets, false);
+      if (gh.length && gh[0].distance <= GIFT_DIST) {
+        giftHover = { label: 'the giftbox', dist: gh[0].distance };
+      }
+    }
+    gift.hovered = !!giftHover;
+    if (gift.glow) {
+      // idle breath vs. a hard pulse while aimed at — the in-world hint
+      gift.glow.material.opacity = gift.hovered
+        ? 0.6 + 0.16 * Math.sin(elapsed * 7)
+        : 0.26 + 0.1 * Math.sin(elapsed * 2.2);
+      var gs = gift.hovered ? 1.05 : 0.8;
+      gift.glow.scale.set(gs, gs, 1);
+      if (gift.ribbonMat) gift.ribbonMat.emissiveIntensity = gift.hovered ? 1.1 : 0.35;
+    }
+    if (giftHoverCb && !!giftHover !== !!wasGift) {
+      try { giftHoverCb(!!giftHover, giftHover ? giftHover.dist : Infinity); } catch (e) {}
     }
     if (hoverCb && (hovered !== was || tvHovered !== wasTv ||
         (hovered && Math.abs(enemyDist - wasDist) > 0.05))) {
@@ -1649,7 +1839,17 @@ CHLOE.engine = CHLOE.engine || {};
   W.refreshPanels = function () {
     if (A_refreshPanels) A_refreshPanels();
     if (inited) buildTrophies();
+    // §27E: the record board hangs off the SAME hook — a run may have ended
+    // and put a name on the wall while you were out, and the frame is only
+    // ever honest if it repaints exactly when the other panels do.
+    if (inited) paintRecords();
   };
+
+  /* §27D optional hint hook for the UI: cb(giftHovered, dist). Separate from
+     onHover() because that callback's (enemy, dist, tv) signature belongs to
+     ui/room3d.js, which another session owns — a fourth argument bolted onto
+     it would be a silent contract change in someone else's file. */
+  W.onGiftHover = function (cb) { giftHoverCb = typeof cb === 'function' ? cb : null; };
   W.tvChapter = function () { return panels.tvChapter; };
 
   W.debug = function () {
@@ -1693,6 +1893,14 @@ CHLOE.engine = CHLOE.engine || {};
       crouch: !!(keys.ControlLeft || keys.ControlRight || keys.KeyC),
       eye: eyeH,
       pickupHover: pickupHover,
+      /* §27D/E verification hooks. giftHover mirrors pickupHover's shape so a
+         hint line can consume either; recordBoard says whether the frame is
+         showing a real board ('live') or is still the inert dark panel
+         ('inert', i.e. engine/records.js was not in the build), and null when
+         the prop is not in data/room3d.js at all. */
+      giftHover: giftHover,
+      shopReady: !!(CHLOE.ui && CHLOE.ui.shop && typeof CHLOE.ui.shop.open === 'function'),
+      recordBoard: recBoard.mat ? (recBoard.live ? 'live' : 'inert') : null,
       pickupsLeft: pickups.filter(function (p) { return !p.taken; }).length,
       hands: { l: hands.closeL, r: hands.closeR, grabbing: grab ? grab.hand : null },
       modelsLoaded: ml,

@@ -26,6 +26,15 @@ CHLOE.game = (function(){
      level-1 solo Chloe with nothing carried over. */
   function startNew(){
     CHLOE.engine.party.newGame();
+    /* §27E: the run clock starts HERE, next to newGame(), because this is the
+       one function both entry points go through — the title screen on load and
+       "Begin again" on the defeat panel. engine/records.js falls back to
+       time-since-page-load when nobody calls start(), which reads correctly for
+       the first run of a page and silently bills the second run for the first
+       one's minutes; this is the line that stops that. Guarded because a build
+       without engine/records.js must still start a run. */
+    var rec = CHLOE.engine.records;
+    if (rec && typeof rec.start === 'function') { rec.start(); }
 
     if (room3dAvailable()) { enterRoom3d(); return; }
 

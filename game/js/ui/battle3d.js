@@ -119,6 +119,21 @@ CHLOE.ui.battle3d = (function () {
     v.count = n;
     v.cdPct = (s && s.cdPct > 0) ? s.cdPct : cd.pct;
     v.cdLeft = (s && s.cdLeft > 0) ? s.cdLeft : cd.left;
+    /* §27C: a passive is ARMED, not pressable — the revive potion has no
+       cooldown dial and lighting it up like a bandage would invite the one
+       press that must never happen. The engine decides which it is (it owns
+       the item rule); we only ask, and fall back to asking combat3 directly if
+       an older snapshot has no `passive` field. */
+    v.passive = (s && typeof s.passive === 'boolean')
+      ? s.passive
+      : !!(C3 && C3.passiveItem && C3.passiveItem(id));
+    if (v.passive) {
+      v.cdPct = 0; v.cdLeft = 0;
+      v.armed = n > 0;
+      v.ready = false;
+      v.reason = (s && s.reason) || (n > 0 ? 'Armed — spends itself if you fall.' : 'None left.');
+      return v;
+    }
     /* Dim on either half of the rule: nothing left to drink, or the shared
        lockout is still running. An engine that says `ready:false` for a reason
        of its own (mid-use lock) is believed; one that says nothing is not
@@ -127,13 +142,39 @@ CHLOE.ui.battle3d = (function () {
     v.reason = (s && s.reason) || (n <= 0 ? 'None left.' : (v.cdPct > 0 ? 'Still fumbling.' : ''));
     return v;
   }
+  /* §27B: the eleven slots the player actually has — the nine number keys, then
+     LMB and RMB.
+
+     `slot` is what gets PRESSED and it is deliberately not the array index.
+     combat3 addresses the buttons by the strings 'mouseL'/'mouseR' precisely so
+     a stray 9 or 10 fires nothing instead of firing the wrong ability, and the
+     moment this list is drawn as one strip the index and the slot stop being
+     the same number. Every call site below reaches for `v.slot`.
+
+     The buttons ride on the END of the strip, never inside the numbers, so the
+     nine keys keep the positions the player's hand already knows. */
   function slotViews(snap) {
-    return (snap && snap.slots ? snap.slots : []).map(slotView);
+    var keys = (snap && snap.slots ? snap.slots : []).map(slotView);
+    keys.forEach(function (v, i) { v.slot = i; });
+    var mice = (snap && snap.mouseSlots ? snap.mouseSlots : []).map(function (s, i) {
+      /* -1, not i: slotView's last-resort item lookup reads party.state.binds
+         BY INDEX, and a button handed 0 or 1 would inherit whatever is on key
+         1 or key 2. A button is never in that array, so it must never index
+         into it. */
+      var v = slotView(s, -1);
+      v.slot = (s && s.slot) || (i === 0 ? 'mouseL' : 'mouseR');
+      v.key = (s && s.key) || (v.slot === 'mouseR' ? 'RMB' : 'LMB');
+      v.mouse = true;
+      return v;
+    });
+    return keys.concat(mice);
   }
   /* What the hotbar was BUILT for. A pocket key appearing (or an item bind
      changing) has to rebuild the DOM; a count ticking down must not. */
   function hotbarSig(views) {
-    return views.map(function (v) { return v.kind + ':' + (v.id || '-'); }).join('|');
+    // the slot id is part of the shape: binding an ability to RMB changes the
+    // strip even when the nine keys are untouched
+    return views.map(function (v) { return v.slot + '/' + v.kind + ':' + (v.id || '-'); }).join('|');
   }
 
   /* ---------- screen ---------- */
@@ -246,10 +287,10 @@ CHLOE.ui.battle3d = (function () {
     slotEls = [];
     var views = slotViews(snap);
     builtSig = hotbarSig(views);
-    views.forEach(function (v, i) {
-      if (v.kind === 'item') { els.hotbar.appendChild(buildItemSlot(v, i)); return; }
+    views.forEach(function (v) {
+      if (v.kind === 'item') { els.hotbar.appendChild(buildItemSlot(v)); return; }
       var s = v.raw || {};
-      var d = ui.el('div', 'b3d-slot' + (s.id ? '' : ' empty'));
+      var d = ui.el('div', 'b3d-slot' + (s.id ? '' : ' empty') + (v.mouse ? ' mouse' : ''));
       d.appendChild(ui.el('span', 'key', String(v.key)));
       if (s.id) {
         var ic = ui.el('span', 'icon', s.icon || '•');
@@ -271,7 +312,7 @@ CHLOE.ui.battle3d = (function () {
       } else {
         d.appendChild(ui.el('span', 'nm', '—'));
       }
-      d.addEventListener('click', function () { fire(i); });
+      (function (slot) { d.addEventListener('click', function () { fire(slot); }); })(v.slot);
       els.hotbar.appendChild(d);
       slotEls.push(d);
     });
@@ -283,8 +324,9 @@ CHLOE.ui.battle3d = (function () {
      must never fight for the same strip. The slot keeps the cooldown sweep
      because the shared lockout is exactly the thing that stops you chugging
      three bandages in a second, and it has to be visible while it runs. */
-  function buildItemSlot(v, i) {
-    var d = ui.el('div', 'b3d-slot item');
+  function buildItemSlot(v) {
+    var d = ui.el('div', 'b3d-slot item' + (v.mouse ? ' mouse' : '') +
+      (v.passive ? ' passive' : ''));
     d.appendChild(ui.el('span', 'key', String(v.key)));
     d.appendChild(ui.el('span', 'icon', v.icon));
     d.appendChild(ui.el('span', 'nm', v.name));
@@ -295,7 +337,7 @@ CHLOE.ui.battle3d = (function () {
     var cd = ui.el('span', 'cd', '');
     d.appendChild(cd);
     d._count = cnt; d._sweep = sweep; d._cd = cd; d._item = v.id;
-    d.addEventListener('click', function () { fire(i); });
+    (function (slot) { d.addEventListener('click', function () { fire(slot); }); })(v.slot);
     slotEls.push(d);
     paintItemSlot(d, v);
     return d;
@@ -310,6 +352,22 @@ CHLOE.ui.battle3d = (function () {
     if (d._count) d._count.textContent = '×' + v.count;
     if (d._sweep) d._sweep.style.height = Math.round(v.cdPct * 100) + '%';
     if (d._cd) d._cd.textContent = v.cdLeft > 0.05 ? v.cdLeft.toFixed(1) : '';
+    /* §27C: a passive reads ARMED, never READY. `ready` is the class that says
+       "press this", so a potion must never wear it; `armed` is its own light
+       and it is the whole difference between a key you push and a key that
+       pushes itself. `dim` still tracks an empty pocket, because an unarmed
+       potion IS spent — it just has nothing to say about cooldowns. */
+    if (v.passive) {
+      d.classList.add('passive');
+      d.classList.remove('ready', 'cooling');
+      d.classList.toggle('armed', !!v.armed);
+      d.classList.toggle('out', v.count <= 0);
+      d.classList.toggle('dim', !v.armed);
+      d.title = v.name + ' — ' + v.count + ' carried · ' +
+                (v.armed ? 'ARMED: it spends itself if you fall.' : 'None left.') +
+                (v.desc ? '\n' + v.desc : '');
+      return;
+    }
     d.classList.toggle('ready', !!v.ready);
     d.classList.toggle('cooling', v.cdPct > 0);
     d.classList.toggle('out', v.count <= 0);
@@ -524,13 +582,36 @@ CHLOE.ui.battle3d = (function () {
     els.hurt.classList.add('on');
   }
 
-  /* ---------- actions ---------- */
-  function fire(slotIndex) {
+  /* ---------- actions ----------
+     §27B: `slot` is a key index 0-8 OR 'mouseL'/'mouseR'. It is handed straight
+     to combat3, which is the only thing that knows how to resolve either — the
+     one rule being that we never turn a button into a number on the way. */
+  function viewOf(snapNow, slot) {
+    if (!snapNow) return null;
+    var all = slotViews(snapNow);
+    for (var i = 0; i < all.length; i++) if (all[i].slot === slot) return all[i];
+    return null;
+  }
+  function fire(slot) {
     if (!active || C3.isOver()) return;
     var snapNow = C3.snapshot();
-    var view = snapNow ? slotView(snapNow.slots[slotIndex], slotIndex) : null;
-    var r = C3.press(slotIndex);
+    var view = viewOf(snapNow, slot);
+    /* §27C: a passive is never pressed. Refused here as well as in the engine
+       so the fumbled key reads as an explanation instead of a failure — and so
+       the click never even reaches the bag. */
+    if (view && view.passive) {
+      log(view.name + ' is armed — it drinks itself if you fall.');
+      return;
+    }
+    var r = C3.press(slot);
     if (!r.ok) { log(r.reason || 'Not ready.'); return; }
+    fireResult(r, view);
+  }
+
+  /* Everything that happens AFTER a successful press, split out so the mouse
+     path (§27B) plays the identical animation and log instead of a second,
+     drifting copy of it. */
+  function fireResult(r, view) {
     /* §23: a pocket key does not cast. An item press comes back with the same
        {ok, reason} shape but no `ability`, and reaching for a.hitAtMs on it
        would throw mid-fight — so the branch is decided by what the RESULT
@@ -933,6 +1014,19 @@ CHLOE.ui.battle3d = (function () {
         flashHurt();
         log(pattern.name + ' lands: ' + out.dmg + '.' +
             (windows > 1 ? '  (' + landed + '/' + windows + ')' : ''));
+        /* §27C: that blow killed you and a bound potion spent itself instead.
+           It gets its own banner rather than a line in the log, because the
+           player has to know INSTANTLY that they are still alive and still
+           the leader — the alternative reading of a full-screen hurt flash at
+           zero life is "the run is over", and they will stop playing. Read
+           from the takeHit return, which is the only frame it is non-null. */
+        if (out.revived) {
+          prompt('ADRENALINE', 'banner', 1600);
+          splash('+' + out.revived.hp, 'evade');
+          log(out.revived.name + ' drinks itself — back up at ' + out.revived.hp +
+              ' life.  (' + out.revived.count + ' left)');
+          refresh();                       // the potion slot's count, this frame
+        }
         // §19: leader fell but someone else is still standing — take over
         if (out.leaderSwap) {
           var nm = (CHLOE.data.characters[out.leaderSwap] || {}).name || out.leaderSwap;
@@ -1147,6 +1241,7 @@ CHLOE.ui.battle3d = (function () {
   }
 
   var keyHandler = null;
+  var mouseHandler = null, ctxHandler = null;
   function wireKeys() {
     if (keyHandler) return;
     keyHandler = function (e) {
@@ -1156,9 +1251,49 @@ CHLOE.ui.battle3d = (function () {
       if (m) { e.preventDefault(); fire(parseInt(m[1], 10) - 1); }
     };
     window.addEventListener('keydown', keyHandler);
+
+    /* §27B: LMB and RMB are hotbar slots — IN THE ARENA ONLY.
+       That restriction is not enforced here by checking a screen name; it is
+       enforced by WHERE this listener lives. It is added when a fight begins
+       and removed in unwireKeys() when it ends, so in the room these two
+       buttons are never anything but §16's hands and grab — the room's own
+       handlers in engine/world3d.js are untouched and never consult combat3.
+
+       `handled` from combat3.mousePress() is the whole protocol: false means
+       this click was not a bind and the arena's own click (pointer lock,
+       click-to-engage) must run exactly as before; true means the button fired
+       its slot — refusals included — and nothing else may also happen on it.
+       That is what stops a bound button from ALSO grabbing or engaging.
+
+       Bound to the window in the capture phase so it beats the canvas's own
+       click handler, and `handled` decides whether that handler ever sees it. */
+    mouseHandler = function (e) {
+      if (!active || ui.current() !== 'battle3d') return;
+      if (!C3.mousePress) return;                    // older engine: keys only
+      /* Not while the cursor is loose. An unlocked arena click is the player
+         asking for the mouse back — engine/arena3d.js turns it into a
+         requestPointerLock — and firing a spell on it would spend a cooldown
+         on the click that only got them moving again. Same rule the room uses
+         for grabs, for the same reason. */
+      var dbg = a3d && a3d.debug ? a3d.debug() : null;
+      if (dbg && dbg.locked === false) return;
+      var res = C3.mousePress(e.button);
+      if (!res || !res.handled) return;              // not a bind — let it through
+      e.preventDefault();
+      e.stopPropagation();
+      var r = res.result || {};
+      if (!r.ok) { log(r.reason || 'Not ready.'); return; }
+      fireResult(r, viewOf(C3.snapshot(), res.slot));
+    };
+    // RMB opens the context menu over the canvas otherwise, which eats the fight
+    ctxHandler = function (e) { if (active && ui.current() === 'battle3d') e.preventDefault(); };
+    window.addEventListener('mousedown', mouseHandler, true);
+    window.addEventListener('contextmenu', ctxHandler, true);
   }
   function unwireKeys() {
     if (keyHandler) { window.removeEventListener('keydown', keyHandler); keyHandler = null; }
+    if (mouseHandler) { window.removeEventListener('mousedown', mouseHandler, true); mouseHandler = null; }
+    if (ctxHandler) { window.removeEventListener('contextmenu', ctxHandler, true); ctxHandler = null; }
   }
 
   function finish() {
@@ -1229,7 +1364,56 @@ CHLOE.ui.battle3d = (function () {
     root().appendChild(veil);
   }
 
+  /* §27E: the ONLY place a run can end, so the only place a record can be
+     claimed. The clock is frozen the instant the panel is built — before the
+     player reads a word of it — so the seconds they spend deciding whether to
+     type a name are not billed to the run. The prompt itself is deferred to
+     the "Begin again" click for one reason: the defeat card is the story
+     beat, and stacking a name box over it turns the end of a run into a form.
+
+     `runStats.round` is the round they were ON when they fell, which is the
+     round REACHED — combat3 only bumps it after a round is cleared.
+
+     Nothing here reads or restores run state; the record is written, then
+     end('defeat') runs exactly as it always did and scene.onBattleEnd()
+     starts a brand-new run (§15 permadeath is untouched by any of this). */
+  function records() { return CHLOE.engine.records; }
+  function runRound() {
+    return Math.max(1, (party.state.runStats && party.state.runStats.round) || 1);
+  }
+  /* Freeze now, ask later. Returns the frozen ms so the panel can show it. */
+  function freezeRun() {
+    var r = records();
+    return (r && typeof r.stop === 'function') ? r.stop() : 0;
+  }
+  /* Claim the record if this run earned one, THEN carry on. `after` always
+     runs — skipped name, rejected name, missing module, thrown prompt — because
+     it is the thing that starts the next run, and a player must never be
+     stranded on a dead panel by a board that failed to open. */
+  function claimRecord(round, timeMs, after) {
+    var r = records();
+    if (!r || typeof r.isRecord !== 'function' || !r.isRecord(round)) { after(); return; }
+    var done = false;
+    function once() { if (done) { return; } done = true; after(); }
+    try {
+      r.prompt(round, timeMs, function () {
+        /* Repaint the wall so the board in the room already carries the new
+           row when the fresh run walks in. Guarded: world3d owns the frame and
+           may not be up yet on this path. */
+        try {
+          var w = CHLOE.engine.world3d;
+          if (w && typeof w.refreshPanels === 'function') { w.refreshPanels(); }
+        } catch (e) { /* the room will repaint on entry anyway */ }
+        once();
+      });
+    } catch (e) {
+      console.warn('CHLOE battle3d: the record prompt failed to open — ' + e.message);
+      once();
+    }
+  }
+
   function showDefeat() {
+    var runMs = freezeRun();
     var veil = ui.el('div', 'battle-panel-veil');
     var card = ui.el('div', 'result-card defeat');
     card.appendChild(ui.el('h2', null, 'The Night Wins'));
@@ -1242,11 +1426,19 @@ CHLOE.ui.battle3d = (function () {
     dl.appendChild(ui.el('div', 'big', 'Run over — Lv ' + topLv + ' · ◆ ' + (s.shards || 0) +
       ' · ' + kills + (kills === 1 ? ' fight won' : ' fights won')));
     dl.appendChild(ui.el('div', null, 'Every night starts from nothing.'));
+    var round = runRound();
+    var rec = records();
+    if (rec && typeof rec.isRecord === 'function' && rec.isRecord(round)) {
+      dl.appendChild(ui.el('div', 'lvl', '🏆 Round ' + round + ' in ' + rec.fmtTime(runMs) +
+        ' — the best this browser has seen. Name it on the way out.'));
+    }
     card.appendChild(dl);
     var b = ui.el('button', null, 'Begin again');
     b.addEventListener('click', function () {
+      if (b.disabled) { return; }
+      b.disabled = true;                     // one run-end, one record
       if (veil.parentNode) veil.parentNode.removeChild(veil);
-      end('defeat');
+      claimRecord(round, runMs, function () { end('defeat'); });
     });
     card.appendChild(b);
     veil.appendChild(card);
@@ -1285,17 +1477,34 @@ CHLOE.ui.battle3d = (function () {
     /* §23: what the hotbar believes it is showing, so "the pocket key shows a
        count and dims when it runs out" is a measurement. Mirrors the DOM, not
        the engine: it reports what was RENDERED. */
+    /* §27B/C added `slot`, `mouse`, `passive`/`armed` — the two mouse buttons
+       ride on the end of this list exactly as they do on the strip, so a test
+       can prove they were LABELLED (key 'LMB'/'RMB', never a number) and that
+       an armed potion never wears the pressable light. */
     _slots: function () {
       var snap = C3 && C3.snapshot ? C3.snapshot() : null;
       return slotViews(snap).map(function (v, i) {
         var d = slotEls[i];
         return {
-          key: v.key, kind: v.kind, id: v.id, count: v.count, ready: v.ready,
+          slot: v.slot, key: v.key, kind: v.kind, id: v.id, count: v.count,
+          ready: v.ready, mouse: !!v.mouse, passive: !!v.passive, armed: !!v.armed,
           badge: (d && d._count) ? d._count.textContent : null,
+          cls: d ? d.className : null,
           dim: !!(d && d.classList.contains('dim')),
           out: !!(d && d.classList.contains('out'))
         };
       });
+    },
+    /* §27B: fire a slot the way an input event would, so "LMB casts in the
+       arena" is driven through the same code a click reaches. */
+    _press: fire,
+    _mouse: function (button) {
+      if (!C3 || !C3.mousePress) return { handled: false };
+      var res = C3.mousePress(button);
+      if (res && res.handled && res.result && res.result.ok) {
+        fireResult(res.result, viewOf(C3.snapshot(), res.slot));
+      }
+      return res;
     },
     /* §25: the wave's two halves, exported for the same reason _hits is — the
        only route to them is resolveStrike, which runs off rAF and paints. Both
