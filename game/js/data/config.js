@@ -45,11 +45,21 @@ CHLOE.data.config = {
      keyCap arithmetic in data/skilltree.js, which subtracts pocketSlots from
      it), and the mouse was never one of them. They are addressed by id and
      live outside the numeric array entirely, so the cap logic is untouched. */
-  mouseSlots: ['mouseL', 'mouseR'],
+  /* §31 put the WHEEL in here too, and the name `mouseSlots` now covers the
+     whole mouse rather than its buttons. They belong in one list because the
+     engine has exactly one question — isMouseSlot() — separating "addressed
+     by id" from "indexed as a number key", and a wheel direction is on the
+     id side of that line for the same reason a button is: it has no number,
+     it is not granted by the ladder, and you own it from level 1.
+     Order is HUD draw order, so the wheel sits after the buttons. */
+  mouseSlots: ['mouseL', 'mouseR', 'wheelUp', 'wheelDown'],
 
-  /* What the buttons are labelled on the hotbar and the bind screen. Never
-     "10" and "11" — a number there would be a lie about how you press it. */
-  mouseSlotLabels: { mouseL: 'LMB', mouseR: 'RMB' },
+  /* What they are labelled on the hotbar and the bind screen. Never "10" and
+     "11" — a number there would be a lie about how you press it. The wheel
+     labels are glyphs for the same reason: "WHEEL UP" does not fit the tile
+     (.b3d-slot.mouse .key is sized for three characters) and an arrow is
+     what the hand already understands. */
+  mouseSlotLabels: { mouseL: 'LMB', mouseR: 'RMB', wheelUp: '⇑', wheelDown: '⇓' },
 
   /* ---- Passive revive (spec sec 27C) -------------------------------------
      The breath you get after a revive potion picks you up. Deliberately the

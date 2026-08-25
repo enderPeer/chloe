@@ -24,8 +24,9 @@ CHLOE.engine.party = (function(){
     loadouts: {},  // charId -> { phaseId: [<=5 moveIds] }  (Combat v2)
     binds: {},     // charId -> [entry|null] per number key  (Combat v3 §17;
                    //  an entry is an ability id or 'item:<id>' — §23 pockets)
-    mouseBinds: {},   // charId -> {mouseL:entry|null, mouseR:entry|null} (§27B —
-                      //  addressed by id, never by index; see data/config.js)
+    mouseBinds: {},   // charId -> {<mouseSlotId>: entry|null} (§27B, §31 — the
+                      //  whole mouse: buttons AND wheel, addressed by id and
+                      //  never by index; the id list is data/config.js)
     autoBound: {},    // charId -> entries auto-bind has PLACED at least once (§21/§23)
     bindsCleared: {}, // charId -> entries the PLAYER emptied off a key (§27A)
     pocketAt: {},  // charId -> {'item:<id>': slot} auto-bind lent it (§23)
@@ -139,7 +140,77 @@ CHLOE.engine.party = (function(){
     if (CHLOE.engine.inventory) {
       CHLOE.engine.inventory.add('bandage', 2);
       CHLOE.engine.inventory.add('energy_drink', 1);
+      /* §31: one bottle of stamina to open with, the same shape as the two
+         above — a taste of the pool so the shop's version means something
+         when you first see it on the giftbox shelf. */
+      CHLOE.engine.inventory.add('smelling_salts', 1);
     }
+    seedMouseBinds(state.activeId);
+  }
+
+  /* ---------- §31: the opening hotbar on the mouse ----------
+     WHY THIS EXISTS AT ALL. combat3's auto-bind deliberately refuses to put
+     anything on a mouse slot — its comment says a button already has a job in
+     the room (§16 hands and grab), so the engine may offer a key it granted
+     you and must not quietly take a button you use for something else. That
+     rule is still right for a REWARD arriving mid-run. It is the wrong rule
+     for the layout a run OPENS with, which is a decision the game gets to
+     make once, before the player has formed any habit to override.
+
+     So this is a SEED, not an auto-bind: it runs exactly once per run, from
+     newGame, when every bind store is already empty (resetBinds ran at the
+     top). It never re-places anything, which is what keeps it clear of the
+     §27A trap — a player who clears the wheel mid-fight has cleared it for
+     the rest of the run, and nothing here argues.
+
+     WHAT IT SEEDS, and why each one:
+       mouseL    the fist. You always have it (row 1) and it is the one
+                 attack that costs almost nothing, so the button you press
+                 by reflex should be the swing you can always afford.
+       wheelUp   the bandage, wheelDown the drink. Up for life and down for
+                 magic is arbitrary the way W-for-forward is arbitrary: what
+                 matters is that it never changes, and that both are one
+                 flick away with the hand already on the mouse.
+     mouseR is NOT seeded here yet — it wants the 9mm, which arrives with
+     §29. Seeding an ability the ability table does not contain would be
+     stripped by binds()' self-heal on the first read, so the gun's seed
+     lands in the same commit that puts it on the ladder.
+
+     Feature-detected against the live tables rather than assumed: an entry
+     naming something that does not exist is exactly what the self-heal
+     deletes, and a seed that silently produces nothing is worse than one
+     that never ran. */
+  var OPENING_MOUSE = [
+    { slot: 'mouseL',    entry: 'punch',              kind: 'ability' },
+    { slot: 'wheelUp',   entry: 'item:bandage',       kind: 'item' },
+    { slot: 'wheelDown', entry: 'item:energy_drink',  kind: 'item' }
+  ];
+
+  function seedExists(row) {
+    if (row.kind === 'ability') {
+      return !!((CHLOE.data.abilities || {})[row.entry]);
+    }
+    var id = String(row.entry).slice(5);   // 'item:' prefix
+    return !!((CHLOE.data.items || {})[id]);
+  }
+
+  function seedMouseBinds(charId) {
+    if (!charId) return false;
+    var cfg = (CHLOE.data.config || {});
+    var known = cfg.mouseSlots || [];
+    if (!state.mouseBinds || typeof state.mouseBinds !== 'object') state.mouseBinds = {};
+    var map = state.mouseBinds[charId] || (state.mouseBinds[charId] = {});
+    var placed = 0;
+    for (var i = 0; i < OPENING_MOUSE.length; i++) {
+      var row = OPENING_MOUSE[i];
+      // a slot the build does not declare, or an entry it cannot resolve
+      if (known.indexOf(row.slot) === -1) continue;
+      if (!seedExists(row)) continue;
+      if (map[row.slot]) continue;           // never overwrite; seeds do not argue
+      map[row.slot] = row.entry;
+      placed++;
+    }
+    return placed > 0;
   }
 
   /* ---------- membership ---------- */
