@@ -591,3 +591,18 @@ Row 4 currently grants `ally:'ash'`. A row may carry several fields, so **add `a
 
 ### Verification
 Prove: a dodged swing leaves HP unchanged (all five patterns, both the geometric miss and the i-frame path); the wave throws knights sideways, breaks their wind-up, respects both stages' containment, and genuinely opens a walkable lane when cornered against a wall/rim; the hotbar never exceeds 9 keys.
+
+## 26. The night opens in the Ring, and the board becomes a picker (supersedes §24's stage ORDER, extends §24 stages and §19 displays)
+
+### The run starts in the Ring
+§24 shipped the cycle as `['church','ring']`, so every run opened on the hardest floor to read: pillars, a baked navgrid, a knight who can break line of sight on his first approach. **The order is now `['ring','church']`.** A lit blank circle with nothing to hide behind is where the fight is legible — where you learn a wind-up, a dodge and a lane — and the church is the complication you walk into on round 2, not the thing that has to teach you. The cycle is otherwise unchanged and still deterministic: round 1 Ring, round 2 church, round 3 Ring.
+
+### The board stopped being a notice
+The south poster (§24) announced where the next fight happened and you took what you were given. It now **picks**: two arrows, `◀ THE RING ▶`, painted on the sheet either side of the stage name, clicked in-room like the TV. The floor between the arrows is the floor the next fight uses.
+- **A pick sticks until it is changed.** You set the stage, it stays set; the round cycle only decides while nobody has. The board says which of the two is talking — `YOUR PICK · ◀ ▶ TO CHANGE THE FLOOR` against `◀ ▶ CLICK TO CHOOSE THE FLOOR` — because a player who chose the church on round 1 must not spend round 5 blaming the round counter.
+- **One question, one answer.** The pick lives in `CHLOE.data.stagePick` (`chosen() / choose(id) / peek(dir, round) / cycle(dir, round) / clear()`) and `forRound(n)` returns it when set, falling back to the pure `cycleForRound(n)`. `forRound` is the single question the room's board (`world3d.nextStagePlan`) and the fight (`ui/battle3d.resolveStage`) already ask, so the override reaches both and **cannot** drift into a board promising a floor you do not land on. A pick naming a stage that no longer exists falls back to the cycle rather than freezing the run.
+- **The picture and the hit box are the same numbers.** `displays.js` owns `STAGE_ARROWS` (normalised 0..1 rects) because `displays.js` paints the arrows, and exports `stageArrows()`; the room hit-tests the poster's own UV against that table. Nothing else may hard-code an arrow position.
+- **Reach and feedback.** `BOARD_DIST` 2.5m, the TV's reach and for the TV's reason — a wall panel you can press from across the room is one you press by accident while turning around. The crosshair hint names the floor the arrow would hand you (`◀ THE CHURCH`), never a bare "click"; the enemy and the TV keep priority over the board, the board outranks a floor pickup, and pressing an arrow must not also close a hand on a grab. A click repaints the board in the same breath — the sheet is the only feedback the press has.
+
+### Verification hooks
+`world3d.debug()` gains `stageArrow: {which:'left'|'right', id, name} | null` — the arrow under the crosshair and the floor it would pick. A test must prove: round 1 resolves to the Ring with nobody touching the board; the painted-left arrow is the on-screen left arrow (UV mapping, not a guess); the middle of the board is not clickable; a click changes both the board canvas and what `stages.forRound(round)` answers; and the fight lands on the picked floor, not the cycled one.

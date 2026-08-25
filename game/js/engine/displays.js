@@ -16,7 +16,20 @@ CHLOE.engine.displays = (function () {
   var BG = '#0d0a0c', RED = '#e5173f', TXT = '#f2eef0', DIM = '#9a939c';
   // amber: the stage board's accent, kept off the mirror's blue and the
   // poster's red so a glance at the wall tells the three panels apart
+  var ACCENT = '#ffd166';
   var ACCENT_DIM = 'rgba(255,209,102,0.65)';
+
+  /* §26: the two picker arrows on the stage board, in CANVAS-NORMALISED
+     coordinates (0..1 from the top-left of the painted sheet). The room
+     hit-tests the poster's UV against THIS table and the board draws its
+     buttons from it, so the arrow you can see and the arrow you can press
+     cannot drift apart. Deliberately generous (~13 x 11cm on the 0.85 x
+     1.15m sheet): they are aimed at down a crosshair from across a room,
+     not clicked with a mouse pointer resting on them. */
+  var STAGE_ARROWS = {
+    left:  { x0: 0.045, y0: 0.150, x1: 0.190, y1: 0.248 },
+    right: { x0: 0.810, y0: 0.150, x1: 0.955, y1: 0.248 }
+  };
 
   function make(w, h) {
     var c = document.createElement('canvas');
@@ -286,7 +299,7 @@ CHLOE.engine.displays = (function () {
      counter hanging two walls away. */
   function stage(def, round, knightCount) {
     var W = 512, H = 700, c = make(W, H), g = c.getContext('2d');
-    var ACC = '#ffd166';
+    var ACC = ACCENT;
     var pt = CHLOE.engine.party;
     var rs = (pt && pt.state && pt.state.runStats) || {};
 
@@ -308,13 +321,35 @@ CHLOE.engine.displays = (function () {
       return c;
     }
 
-    var y = H * 0.17;
-    g.fillStyle = TXT; g.font = 'bold 40px Impact, "Arial Narrow", sans-serif';
-    g.fillText((def.name || def.id || 'Somewhere').toUpperCase(), 36, y);
-    g.fillStyle = ACC; g.font = '20px system-ui, sans-serif';
-    g.fillText('Round ' + round + '  ·  ' + sizeLine(def), 36, y + 30);
+    /* §26 the picker row: ◀ NAME ▶. The arrows are real buttons — the room
+       raycasts this sheet and steps CHLOE.data.stagePick when one is hit —
+       so they are painted straight out of STAGE_ARROWS, and the name between
+       them is whatever the pick currently resolves to. */
+    var rowTop = STAGE_ARROWS.left.y0 * H, rowBot = STAGE_ARROWS.left.y1 * H;
+    arrowBtn(g, STAGE_ARROWS.left, -1, W, H);
+    arrowBtn(g, STAGE_ARROWS.right, 1, W, H);
 
-    y += 62;
+    var name = (def.name || def.id || 'Somewhere').toUpperCase();
+    var gap = (STAGE_ARROWS.right.x0 - STAGE_ARROWS.left.x1) * W - 24;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillStyle = TXT;
+    fitPx(g, name, gap, 40, 22, 'Impact, "Arial Narrow", sans-serif');
+    g.fillText(name, W / 2, (rowTop + rowBot) / 2);
+    g.textBaseline = 'alphabetic';
+
+    g.fillStyle = ACC; g.font = '19px system-ui, sans-serif';
+    g.fillText('Round ' + round + '  ·  ' + sizeLine(def), W / 2, rowBot + 26);
+    /* Which of the two is talking — the round cycle, or you. A board that
+       hid a manual pick would have the player blaming the round counter for
+       a floor they chose themselves three rounds ago. */
+    var pk = CHLOE.data && CHLOE.data.stagePick;
+    var mine = !!(pk && typeof pk.chosen === 'function' && pk.chosen() === def.id);
+    g.fillStyle = DIM; g.font = '13px system-ui, sans-serif';
+    g.fillText(mine ? 'YOUR PICK  ·  ◀ ▶ TO CHANGE THE FLOOR'
+                    : '◀ ▶ CLICK TO CHOOSE THE FLOOR', W / 2, rowBot + 48);
+    g.textAlign = 'left';
+
+    var y = rowBot + 78;
     g.fillStyle = DIM; g.font = 'italic 17px system-ui, sans-serif';
     y = wrap(g, def.blurb || '', 36, y, W - 72, 24, 3);
 
@@ -343,6 +378,51 @@ CHLOE.engine.displays = (function () {
       ? 'The kerb turns you back. There is nothing beyond it.'
       : 'Stone stops you. Learn where it stands.', 36, H - 36);
     return c;
+  }
+
+  /* One picker button: a soft plate, an amber rule, and a triangle pointing
+     the way it steps. dir < 0 points left. */
+  function arrowBtn(g, r, dir, W, H) {
+    var x = r.x0 * W, yTop = r.y0 * H;
+    var w = (r.x1 - r.x0) * W, h = (r.y1 - r.y0) * H;
+    var cx = x + w / 2, cy = yTop + h / 2;
+    g.fillStyle = 'rgba(255,209,102,0.10)';
+    g.fillRect(x, yTop, w, h);
+    g.strokeStyle = ACCENT_DIM; g.lineWidth = 3;
+    g.strokeRect(x, yTop, w, h);
+    var tw = w * 0.30, th = h * 0.32;
+    g.beginPath();
+    if (dir < 0) {
+      g.moveTo(cx - tw, cy);
+      g.lineTo(cx + tw * 0.72, cy - th);
+      g.lineTo(cx + tw * 0.72, cy + th);
+    } else {
+      g.moveTo(cx + tw, cy);
+      g.lineTo(cx - tw * 0.72, cy - th);
+      g.lineTo(cx - tw * 0.72, cy + th);
+    }
+    g.closePath();
+    g.fillStyle = ACCENT; g.fill();
+  }
+
+  /* Shrink until it fits. The picker row is a fixed width between two
+     buttons and a stage name is authored data, so the longest name loses
+     points — never the arrows. Leaves the font set on the context. */
+  function fitPx(g, text, maxW, startPx, minPx, family) {
+    var px = startPx;
+    for (;;) {
+      g.font = 'bold ' + px + 'px ' + family;
+      if (px <= minPx || g.measureText(text).width <= maxW) { return px; }
+      px -= 2;
+    }
+  }
+
+  /* The engine asks for the buttons rather than being told them, and gets a
+     COPY: a caller that reached in and moved a hot spot would move the
+     click target without moving the arrow anybody can see. */
+  function stageArrows() {
+    function box(r) { return { x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1 }; }
+    return { left: box(STAGE_ARROWS.left), right: box(STAGE_ARROWS.right) };
   }
 
   function sizeLine(def) {
@@ -514,5 +594,5 @@ CHLOE.engine.displays = (function () {
   }
 
   return { mirror: mirror, poster: poster, tv: tv, trophy: trophy, stage: stage,
-           chapterCount: CHAPTERS.length };
+           stageArrows: stageArrows, chapterCount: CHAPTERS.length };
 })();

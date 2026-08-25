@@ -17,9 +17,9 @@ CHLOE.data = CHLOE.data || {};
 
 CHLOE.data.version = {
   major: 0,
-  minor: 25,
-  build: 0,
-  label: 'Water Wave',
+  minor: 26,
+  build: 1,
+  label: 'The Stage Picker',
   date: '2026-08-25',
   /* Called as CHLOE.data.version.string(), so `this` is the object. Kept as
      methods rather than a baked string so the bumper only ever rewrites the

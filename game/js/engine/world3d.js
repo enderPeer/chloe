@@ -24,7 +24,8 @@ CHLOE.engine = CHLOE.engine || {};
     return {
       x: 0, y: 1.6, z: 0, yaw: 0, pitch: 0, locked: false, grounded: true,
       enemyDist: 0, enemyAlive: false, tvOn: false, envMap: false,
-      handsVisible: false, stageBoard: null, modelsLoaded: {}, colliders: []
+      handsVisible: false, stageBoard: null, stageArrow: null,
+      modelsLoaded: {}, colliders: []
     };
   }
   function disableAPI(reason) {
@@ -50,6 +51,11 @@ CHLOE.engine = CHLOE.engine || {};
   var PITCH_MAX = 80 * Math.PI / 180;
   var ENGAGE_DIST = 3.5;
   var TV_DIST = 2.5;
+  /* §26: how close you must stand to work the stage board's arrows. Same
+     reach as the TV, and for the same reason — a wall panel you can press
+     from the far side of the room is a panel you press by accident while
+     turning around. */
+  var BOARD_DIST = 2.5;
   var BOB_AMP = 0.03;
   var RESPAWN_SECS = 15;
   var DISSOLVE_SECS = 0.8;
@@ -93,6 +99,12 @@ CHLOE.engine = CHLOE.engine || {};
   // offMat the near-black glossy OFF material. Default OFF.
   var tv = { screenMesh: null, onMat: null, offMat: null, tex: null, light: null,
              lightBase: 0.6, on: false };
+  /* §26 the stage board on the south wall. `mesh` is kept so the arrows can
+     be raycast; `hover` is the arrow under the crosshair right now ('left',
+     'right' or null) and `target` the stage that arrow would pick, which is
+     what the HUD names before you commit to it. */
+  var stageBoard = { mesh: null, hover: null, target: null };
+  var stageCooldown = 0;
   var ceilLight = null, ceilBase = 1, ceilTarget = 1, ceilTimer = 0;
   var raycaster = null, ndc = null;
   var listeners = []; // [target, type, fn]
@@ -511,6 +523,65 @@ CHLOE.engine = CHLOE.engine || {};
     return D2.poster();
   }
 
+  /* --------------------------------------------------- §26 the stage picker
+     The board stopped being a notice and became a CONTROL: two arrows on the
+     sheet, and the floor named between them is the one the next fight uses.
+     A click resolves nothing itself — it steps CHLOE.data.stagePick, which is
+     the same question nextStagePlan() and ui/battle3d.resolveStage() already
+     ask, so the board cannot end up promising a floor you do not land on no
+     matter which of the three repaints last. */
+  function stagePickData() { return (CHLOE.data && CHLOE.data.stagePick) || null; }
+
+  /* Which arrow a ray landed on, from the poster's own UV. displays owns the
+     hot-spot table because displays PAINTS the arrows; v is flipped because
+     a PlaneGeometry's uv.y grows upward and a canvas' y grows down. */
+  function arrowAt(hit) {
+    var D2 = CHLOE.engine.displays;
+    if (!hit || !hit.uv || !D2 || typeof D2.stageArrows !== 'function') return null;
+    if (!panels.stagePlan) return null;   // the board fell back to the dossier
+    var rects = D2.stageArrows(), u = hit.uv.x, v = 1 - hit.uv.y, k;
+    for (k in rects) {
+      if (!Object.prototype.hasOwnProperty.call(rects, k)) continue;
+      var r = rects[k];
+      if (u >= r.x0 && u <= r.x1 && v >= r.y0 && v <= r.y1) return k;
+    }
+    return null;
+  }
+
+  // a ray -> {which, target} for an arrow within reach, else null
+  function boardUnder(ray) {
+    if (!stageBoard.mesh) return null;
+    stageBoard.mesh.updateMatrixWorld();
+    var hit = ray.intersectObject(stageBoard.mesh, false);
+    if (!hit.length || hit[0].distance > BOARD_DIST) return null;
+    var which = arrowAt(hit[0]);
+    return which ? { which: which, target: arrowTarget(which) } : null;
+  }
+
+  /* The stage this arrow WOULD pick, so the HUD can name it before the click
+     lands. null when data cannot say — the arrow then does nothing at all,
+     rather than the room inventing a floor of its own. */
+  function arrowTarget(which) {
+    var pick = stagePickData();
+    if (!pick || typeof pick.peek !== 'function') return null;
+    var id = pick.peek(which === 'left' ? -1 : 1, nextStagePlan().round);
+    var def = stageEntry(id);
+    return def ? { id: def.id, name: def.name || def.id } : null;
+  }
+
+  /* Take the step and repaint the wall in the same breath: the board is the
+     only feedback this click has, so a pick that does not show up on the
+     sheet immediately reads as a dead button. */
+  function stepStage(which) {
+    var pick = stagePickData();
+    if (!pick || typeof pick.cycle !== 'function') return;
+    if (elapsed < stageCooldown) return;
+    stageCooldown = elapsed + 0.25;
+    pick.cycle(which === 'left' ? -1 : 1, nextStagePlan().round);
+    if (A_refreshPanels) A_refreshPanels();
+    stageBoard.target = arrowTarget(which);   // the NEXT step, off the new pick
+  }
+
   function displayMat(kind) {
     var D2 = CHLOE.engine.displays;
     if (!D2) return null;
@@ -692,6 +763,8 @@ CHLOE.engine = CHLOE.engine || {};
         mesh = new THREE.Mesh(new THREE.PlaneGeometry(f.w, f.h), m);
         mesh.position.y = 1.5;
         g.add(mesh);
+        // §26: only the board carries arrows, so only the board is clickable
+        if (f.kind === 'poster_stage') stageBoard.mesh = mesh;
         break;
 
       default: // unknown kind (incl. chair fallback) -> plain dark box, still placed
@@ -1095,6 +1168,7 @@ CHLOE.engine = CHLOE.engine || {};
     texturedMats.length = 0;
     // the scene is new, so the old frame's mesh and material are gone with it
     trophyGroup = null; trophyMat = null;
+    stageBoard.mesh = null; stageBoard.hover = null; stageBoard.target = null;
     roomAssets.total = 0; roomAssets.done = 0; roomAssets.warm = false;
     buildRoom();
     buildFurniture();
@@ -1166,6 +1240,7 @@ CHLOE.engine = CHLOE.engine || {};
     if (isLocked()) {
       if (hovered) fireEngage();       // enemy engage takes priority
       else if (tvHovered) toggleTv();
+      else if (stageBoard.hover) stepStage(stageBoard.hover);
       return;
     }
     // unlocked: allow direct clicks via raycast from the click point —
@@ -1186,6 +1261,8 @@ CHLOE.engine = CHLOE.engine || {};
         var th = raycaster.intersectObject(tv.screenMesh, false);
         if (th.length && th[0].distance <= TV_DIST) { toggleTv(); return; }
       }
+      var arrow = boardUnder(raycaster);   // §26 the stage board's arrows
+      if (arrow) { stepStage(arrow.which); return; }
     }
     try {
       // modern Chrome returns a promise; swallow rejection (e.g. iframe/test docs)
@@ -1211,7 +1288,9 @@ CHLOE.engine = CHLOE.engine || {};
     if (side === 'l') hands.targetL = 1; else hands.targetR = 1;
     // grabs only while locked: unlocked clicks are aim-lock/raycast requests
     // and the crosshair ray would not match where the user actually clicked
-    if (isLocked() && !(side === 'l' && (hovered || tvHovered))) tryGrab(side);
+    if (isLocked() && !(side === 'l' && (hovered || tvHovered || stageBoard.hover))) {
+      tryGrab(side);
+    }
   }
   function onMouseUp(e) {
     var side = e.button === 2 ? 'r' : (e.button === 0 ? 'l' : null);
@@ -1400,8 +1479,16 @@ CHLOE.engine = CHLOE.engine || {};
         (hovered && Math.abs(enemyDist - wasDist) > 0.05))) {
       try { hoverCb(hovered, enemyDist, tvHovered); } catch (e) {}
     }
-    // §16 pickup hover for the HUD hint — enemy and TV win
-    if (!hovered && !tvHovered && !grab) {
+    /* §26 the board's arrows — behind the enemy and the TV, ahead of the
+       pickups: a poster on the wall and an item on the floor can both be
+       under the crosshair, and the one you are standing at arm's length
+       from is the one you meant. */
+    var arrowHit = (!hovered && !tvHovered) ? boardUnder(raycaster) : null;
+    stageBoard.hover = arrowHit ? arrowHit.which : null;
+    stageBoard.target = arrowHit ? arrowHit.target : null;
+
+    // §16 pickup hover for the HUD hint — enemy, TV and the board win
+    if (!hovered && !tvHovered && !stageBoard.hover && !grab) {
       var found = pickupUnderCrosshair();
       pickupHover = found ? { itemId: found.pk.itemId, label: found.pk.label, dist: found.dist } : null;
     } else {
@@ -1585,6 +1672,13 @@ CHLOE.engine = CHLOE.engine || {};
       enemyHovered: hovered,
       tvOn: tv.on,
       tvHover: tvHovered,
+      /* §26: the arrow under the crosshair and the floor it would pick, so
+         the HUD can offer "▶ THE CHURCH" instead of a bare "click". */
+      stageArrow: stageBoard.hover
+        ? { which: stageBoard.hover,
+            id: stageBoard.target ? stageBoard.target.id : null,
+            name: stageBoard.target ? stageBoard.target.name : null }
+        : null,
       /* §24 verification hook: what the south board is ACTUALLY announcing
          right now, straight off the last paint rather than re-resolved — a
          test proving the board names the stage the next fight uses has to read
