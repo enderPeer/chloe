@@ -407,9 +407,36 @@ CHLOE.ui.battle3d = (function () {
     /* §21: name it with the level it actually is, and how many. The plate
        is the only place the fight tells you he has grown. */
     var kt = CHLOE.engine.knighttree;
-    var kL = kt ? kt.level() : null;
-    els.enemyName.textContent = snap.enemy.name +
-      (kL ? '  ·  Lv ' + kL : '') +
+    /* §30: the plate names what is ACTUALLY on the floor, not the round.
+       It used to print knighttree.level() — the round baseline — which was
+       already only approximately true under §28 and becomes a flat lie once
+       the squad is a ladder: round 5 would read 'Lv 5' while four of the
+       five knights are below it. The per-knight numbers have been in the
+       snapshot since §28 (`each[].level`, `levels`) with nothing reading
+       them; this reads them.
+       A RANGE, not the list: nine numbers do not fit a 420px plate, and the
+       range is what the player needs — the top of it is the knight who will
+       hurt them. Dead knights drop out, so as the veteran falls the ceiling
+       visibly comes down with him. */
+    var pool = (snap.enemy.each || [])
+      .filter(function (e) { return e.alive; })
+      .map(function (e) { return e.level || 1; });
+    /* The fallbacks are for a build whose snapshot has no per-knight data
+       (an engine older than §28), NOT for an empty floor. Falling back to
+       `levels` when nothing is alive re-admitted the dead: refresh() runs
+       once more before finish(), so the plate flashed the whole historical
+       ladder — 'Lv 1-8' — on the exact frame the last knight fell. With no
+       living knight there is no level to name, and the plate says so by
+       saying nothing. */
+    if (!pool.length && !(snap.enemy.each && snap.enemy.each.length)) {
+      pool = (snap.enemy.levels || []).slice();
+      if (!pool.length && kt) { pool = [kt.level()]; }
+    }
+    var lo = pool.length ? Math.min.apply(null, pool) : null;
+    var hi = pool.length ? Math.max.apply(null, pool) : null;
+    var lvText = (lo == null) ? ''
+               : ('  ·  Lv ' + (lo === hi ? lo : lo + '-' + hi));
+    els.enemyName.textContent = snap.enemy.name + lvText +
       (snap.enemy.count > 1 ? '  ·  ' + snap.enemy.alive + '/' + snap.enemy.count : '');
     refreshHotbar(snap);
 
@@ -972,14 +999,29 @@ CHLOE.ui.battle3d = (function () {
 
   function enemySwing() {
     if (!active || C3.isOver()) return;
-    var pattern = pickPattern();
-    if (!pattern) return;
-    // pick a living knight to make the attack
+    /* §30: WHO swings is chosen BEFORE what he swings, and the pattern is
+       rolled from his own level. Rolling the round's pool first and handing
+       it to whoever was picked is what left arena3d's one open downgrade gap
+       standing: ground_slam is the only 'backoff' pattern, so a knight below
+       level 5 handed one throws it unchanged — the weakest knight on the
+       floor landing the heaviest swing in the game. §28 could accept that
+       because every knight climbed past 5 within ~35s; under §30's ladder
+       the junior end never gets there, so the gap had to close at the roll
+       instead. arena3d's own comment prescribed exactly this fix. */
     var snap = C3.snapshot();
     var living = [];
     snap.enemy.each.forEach(function (e, i) { if (e.alive) living.push(i); });
     if (!living.length) return;
     var who = living[Math.floor(Math.random() * living.length)];
+    var swingerLevel = null;
+    if (a3d && typeof a3d.knightLevels === 'function') {
+      swingerLevel = a3d.knightLevels(snap.enemy.count)[who];
+    }
+    if (swingerLevel == null && snap.enemy.each[who]) {
+      swingerLevel = snap.enemy.each[who].level;
+    }
+    var pattern = pickPattern(swingerLevel);
+    if (!pattern) return;
     /* §22: a multi-hit pattern gets ONE warning per hit window. The warning is
        retired the moment its own stab arrives and the next one goes up in its
        place, so the line never sits there telling you to dodge a stab that has
@@ -1005,7 +1047,14 @@ CHLOE.ui.battle3d = (function () {
                      it cost nothing but the ground you gave up.
            EVADED! — it WOULD have landed and the i-frames from SPACE ate it.
                      You paid stamina for that one, and the timing was yours. */
-      var out = res.hit ? C3.takeHit(windowPattern(pattern, res)) : null;
+      /* §30: name the striker. takeHit has taken an index since §28 and this
+         call never passed one, so it fell back to arena3d.striker() — which
+         answers -1 on the no-WebGL API, pricing every knight's blow off the
+         round baseline. That was self-consistent while the stub also reported
+         every knight at the baseline; now that the stub returns the ladder,
+         a level-1 newcomer would have kept hitting like the veteran. `who` is
+         already in hand, so there is no reason to guess. */
+      var out = res.hit ? C3.takeHit(windowPattern(pattern, res), who) : null;
       if (!res.hit || (out && (out.evaded || out.missed))) {
         splash(res.hit ? 'EVADED!' : 'DODGED!', 'evade');
         log('The blade splits empty air.');
@@ -1053,18 +1102,21 @@ CHLOE.ui.battle3d = (function () {
 
   /* §21: he only swings what his level has taught him. Round 1 is one
      pattern; the charge does not exist until he has learned it. */
-  function knownPatterns() {
+  function knownPatterns(level) {
     var all = (CHLOE.data.arena3d && CHLOE.data.arena3d.patterns) || {};
     var kt = CHLOE.engine.knighttree;
     if (!kt) return all;
-    var ids = kt.patterns(kt.level());
+    /* §30: the pool is HIS, not the round's. Passing a level rolls from what
+       that knight has actually learned; omitting it keeps the round baseline
+       for any caller that does not know who is swinging. */
+    var ids = kt.patterns(level == null ? kt.level() : level);
     var out = {};
     ids.forEach(function (id) { if (all[id]) out[id] = all[id]; });
     return Object.keys(out).length ? out : all;
   }
 
-  function pickPattern() {
-    var pats = knownPatterns();
+  function pickPattern(level) {
+    var pats = knownPatterns(level);
     var pool = [];
     for (var id in pats) {
       var w = pats[id].weight || 1;

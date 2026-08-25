@@ -640,6 +640,8 @@ Prove: every known ability is bound at every level and after a rebuild; LMB/RMB 
 
 ## 28. A real skeleton, and knights that level apart (supersedes §18's sibling limb pivots; extends §20 squads, §21 knight levels, §22 the pose library)
 
+> **Superseded in part by §30**: `A`'s opening rule below — every knight spawns at level 1 — is replaced by SENIORITY: a knight opens at the number of rounds he has been coming, so round N fields N, N-1, … 1. The in-fight climb described here is KEPT, but it now grows from that opening level and is capped `overCap` past it rather than past the round baseline. Note also that `A`'s "[1,1,2,1,1,2]" figure is a true measurement of the §22 BRAIN's per-knight levels, never of `combat3`'s `st.enemies`, which opened every knight at 1 because `start()` called `spawnLevel('')` once outside the loop and personalities do not exist at that point. Do not re-derive a regression from the difference.
+
 ### A. Every knight spawns at level 1 and grows
 Today `knighttree.level()` is a pure function of the round, so a round-6 squad is six identical level-6 knights and none of them changes during the fight. Instead: **every knight spawns at level 1 and levels up individually while the fight runs**, so at any moment the floor holds a SPREAD — weak knights and strong ones — rather than one stat block wearing six bodies.
 - Level lives on the knight instance. `knighttree.level()` stays as the ROUND baseline so its existing callers (the poster, `combat3` enemy stats, the pattern pool) keep working; add per-knight accessors, and the per-knight value drives that knight's stats and its `knighttree.patterns(level)` pool. A level-1 knight therefore also has a SMALLER move pool than a grown one, which is most of what makes the spread readable.
@@ -673,3 +675,32 @@ Related, unreached today: `debug().shopReady` has **zero consumers**. If the sho
 
 ### Verification
 Prove: 103/103 meshes reparent with the knight's on-screen height unchanged at 2.15m; all five attack patterns AND all six §22 locomotion/reaction states play on the new rig; the sword tracks the elbow and the hips move; impact frames still land on the strike timer; a squad's levels visibly diverge during a fight while a fresh round-6 squad is no harder at t=0 than today.
+
+## 30. A knight levels for every round he comes back (supersedes §28 A's "every knight spawns at level 1" and its round-baseline ceiling; extends §20 squads, §28 A per-knight levels)
+
+### The rule
+A knight's level is **how many rounds he has been coming**, not what round it is and not how long this fight has run. The knight who has fought since round 1 opens at level N; the one who joined in round 2 opens at N-1; the one who walks in tonight opens at **1**. Round 5 fields **5 / 4 / 3 / 2 / 1**.
+
+There is no knight identity across rounds to look this up from — `spawnSquad` rebuilds the squad every round — so seniority is **synthesised from the squad index**, which is legitimate rather than a fudge: round N fields N knights (§20) and each round adds exactly one, so the index IS a join date. `arena3d.spawnSquad` reuses `knights[0]` and splices the extras off the end, so index 0 is literally the same object that fought round 1.
+
+`knighttree.seniorityFor(index, count)` = `count - index`, 1-based, clamped. `spawnLevel(personality, seniority)` = `startLevel + baseBonus[personality] + (seniority - 1) * levelPerRound`. **Omitting seniority yields §28's number**, so every caller that does not know about it keeps working.
+
+### Growth still happens — but from his own floor
+§28's in-fight climb is kept and composes with this: **level = his opening level + what the seconds have earned**. Two changes make that true rather than nominal:
+1. `levelFor(personality, seconds, round, seniority)` grows **from `spawnLevel(personality, seniority)`**. §28's version computed an absolute level from seconds alone, so it would have overwritten a veteran's opening level on his first frame — a seniority rule written without this looks like it works and silently does not.
+2. The ceiling is **per knight**: `capForKnight` = min(his opening level + `overCap`, `capForRound`), not the round baseline + `overCap` for everyone. The round clamp is the second half and matters for one case — a BRUTE veteran opens one above the round (§28's +1), so without it his ceiling would sit at round + overCap + 1; with it every knight still stops at the round's own ceiling at the latest. A plain veteran's ceiling is therefore unchanged from §28, because his opening level IS the round. Under §28's ceiling every knight in a long round-5 fight converged on level 7 and the ladder evaporated precisely when the fight had run long enough to matter. Measured in a real round-5 fight: spawn `[5,5,3,2,2]` climbing to `[7,7,5,4,4]`, where §28's rule gave `[7,7,7,7,7]`. The veteran's ceiling is unchanged from §28 (round + overCap, because his opening level IS the round).
+
+The **brute's +1 rides on top of seniority**, so temperament still separates two knights who joined the same night — and a newcomer dealt "brute" opens at 2, not 1. That is §28's bonus kept deliberately, not a leak.
+
+### Every layer must agree, including the ones that cannot render
+- `arena3d.initBrain(k, i, n)` takes the squad size and sets `k.seniority` / `k.joinRound` / `k.level`; `updateLevel` passes `k.seniority` every frame.
+- `arena3d.knightLevels()` pads missing indices with the **seniority** level for that index. §28 padded with the round baseline — and the padded indices are the tail, which is the JUNIOR end, so it priced newcomers as veterans.
+- The **no-WebGL stub** answers with the same ladder. The rule is pure arithmetic over the index — no brain, no seconds, no renderer — so a machine that cannot draw fights the same squad shape as one that can. N copies of the round baseline made that floor *harder* than the real game, the one direction a degrade path must never fail in.
+- `combat3.start()` opens each entry on the ladder and **builds a stats object per knight**. Every entry previously shared one object by reference, which was harmless while they all had one level and is a corruption the moment they do not. The personality bonus cannot be applied there — temperaments are dealt in the 3D layer, which does not exist when `start()` runs — so it arrives on the first `syncLevels` tick, from the layer that knows.
+- `ui/battle3d.js`'s plate names **a range** (`Lv 2-5`), read from the per-knight numbers §28 already published and nothing consumed. One number from the round baseline is a flat lie under a ladder. Dead knights drop out of the range, so the ceiling visibly comes down as the veteran falls.
+
+### BALANCE — a real difficulty change, stated
+Round 5 total life multiplier: the pre-§28 flat squad was **8.10x**, §28's all-level-1 opening was **5.00x**, §30 is **6.52x**. The round grows in threat more slowly than it grows in number, and the danger concentrates in one veteran instead of smearing over five equals. If late rounds feel thin the knob is the veteran's climb (`rate`) or `overCap` — never the count (§20's contract) and never `levelPerRound` (it moves the whole ladder at once).
+
+### Verification hooks
+`arena3d.debug()` publishes `knightLevels` and now `knightSeniority` / `knightJoinRound`; `combat3.snapshot().enemy` carries `levels` and per-entry `seniority`. A test must prove: round N spawns `[N, N-1, … 1]` before any tick; the ladder is not flattened by the per-frame sync; a long fight ends on a ladder rather than a flat squad; the no-WebGL stub returns the same shape; and the HUD range matches the living knights.

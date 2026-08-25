@@ -91,21 +91,39 @@ CHLOE.data = CHLOE.data || {};
      a hurry. The aggressive knight overtakes him at 8.4s and is a level clear
      by 12.6s.
 
-     BALANCE, said out loud. Six level-1 knights at t=0 are dramatically
-     weaker than the six flat level-6s round 6 used to field: life x1.00
-     against x1.80, atk x1.00 against x1.32, and a move pool of ONE swing
-     instead of five. The danger has to be earned, and the numbers above put
-     the squad's average multiplier back level with the old flat 6 at about
-     t=27s and past it from there — measured, not guessed, by
-     tools-side arithmetic over this table. Slowing `secondsPerLevel` past
-     ~7 pushes that crossover beyond a typical round-6 fight and the floor
-     becomes a farm; speeding it below ~5 skips the readable ramp where he
-     only knows the slash, which is most of what makes the spread visible.
+     BALANCE, said out loud — REWRITTEN FOR §30, because §28's version of
+     this paragraph described a squad that no longer exists. §28 opened every
+     knight at level 1 and let seconds alive do all the work; §30 opens him
+     at his SENIORITY (index 0 has come back N times and opens at N, the
+     newcomer opens at 1) and lets seconds climb from there.
 
-     `overCap` is what stops a long fight spiralling: a knight may climb TWO
-     levels past the round's own baseline and no further, so a round-1 fight
-     you refuse to end can produce a level-3 knight (he learns the overhead
-     and the thrust combo in front of you) but never a level-9 one. */
+     What that costs, measured on this table rather than guessed. A round-5
+     squad at t=0: §28 fielded five knights at life x1.00 (5.00x total);
+     the old pre-§28 game fielded five flat level-5s at x1.62 (8.10x); §30
+     fields 1.62 + 1.45 + 1.30 + 1.15 + 1.00 = 6.52x. So round 5 sits BELOW
+     the old flat squad and above §28's opening — which is the intent: the
+     round grows in threat more slowly than it grows in number, and the
+     danger is concentrated in one veteran instead of smeared over five
+     equals. If a late round starts feeling thin, the knob is the veteran's
+     climb (`rate`) or `overCap`, NOT the count and NOT `levelPerRound` —
+     the count is the §20 contract and levelPerRound moves the whole ladder.
+
+     The climb still matters and still separates temperaments: slowing
+     `secondsPerLevel` past ~7 flattens the in-fight ramp that makes a long
+     round dangerous; speeding it below ~5 skips the readable window where
+     the junior half still only knows the slash, which is most of what makes
+     the spread visible on the floor.
+
+     `overCap` is what stops a long fight spiralling, and §30 changed WHAT IT
+     IS MEASURED FROM. Under §28 it was two levels past the ROUND's baseline,
+     which meant a long round-5 fight ended with five knights all at 7 — the
+     ladder evaporated exactly when the fight had run long enough for it to
+     matter. It is now two levels past THAT KNIGHT's own opening level, so
+     the veteran still tops out where §28 put him (round + overCap, since his
+     opening level is the round) and the newcomer tops out at 3. Verified in
+     a real round-5 fight: spawn [5,5,3,2,2] climbing to [7,7,5,4,4], where
+     §28's rule gave [7,7,7,7,7]. A round-1 fight you refuse to end still
+     produces a level-3 knight and never a level-9 one. */
   var growth = {
     trigger: 'aliveSeconds',
     startLevel: 1,
