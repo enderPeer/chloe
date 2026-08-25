@@ -17,7 +17,10 @@
      snapshot()                -> everything the HUD needs
 
    Events are plain objects the UI animates:
-     {t:'cast'|'hit'|'miss'|'evade'|'resource'|'cooldown'|'die'|'win', ...} */
+     {t:'cast'|'hit'|'miss'|'evade'|'resource'|'cooldown'|'die'|'win', ...}
+     §29 adds {t:'reload', abilityId, charges} — a MAGAZINE came back whole,
+     which is a different thing from 'charge' (one more use trickled in) and
+     is the event the reload tell hangs off. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.engine = CHLOE.engine || {};
 
@@ -296,6 +299,10 @@ CHLOE.engine.combat3 = (function () {
       out[0] = known[0];
     }
     p.state.binds[charId] = out;
+    /* §29: the gun claims its button BEFORE the keys are filled, so that when
+       autoBind() below looks for homeless abilities the gun already has one
+       and does not get parked on a number key it never asked for. */
+    autoBindMouse(charId, known);
     /* A button counts as bound (§27B). Without this the self-heal would look
        at a hotbar whose asteroid is on RMB, decide asteroid has no slot, and
        helpfully put a SECOND copy on a key — one entry, two slots, which is
@@ -337,10 +344,11 @@ CHLOE.engine.combat3 = (function () {
      genuinely new and gets reported to takeAutoBound(). That is the whole of
      what that memory is for now, and it is why it can no longer strand a move.
 
-     Mouse slots are deliberately not auto-filled: a mouse button already has a
-     job in the room (§16 hands and grab), so the engine may offer a key it
-     granted you and must not quietly take a button you use for something else.
-     LMB/RMB are opt-in, from the bind screen. */
+     Mouse slots are NOT auto-filled from here, and that rule stands: a mouse
+     button already has a job in the room (§16 hands and grab), so the engine
+     may offer a key it granted you and must not quietly take a button you use
+     for something else. LMB/RMB stay opt-in from the bind screen — with the
+     one §29 exception below, which the ABILITY has to ask for by name. */
   function autoBind(charId, known, out, onMouse) {
     var p = party();
     var seen = autoBoundOf(charId);
@@ -362,8 +370,85 @@ CHLOE.engine.combat3 = (function () {
     }
     p.state.autoBound[charId] = seen;
     p.state.binds[charId] = out;
-    if (placed.length) lastAutoBound = { charId: charId, placed: placed };
+    /* §29: APPEND, do not replace. autoBindMouse() runs first in the same
+       binds() pass and may have just parked the gun on RMB; overwriting the
+       feed here would mean a level that grants both a move and the gun
+       announces only the move, and the button placement — the surprising half
+       — is the one that goes unsaid. noteAutoBound() owns that folding now,
+       across characters as well as within one. */
+    noteAutoBound(charId, placed);
     return placed;
+  }
+
+  /* §29: THE ONE ABILITY THAT BINDS ITSELF TO A BUTTON.
+
+     The gun exists on the ladder at all because it costs no number key (§27B
+     put mouseL/mouseR outside the nine), and an ability that arrives with
+     nowhere to press it reads as a bug (§21). So it takes a button — but only
+     because `data/abilities.js` says so, in `bindsTo.mouse`, as an ordered
+     preference. No id appears in this engine; a second mouse-bound weapon is a
+     data edit and nothing else.
+
+     The order matters and it is `['mouseR','mouseL']`: mouseL is the hand you
+     already open, close and grab with back in the room (§16), and taking it
+     would mean the game silently rebound the button the player has spent the
+     whole run using. Right first, left only if right is spoken for.
+
+     THREE THINGS IT WILL NOT DO, all for the same reason — the engine offers,
+     it never overrules (same principle as autoBind and the pocket shuffle):
+       - it never EVICTS. A button already holding something is skipped, and
+         if both are, the gun falls through to autoBind() and takes a number
+         key, which is worse than what it wanted and much better than nothing
+         (§25's rule: known and unbound while a slot is free is the bug).
+       - it never fights a CLEAR. bindsCleared is the player saying no; a
+         player who dragged the gun off RMB does not get it put back.
+       - it places each ability ONCE per button-freeing, not once ever: like
+         the rest of §27A this is a self-heal, so a rebuild from empty at any
+         level puts the gun back where it belongs.
+
+     Returns what it placed, so the level-up card can say "the 9mm went on
+     RMB" in the same breath the ladder announces the row. */
+  function autoBindMouse(charId, known) {
+    var p = party();
+    var mouse = mouseBinds(charId);
+    var ids = MOUSE_SLOTS();
+    var cleared = clearedOf(charId);
+    var seen = autoBoundOf(charId);
+    var keys = binds_raw(charId);
+    var placed = [];
+
+    for (var k = 0; k < known.length; k++) {
+      var id = known[k];
+      var a = ABIL()[id];
+      var pref = a && a.bindsTo && a.bindsTo.mouse;
+      if (!pref || !pref.length) continue;
+      if (cleared.indexOf(id) !== -1) continue;         // the player said no
+      if (keys.indexOf(id) !== -1) continue;            // already on a key
+      var already = false, s;
+      for (s = 0; s < ids.length; s++) if (mouse[ids[s]] === id) already = true;
+      if (already) continue;
+      for (s = 0; s < pref.length; s++) {
+        var slot = pref[s];
+        if (ids.indexOf(slot) === -1) continue;         // a button this build has no concept of
+        if (mouse[slot]) continue;                      // occupied: never evict
+        mouse[slot] = id;
+        if (seen.indexOf(id) === -1) seen.push(id);
+        placed.push({ abilityId: id, slot: slot });
+        break;
+      }
+    }
+    p.state.mouseBinds[charId] = mouse;
+    p.state.autoBound[charId] = seen;
+    noteAutoBound(charId, placed);
+    return placed;
+  }
+  /* The key array as it is STORED, without triggering the full binds() rebuild
+     — autoBindMouse runs from inside that rebuild and calling it again here
+     would recurse. All it needs to know is "is this ability already sitting on
+     a key", and the stored array answers that. */
+  function binds_raw(charId) {
+    var cur = party().state.binds && party().state.binds[charId];
+    return Array.isArray(cur) ? cur : [];
   }
 
   /* Where a newly granted ability goes — the first free key, EXCEPT when a
@@ -483,12 +568,53 @@ CHLOE.engine.combat3 = (function () {
     return placed;
   }
 
-  /* What the last auto-bind put where, so the victory card can say so. */
-  var lastAutoBound = null;
+  /* What the auto-binds put where since the card last asked, so the victory
+     card can say so. Read-and-clear.
+
+     ONE RECORD PER CHARACTER, not one record. It was a single slot, and the
+     card reads it after calling binds() for EVERY member who levelled — so the
+     last member to be rebuilt overwrote everyone before them and the card
+     announced exactly one person's new move.
+
+     §29 is what turned that from untidy into a hole. Ash joins at level 4 and
+     the 9mm arrives at 5, so the fight that hands you the pistol is very
+     often the same fight Ash crosses her own level on; her row won the race
+     and the card said "Fire Tornado — ready on key 2" while saying nothing at
+     all about the gun. The gun's row grants no number key ON PURPOSE, which
+     makes this line the only place the game ever names the button it went to.
+     Losing it is losing the feature.
+
+     `placed` entries keep their `charId` so the card can attribute them when
+     more than one person levelled. Accumulate, never replace. */
+  var lastAutoBound = [];
   function takeAutoBound() {
     var v = lastAutoBound;
-    lastAutoBound = null;
-    return v;
+    lastAutoBound = [];
+    if (!v.length) return null;
+    /* The old shape, still: {charId, placed} with the FIRST character's id, so
+       a caller that predates this keeps working and simply sees more entries
+       than it used to. Each entry also carries its own charId. */
+    var all = [];
+    for (var i = 0; i < v.length; i++) all = all.concat(v[i].placed);
+    return { charId: v[0].charId, placed: all, byChar: v };
+  }
+  /* Fold a fresh placement into the feed: same character, same record. */
+  function noteAutoBound(charId, placed) {
+    if (!placed || !placed.length) return;
+    var stamped = [];
+    for (var i = 0; i < placed.length; i++) {
+      var e = placed[i], c = {};
+      for (var k in e) c[k] = e[k];
+      c.charId = charId;
+      stamped.push(c);
+    }
+    for (var j = 0; j < lastAutoBound.length; j++) {
+      if (lastAutoBound[j].charId === charId) {
+        lastAutoBound[j].placed = lastAutoBound[j].placed.concat(stamped);
+        return;
+      }
+    }
+    lastAutoBound.push({ charId: charId, placed: stamped });
   }
 
   /* `entry` is an ability id, an 'item:<id>' string (§23), or null to clear.
@@ -703,6 +829,13 @@ CHLOE.engine.combat3 = (function () {
     if (!c) return { ready: false, reason: 'Unknown ability.' };
     var a = ABIL()[id];
     if (c.charges <= 0) {
+      /* §29: an empty MAGAZINE is its own refusal, flagged rather than merely
+         worded, because the input layer owes it a dry click and a reload tell
+         and must not have to string-match 'Recharging' to know which it is.
+         `empty` is the fact; `reason` is only the copy. */
+      if (a.magazine) {
+        return { ready: false, empty: true, reason: 'Reloading', pct: cooldownPct(id) };
+      }
       return { ready: false, reason: 'Recharging', pct: cooldownPct(id) };
     }
     if (st.now < c.nextAt) return { ready: false, reason: 'Cooling down', pct: cooldownPct(id) };
@@ -796,7 +929,12 @@ CHLOE.engine.combat3 = (function () {
     var a = slotAbility(slot);
     if (!a) return { ok: false, reason: 'Nothing bound to that key.' };
     var r = readiness(a.id);
-    if (!r.ready) return { ok: false, reason: r.reason };
+    /* §29: carry the refusal's SHAPE out, not just its sentence. An empty
+       magazine is the one "not ready" that has a picture attached (dry click,
+       reload tell), and the input layer decides that off `empty` — never off
+       the wording, which is copy and may change. `ability` rides along so the
+       caller can tell WHICH slot clicked dry without re-resolving the bind. */
+    if (!r.ready) return { ok: false, reason: r.reason, empty: !!r.empty, ability: a };
     if (!spend(a.cost)) return { ok: false, reason: 'Not enough resources.' };
 
     var c = st.cd[a.id];
@@ -1188,6 +1326,30 @@ CHLOE.engine.combat3 = (function () {
       var c = st.cd[id], ab = ABIL()[id];
       if (!ab) continue;
       var maxCh = ab.charges || 1;
+      /* §29: A MAGAZINE IS NOT A TRICKLE, and the difference is the whole
+         feel of the gun. The branch below dribbles charges back one at a
+         time, each costing rechargeMs — right for ember-jab-shaped abilities,
+         and wrong for a pistol, where six rounds at 3.2s each would mean the
+         magazine is never full again inside one fight and every shot after
+         the first is rationed instead of spent.
+
+         `magazine` reloads as a BLOCK, and only from empty. The `<= 0` test is
+         load-bearing, not defensive: press() writes nextAt for two different
+         reasons — the fire rate between rounds, and the reload after the last
+         one — and a magazine that refilled on any expired nextAt would top
+         itself up 280ms after every single shot. Empty is the only state a
+         reload may start from, which is also what makes running dry a
+         DECISION (see data/abilities.js) rather than an accident. */
+      if (ab.magazine) {
+        if (c.charges <= 0 && st.now >= c.nextAt) {
+          c.charges = maxCh;
+          /* Its own event, not 'charge': the HUD has to tell "one more use
+             came back" from "the weapon is loaded again", because only the
+             second one gets a reload tell (§29 feedback). */
+          ev.push({ t: 'reload', abilityId: id, charges: maxCh });
+        }
+        continue;
+      }
       if (c.charges < maxCh && st.now >= c.nextAt) {
         c.charges++;
         if (c.charges < maxCh) c.nextAt = st.now + (ab.rechargeMs || ab.cooldownMs || 1000);
@@ -1324,6 +1486,10 @@ CHLOE.engine.combat3 = (function () {
       })(a.cost || {}),
       charges: st.cd[entry] ? st.cd[entry].charges : 0,
       maxCharges: a.charges || 1,
+      /* §29: the HUD draws a magazine as "4/6" and a charge stack as "2", and
+         it must not guess which from the count alone. */
+      magazine: !!a.magazine,
+      empty: !!(a.magazine && st.cd[entry] && st.cd[entry].charges <= 0),
       cdPct: cooldownPct(entry),
       cdLeft: st.cd[entry] ? Math.max(0, (st.cd[entry].nextAt - st.now) / 1000) : 0,
       affordable: canPay(a.cost),

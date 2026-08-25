@@ -10,17 +10,32 @@
      cooldownMs                      before this ability may be used again
      charges                         uses before it must recharge (1 = simple)
      rechargeMs                      per-charge refill (defaults to cooldownMs)
+     magazine                        §29: `charges` is a MAGAZINE, not a trickle
      range, arc                      metres / degrees of the hit test
+     hitscan                         §29: a straight ray, not an arc (see below)
+     rayRadius, falloff              hitscan only — how fat the ray is, and how
+                                     damage decays with distance
      power                           % of atk (or mag when usesMag) per hit
      usesMag                         scale off mag instead of atk
      hits                            how many times one cast connects
      hitAtMs:[...]                   when each hit lands inside the cast
      anim                            clip in assets/3d/punch.glb etc.
      animSpeed                       playback rate multiplier
+     bindsTo:{mouse:[...]}           §29: where this auto-binds, if not a key
      grantedBy                       'start' = known at level 1, else a tree node
 
+   `magazine` vs plain `charges`, because the two read the same and are not:
+   plain charges dribble back ONE at a time, each costing `rechargeMs` — two
+   charges at 3600ms means the second use is available 3.6s after the first
+   empties, and full again 7.2s after that. A magazine is emptied and then
+   RELOADED as a block: nothing comes back until the last round is gone, and
+   then all of it does, once, `rechargeMs` later. `engine/combat3.js tick()`
+   owns that split; the flag is here because it is a property of the weapon.
+
    Balance intent (§17): punch is the floor — free, spammable, weak. Everything
-   the tree grants must beat it in damage-per-stamina or in reach. */
+   the tree grants must beat it in damage-per-stamina or in reach. §29 adds the
+   first thing that deliberately LOSES to punch per stamina and wins on reach —
+   read gun_9mm's block for the arithmetic. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.data = CHLOE.data || {};
 
@@ -41,30 +56,18 @@ CHLOE.data.abilities = {
     grantedBy: 'start'
   },
 
-  /* Tree-granted. These reuse the punch rig with different timing, cost and
-     damage type — the animation effort went into `punch` (§17). */
-  hammer_fist: {
-    id: 'hammer_fist', name: 'Hammer Fist', icon: '🤛', type: 'physical',
-    desc: 'One committed overhand drop. Slow, expensive, hits like a dropped amp.',
-    cost: { sta: 26 },
-    castMs: 620, recoverMs: 420, cooldownMs: 3200, charges: 1,
-    range: 2.9, arc: 55,
-    power: 190, usesMag: false,
-    hits: 1, hitAtMs: [620],
-    anim: 'Punch', animSpeed: 0.55,
-    grantedBy: 'tree'
-  },
-  ember_jab: {
-    id: 'ember_jab', name: 'Ember Jab', icon: '🔥', type: 'fire',
-    desc: 'A jab that lights on contact. Costs magic, burns what resists steel.',
-    cost: { mana: 14, sta: 6 },
-    castMs: 340, recoverMs: 260, cooldownMs: 2400, charges: 2, rechargeMs: 3600,
-    range: 3.1, arc: 60,
-    power: 130, usesMag: true,
-    hits: 1, hitAtMs: [340],
-    anim: 'Punch', animSpeed: 1.15,
-    grantedBy: 'tree'
-  },
+  /* §29 DELETED HERE: `hammer_fist` and `ember_jab`.
+
+     They and `hollow_breaker` all carried `anim: 'Punch'`, range 2.9-3.1,
+     arc 55-65, one target. That is not three moves, it is one move with three
+     price tags — and the authored 1-9 ladder was spending THREE of its nine
+     levels handing it to you again. What each level actually taught you was
+     an arithmetic difference. The survivor is `killer_fist` (below), which
+     keeps the mechanics that were genuinely its own: divine damage, so it is
+     the one fist the black plate does not blunt, and two hit windows.
+     Do not re-add a mid-priced punch. If a fist wants a row, it has to do
+     something the others cannot. */
+
   /* §18 signature spell: you raise a hand, a burning sigil spins up off your
      fingers, and a tornado of fire drops on the knight. Long cast, long
      cooldown, expensive — the payoff move. */
@@ -149,18 +152,20 @@ CHLOE.data.abilities = {
        (Chloe magic 20 + 3*(4-1) = 29, stamina 40 + 3*3 = 49, no ladder stat rows
        before level 5) that is TWO waves back to back with 9 magic to spare, or a
        wave after an asteroid (14) with 5 left. Against fire_tornado 18 / asteroid
-       14 / hollow_breaker 22 it is the only spell you can cast while broke.
+       14 / killer_fist 22 it is the only spell you can cast while broke.
        Stamina 8 matches punch and is deliberately far under evade's 22: when the
        stamina bar is dry from sprinting is precisely when you need the lane, so
        the wave must not compete with evade for the same empty bar. */
     cost: { mana: 10, sta: 8 },
     /* Fast. You cast this because something is already swinging, so a
        fire_tornado-length 1250ms wind-up would get you killed mid-cast. The
+       gun is faster still (90ms, §29) and that is the point of it — but the
+       gun does not move anybody, so it is not this ability's competition. The
        whole lock is 420 + 240 = 660ms, and the shove finishes inside it, so you
        are free to run the moment the water lands. */
     castMs: 420, recoverMs: 240,
     /* Short relative to the offensive spells (tornado 12000, asteroid 9000,
-       breaker 6000) because its job is escape and a cornering happens more
+       killer_fist 6000) because its job is escape and a cornering happens more
        often than once every nine seconds. It is not free either: at the
        abilityConfig regen of 2.5 magic/s, 4500ms buys back 11.25 magic against
        a 10 cost — so the cooldown and the price are tuned to arrive together
@@ -178,8 +183,9 @@ CHLOE.data.abilities = {
     cone: { reach: 6.0, halfAngle: 40 },
     /* Lowest power in the game, on purpose. At level 4 (mag 17, knight def 5):
        wave 17*0.40*1.0 - 2.5 = ~4 damage. One punch HIT is 22*0.45*1.0 - 2.5 =
-       ~7 and punch throws three of them for 8 stamina (~22 total); ember_jab is
-       ~9, asteroid ~12, one tornado tick ~15. So the wave loses to the free
+       ~7 and punch throws three of them for 8 stamina (~22 total); asteroid is
+       ~12, one tornado tick ~15, and one 9mm round (level 5, §29) ~25 for no
+       magic at all. So the wave loses to the free
        move it sits next to, and it loses per-magic to everything else — the
        damage is a courtesy, the displacement is the ability. */
     power: 40, usesMag: true,
@@ -207,8 +213,130 @@ CHLOE.data.abilities = {
     shove: { distance: 3.2, ms: 300, lateral: true, breaksWindup: true },
     grantedBy: 'tree'
   },
-  hollow_breaker: {
-    id: 'hollow_breaker', name: 'Hollow Breaker', icon: '✨', type: 'divine',
+  /* §29 level 5: a 9mm pistol, and the first weapon in the game that does not
+     require you to be standing in his reach.
+
+     ===================================================================
+     HITSCAN, AND WHAT THAT COSTS THE REST OF THE FILE
+     ===================================================================
+     `hitscan: true` means engine/arena3d.js resolves this with a STRAIGHT RAY
+     from the muzzle (A.hitscan), not with the reach+arc cone every other
+     ability is priced by. That is not a cosmetic difference: an arc that is
+     narrow enough to feel like aiming (say 8°) still spans 1.9m of floor at
+     14m, so at range a "narrow arc" is a lane you cannot miss out of, and at
+     point-blank it is a cone you cannot miss INTO. A ray misses by a
+     centimetre and hits by a centimetre at every distance, which is the only
+     honest way to make aiming the skill. `arc: 0` is stated below so anything
+     that reads `arc` without noticing `hitscan` gets a cone of zero width and
+     hits nothing, rather than silently inheriting a 60° default swing.
+
+     `rayRadius` is how fat the bullet is: 0.55m, which is KNIGHT_RADIUS
+     exactly — the ray is thin and the TARGET is a knight-wide vertical
+     capsule, so "the line touches his body" is the whole test. It is deliberately
+     not padded: the sights are the crosshair, and a bullet that lands because
+     the engine widened the target by a hand's breadth teaches nothing.
+     Several knights on one line: the NEAREST one eats it. A bullet does not
+     pick a favourite and it does not pass through the first body.
+
+     ===================================================================
+     THE NUMBERS, AND WHY THEY ARE NOT STRICTLY BETTER THAN WALKING IN
+     ===================================================================
+     At the level it arrives on (5): Chloe atk 12 + 2*4 + 4 (Crimson Fret) =
+     24, the knight's def 5, and `physical` reads 1.0 against him — his plate
+     `resists:{physical:1.0}` overrides the chart's 2x, exactly as it does for
+     your fists, so the gun buys no type advantage either.
+
+     MEASURED through combat3.hitEnemy with the 0.9-1.1 roll pinned to 1.0 —
+     these are outputs, not intentions:
+
+       move                       dmg   sta   dmg/sta   reach    window
+       punch (3 hits)              24     8      3.00    2.6m    1.00s lock
+       gun, one round              25    10      2.50    22m     0.22s lock
+       gun, a whole magazine (6)  150    60      2.50    22m     1.6s + 3.2s reload
+       hammer_fist (§29 deleted)   43    26      1.65    2.9m    1.04s + 3.2s cd
+
+     Read the first two rows together, because they are the design: ONE round
+     is one entire punch flurry, delivered in a fifth of the time from across
+     the arena — and it costs 25% MORE stamina to do it. The gun is the worst
+     damage-per-stamina in the kit that is not the water wave. It buys reach
+     and burst; it never buys efficiency, so closing to melee is still the way
+     you actually kill things when you can afford to be there.
+     Against the fist §29 deleted it is not close, and that is the argument for
+     deleting it: hammer_fist asked 26 stamina to stand inside his sword for a
+     number the gun beats for 10 at 22 metres.
+
+     THE MAGAZINE IS THE GATE, NOT THE STAMINA. 10 stamina is cheap enough to
+     mash — the level-5 pool is 40 + 3*4 = 52, so a full bar is five trigger
+     pulls in a second and a half. `charges: 6` sets the burst at six, which is
+     one more than the pool can pay for: you cannot empty a full magazine from
+     a full stamina bar. Whichever runs out first, you are then standing there
+     with no evade (22 sta) for 3.2 seconds. That is the price and it is the
+     whole tension — the reload lands when you chose badly, not on a timer.
+
+     A HALF-EMPTY MAGAZINE NEVER TOPS ITSELF UP. `magazine: true` reloads only
+     from empty (combat3.tick), so two rounds left are two rounds left until
+     you spend them. That is deliberate: it means the reload is something you
+     TRIGGER by dumping the mag, at a moment of your choosing, instead of a
+     background timer that quietly forgives you.
+
+     RANGE 22m, and 14 of it is free. Full power to 14m — the Ring's own radius
+     (§24: bodies clamp at r=14) — so anywhere in the church, and most of the
+     Ring, a hit is a hit at face value. From 14 to 22 it falls linearly to
+     0.6x, and past 22 the ray simply stops: a knight hugging the far kerb
+     while you hug yours (28m apart) is out of the fight, which is the thing
+     that stops the gun trivialising the biggest floor in the game. */
+  gun_9mm: {
+    id: 'gun_9mm', name: '9mm', icon: '🔫', type: 'physical',
+    desc: 'A pistol. It hits where the crosshair is, as far as you can see, and it holds six.',
+    cost: { sta: 10 },
+    /* Almost no wind-up: the trigger IS the cast. 90ms is one frame of arm
+       before the flash so the shot has a moment to belong to, and 130ms of
+       recover so a full magazine is a stutter of six rather than one press.
+       The 280ms cooldown is the FIRE RATE and it is the thing that actually
+       limits the burst (220ms of lock < 280ms), which is where a fire rate
+       belongs — in one number, not smeared across the lock. */
+    castMs: 90, recoverMs: 130, cooldownMs: 280,
+    /* Six up the pipe, and 3.2s to put six more in. See the block above for
+       why 6 is one more than the stamina bar can pay for. */
+    charges: 6, magazine: true, rechargeMs: 3200,
+    hitscan: true,
+    range: 22.0, arc: 0, rayRadius: 0.55,
+    /* Full damage inside one Ring radius, then a linear slide to `min` at
+       `max`. Stated as three numbers rather than a curve because the engine
+       hands the result straight to combat3.hitEnemy as its `mult`, the same
+       argument the §22 stagger bonus rides on — so distance and footing are
+       priced by one multiplication and neither can hide inside the other. */
+    falloff: { full: 14.0, max: 22.0, min: 0.6 },
+    power: 115, usesMag: false,
+    hits: 1, hitAtMs: [90],
+    vfx: 'gunshot',
+    /* §29: IT LIVES ON THE MOUSE, WHICH IS WHY THE LADDER CAN AFFORD IT.
+       §27B put mouseL/mouseR outside the nine number keys, so this ability
+       costs the hotbar nothing — its ladder row (data/skilltree.js level 5)
+       grants no `slot`, and the arithmetic there is recounted for it.
+       `mouseR` first so mouseL keeps the hands: in the ROOM the mouse still
+       opens and closes them and grabs (§16), and left is the one the player's
+       muscle memory has already spent on that. The list is a PREFERENCE, in
+       order — engine/combat3.js takes the first free one, falls through to a
+       number key if the player has filled both, and never evicts anything. */
+    bindsTo: { mouse: ['mouseR', 'mouseL'] },
+    grantedBy: 'tree'
+  },
+  /* §29: the surviving fist. This is `hollow_breaker` renamed — id AND label —
+     not a new move: divine damage, two hit windows, the rising strike, all
+     unchanged. The id changed with the name because there are no saves (§15)
+     to migrate and a stale id is exactly how the next reader concludes the two
+     were different moves. Grep proves nothing references the old one.
+
+     It reuses the punch rig at different timing and type; the animation effort
+     went into `punch` (§17). What earns it a row is the TYPE: divine reads 2.0
+     against his occult, and his plate only blunts `physical`, so this is the
+     one hand-to-hand option the armour does nothing about. Measured at level 9
+     (mag 29, his def 6.2): 93 a hit, twice, 186 for one press — against 34 for
+     one 9mm round at the same level. Closing the distance is still how you
+     actually kill him; the pistol is how you survive getting there. */
+  killer_fist: {
+    id: 'killer_fist', name: 'Killer Fist', icon: '✨', type: 'divine',
     desc: 'A rising strike that hurts the things armour cannot protect.',
     cost: { mana: 22, sta: 14 },
     castMs: 520, recoverMs: 380, cooldownMs: 6000, charges: 1,

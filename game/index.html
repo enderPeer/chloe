@@ -76,6 +76,12 @@
      feature shipped dead — §24 did exactly that — and this one would be silent
      about it: arena3d degrades to a static knight rather than throwing. -->
 <script src="js/engine/knightanim.js"></script>
+<!-- §29: the 9mm first-person prop. Before arena3d.js, which mounts it at init
+     and ticks it every frame. Same warning as the two tags above — a module
+     with no script tag is a whole feature shipped dead, and this one would be
+     silent about it: arena3d degrades to no visible pistol rather than
+     throwing, so the shot would keep working and nobody would see a gun. -->
+<script src="js/engine/gunrig.js"></script>
 <script src="js/engine/arena3d.js"></script>
 <script src="js/ui/ui.js"></script>
 <script src="js/ui/loading.js"></script>

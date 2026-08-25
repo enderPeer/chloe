@@ -7,7 +7,10 @@
      kind:'stat'|'move'|'passive'|'keystone',
      grant }             // stat -> {stat:{...}} | move -> {move:moveId}
                          // passive/keystone -> {passive:{...}} (keystone documented in desc)
-   Totals: 60 nodes / 90 points per character.
+   Totals: ~60 nodes / ~90 points per character — approximate since §29 removed
+   two of Chloe's Combat v3 nodes with the abilities they granted. Nothing reads
+   these totals; they are a sense of scale, and no code may start depending on
+   an exact count without a test that keeps it true.
    Tree-gated move ids referenced here MUST exist in data/moves.js:
      Chloe: crimson_riff, pyre_burst, judgement_chord, hymn_of_static,
             mercy_note, iron_string, arcane_feedback, raw_howl
@@ -32,21 +35,32 @@ CHLOE.data.trees = {
       /* ---- Combat v3 fists (§17) ----
          The real-time hotbar starts with ONE key and one ability (punch).
          These nodes are the only source of extra abilities and extra number
-         keys, so every level-up spent here literally widens the hotbar. */
+         keys, so every level-up spent here literally widens the hotbar.
+
+         §21 DELETED THE SCREEN THAT SPENT THESE and §19 made progression a
+         ladder, so in the shipped game nobody buys a node and these grants
+         reach nobody: engine/combat3.knownAbilities() reads them only as the
+         "legacy point-buy" fallback behind data/skilltree.js. They are kept
+         anyway because engine/tree.js effectiveStats still walks this table,
+         and because a move id that exists in one tree and not the other is
+         how the two quietly disagree.
+
+         §29 pruned them to match the ability table: `c_v3_hammer` and
+         `c_v3_ember` are GONE with the abilities they granted, and the breaker
+         node now grants `killer_fist` under its new name. The two nodes that
+         required `c_v3_ember` were re-hung on the keybind nodes rather than on
+         each other — a requires[] entry pointing at a deleted node is a branch
+         nothing can ever reach, which is worse than the node being missing. */
       { id:'c_v3_slot1', branch:'trunk', name:'Second Nature', desc:'Muscle memory for one more trick. +1 ability keybind (key 2).',
         cost:1, requires:[], pos:{x:38,y:2}, kind:'passive', grant:{abilitySlot:1} },
-      { id:'c_v3_hammer', branch:'steel', name:'Hammer Fist', desc:'Unlocks the Hammer Fist ability — one slow, heavy overhand.',
-        cost:2, requires:['c_v3_slot1'], pos:{x:26,y:2}, kind:'move', grant:{ability:'hammer_fist'} },
       { id:'c_v3_slot2', branch:'trunk', name:'Quick Hands', desc:'+1 ability keybind (key 3).',
         cost:1, requires:['c_v3_slot1'], pos:{x:62,y:2}, kind:'passive', grant:{abilitySlot:1} },
-      { id:'c_v3_ember', branch:'pyre', name:'Ember Jab', desc:'Unlocks Ember Jab — a jab that lights on contact.',
-        cost:2, requires:['c_v3_slot2'], pos:{x:74,y:2}, kind:'move', grant:{ability:'ember_jab'} },
-      { id:'c_v3_breaker', branch:'voice', name:'Hollow Breaker', desc:'Unlocks Hollow Breaker — divine damage that ignores plate.',
-        cost:3, requires:['c_v3_ember'], pos:{x:86,y:2}, kind:'move', grant:{ability:'hollow_breaker'} },
+      { id:'c_v3_breaker', branch:'voice', name:'Killer Fist', desc:'Unlocks Killer Fist — divine damage that ignores plate.',
+        cost:3, requires:['c_v3_slot2'], pos:{x:86,y:2}, kind:'move', grant:{ability:'killer_fist'} },
       { id:'c_v3_slot3', branch:'trunk', name:'Third Hand', desc:'+1 ability keybind (key 4).',
         cost:1, requires:['c_v3_slot2'], pos:{x:50,y:2}, kind:'passive', grant:{abilitySlot:1} },
       { id:'c_v3_tornado', branch:'pyre', name:'Fire Tornado', desc:'Unlocks Fire Tornado — trace the sign, drop a pillar of fire on them.',
-        cost:3, requires:['c_v3_ember','c_v3_slot3'], pos:{x:92,y:8}, kind:'move', grant:{ability:'fire_tornado'} },
+        cost:3, requires:['c_v3_slot3'], pos:{x:92,y:8}, kind:'move', grant:{ability:'fire_tornado'} },
 
       /* ---- trunk (5) ---- */
       { id:'c_t1', branch:'trunk', name:'First Chord', desc:'The night it all started. +8 life.',
