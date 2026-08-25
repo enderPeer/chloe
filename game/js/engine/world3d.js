@@ -1432,7 +1432,8 @@ CHLOE.engine = CHLOE.engine || {};
     if (side === 'l') hands.targetL = 1; else hands.targetR = 1;
     // grabs only while locked: unlocked clicks are aim-lock/raycast requests
     // and the crosshair ray would not match where the user actually clicked
-    if (isLocked() && !(side === 'l' && (hovered || tvHovered || stageBoard.hover))) {
+    if (isLocked() &&
+        !(side === 'l' && (hovered || tvHovered || stageBoard.hover || giftHover))) {
       tryGrab(side);
     }
   }
@@ -1677,8 +1678,12 @@ CHLOE.engine = CHLOE.engine || {};
     stageBoard.hover = arrowHit ? arrowHit.which : null;
     stageBoard.target = arrowHit ? arrowHit.target : null;
 
-    // §16 pickup hover for the HUD hint — enemy, TV and the board win
-    if (!hovered && !tvHovered && !stageBoard.hover && !grab) {
+    /* §16 pickup hover for the HUD hint — enemy, TV, the board and the
+       §27D giftbox all win. The box was added to both click chains but not to
+       this one, so a pickup behind it stayed "hoverable": the HUD could offer
+       an item that the click would never take, because onClick stops at the
+       box. One list, one order. */
+    if (!hovered && !tvHovered && !stageBoard.hover && !giftHover && !grab) {
       var found = pickupUnderCrosshair();
       pickupHover = found ? { itemId: found.pk.itemId, label: found.pk.label, dist: found.dist } : null;
     } else {
