@@ -573,18 +573,32 @@ CHLOE.engine.combat3 = (function () {
       enemyStats: es,
       /* One entry per knight on the floor. §28 A: each carries its OWN level
          and its own stat line, because they no longer share one. They all
-         open at the ladder's spawn level (a brute one higher) and diverge
-         from there — `syncLevels` below repices them every tick off what the
-         3D layer says each knight has grown to. `enemyStats` above stays as
-         the ROUND's stat block: it is what the poster and the HUD show, and
-         what a caller with no per-knight index still gets. */
+         open on the §30 SENIORITY ladder and diverge from there —
+         `syncLevels` below reprices them every tick off what the 3D layer
+         says each knight has grown to. `enemyStats` above stays as the
+         ROUND's stat block: it is what the poster shows and what a caller
+         with no per-knight index still gets.
+
+         §30: the squad no longer opens flat. Round N fields N knights and
+         adds exactly one per round, so the index IS a join date — index 0
+         has been coming since round 1 and opens at level N, the last index
+         walked in tonight and opens at 1. The personality bonus cannot be
+         applied here and the empty string is deliberate: temperaments are
+         dealt by the §22 brain in the 3D layer, which does not exist yet
+         when start() runs. The brute's +1 arrives on the first syncLevels
+         tick, from the layer that actually knows what he is.
+
+         `os` is built INSIDE the loop. Every entry used to share one stats
+         object by reference, which was harmless while they all had the same
+         level and is a corruption the moment they do not. */
       enemies: (function () {
         var arr = [];
-        var open = kt ? kt.spawnLevel('') : enemyLevel;
-        var os = kt ? kt.stats(open, def) : es;
         for (var q = 0; q < count; q++) {
+          var sen = kt ? kt.seniorityFor(q, count) : 1;
+          var open = kt ? kt.spawnLevel('', sen) : enemyLevel;
+          var os = kt ? kt.stats(open, def) : es;
           arr.push({ index: q, life: os.life || 40, max: os.life || 40, alive: true,
-                     level: open, stats: os });
+                     level: open, seniority: sen, stats: os });
         }
         return arr;
       })(),
@@ -1360,7 +1374,10 @@ CHLOE.engine.combat3 = (function () {
              which is correct for "what round is this" — but the spread is
              here the moment that plate wants to show a range instead. */
           each: st.enemies.map(function (e) {
-            return { life: e.life, max: e.max, alive: e.alive, level: e.level || 1 };
+            // §30: seniority rides along so a HUD (or a test) can tell the
+            // veteran from the newcomer without re-deriving it from the index
+            return { life: e.life, max: e.max, alive: e.alive,
+                     level: e.level || 1, seniority: e.seniority || 1 };
           }),
           roundLevel: st.enemyLevel,
           levels: st.enemies.map(function (e) { return e.level || 1; }),

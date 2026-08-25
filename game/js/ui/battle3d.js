@@ -407,9 +407,27 @@ CHLOE.ui.battle3d = (function () {
     /* §21: name it with the level it actually is, and how many. The plate
        is the only place the fight tells you he has grown. */
     var kt = CHLOE.engine.knighttree;
-    var kL = kt ? kt.level() : null;
-    els.enemyName.textContent = snap.enemy.name +
-      (kL ? '  ·  Lv ' + kL : '') +
+    /* §30: the plate names what is ACTUALLY on the floor, not the round.
+       It used to print knighttree.level() — the round baseline — which was
+       already only approximately true under §28 and becomes a flat lie once
+       the squad is a ladder: round 5 would read 'Lv 5' while four of the
+       five knights are below it. The per-knight numbers have been in the
+       snapshot since §28 (`each[].level`, `levels`) with nothing reading
+       them; this reads them.
+       A RANGE, not the list: nine numbers do not fit a 420px plate, and the
+       range is what the player needs — the top of it is the knight who will
+       hurt them. Dead knights drop out, so as the veteran falls the ceiling
+       visibly comes down with him. */
+    var pool = (snap.enemy.each || [])
+      .filter(function (e) { return e.alive; })
+      .map(function (e) { return e.level || 1; });
+    if (!pool.length) { pool = (snap.enemy.levels || []).slice(); }
+    if (!pool.length && kt) { pool = [kt.level()]; }
+    var lo = pool.length ? Math.min.apply(null, pool) : null;
+    var hi = pool.length ? Math.max.apply(null, pool) : null;
+    var lvText = (lo == null) ? ''
+               : ('  ·  Lv ' + (lo === hi ? lo : lo + '-' + hi));
+    els.enemyName.textContent = snap.enemy.name + lvText +
       (snap.enemy.count > 1 ? '  ·  ' + snap.enemy.alive + '/' + snap.enemy.count : '');
     refreshHotbar(snap);
 

@@ -101,13 +101,19 @@ CHLOE.engine = CHLOE.engine || {};
     A.isShoved = function () { return false; };
     /* §28 A per-knight levels. engine/combat3.js PULLS these every tick to
        price the squad, so on a machine with no WebGL it must answer with
-       something a stat line can be built from: the round's own baseline,
-       which is exactly what the pre-§28 game did for every knight. Returning
-       [] here would silently reprice the whole squad to level 1. */
+       something a stat line can be built from.
+       §30: it answers with the SENIORITY ladder, not N copies of the round
+       baseline. The rule is pure arithmetic over the squad index — it needs
+       no WebGL, no brain and no seconds — so a machine that cannot render
+       fights the same squad shape as one that can. N copies of the baseline
+       would make the no-WebGL floor HARDER than the real game, which is the
+       one direction a degrade path must never fail in. */
     A.knightLevels = function (n) {
       var kt = CHLOE.engine.knighttree;
-      var L = kt ? kt.level() : 1, out = [];
-      for (var i = 0; i < Math.max(1, n || 1); i++) out.push(L);
+      var count = Math.max(1, n || 1), out = [];
+      for (var i = 0; i < count; i++) {
+        out.push(kt ? kt.spawnLevel('', kt.seniorityFor(i, count)) : 1);
+      }
       return out;
     };
     // no knight is ever mid-swing on a dead API
@@ -915,8 +921,11 @@ CHLOE.engine = CHLOE.engine || {};
       k.alive = true;
       /* §22: a fresh brain per knight, per round — the personality is dealt
          HERE, so a squad is a mix of fighters rather than one temperament
-         wearing N bodies, and last round's stagger meter never carries over. */
-      initBrain(k, i);
+         wearing N bodies, and last round's stagger meter never carries over.
+         §30 hands it the squad SIZE as well, because a knight's opening level
+         is his seniority and seniority only means anything relative to how
+         many are on the floor: index 0 of six has been coming six rounds. */
+      initBrain(k, i, n);
       restoreSword(k);
       k.anim.dashCd = i * 1.2;          // stagger their dashes
       // fan them out across the nave in front of the altar
@@ -973,9 +982,15 @@ CHLOE.engine = CHLOE.engine || {};
   A.knightLevels = function (n) {
     var out = [], i;
     for (i = 0; i < knights.length; i++) out.push(knights[i].level || 1);
+    /* §30: pad with the SENIORITY level for that index, not with the round
+       baseline. The padded indices are the tail of the squad, and the tail is
+       the JUNIOR end — filling it with the round's own level priced the
+       newcomers as veterans, which is both wrong and backwards. */
     var kt = ktree();
-    var pad = kt ? kt.level() : 1;
-    for (i = out.length; i < (n || 0); i++) out.push(pad);
+    var count = Math.max(knights.length, n || 0, 1);
+    for (i = out.length; i < (n || 0); i++) {
+      out.push(kt ? kt.spawnLevel('', kt.seniorityFor(i, count)) : 1);
+    }
     return out;
   };
 
@@ -3540,7 +3555,7 @@ CHLOE.engine = CHLOE.engine || {};
     return names[(personaSeed + Math.max(0, i)) % names.length];
   }
 
-  function initBrain(k, i) {
+  function initBrain(k, i, n) {
     var name = personaFor(i);
     k.brain = {
       state: 'stalk', prev: '', personality: name, tune: buildTune(name),
@@ -3570,9 +3585,20 @@ CHLOE.engine = CHLOE.engine || {};
     /* §28 A: a fresh ladder with the fresh brain. The personality was dealt
        one line above, and it is what sets both where he starts and how fast
        he climbs — so this has to happen here, after the deal, and not at
-       makeKnightState() time when he has no temperament yet. */
+       makeKnightState() time when he has no temperament yet.
+
+       §30: WHERE he starts is now seniority first, temperament second. The
+       squad index is the join date — spawnSquad reuses knights[0] across
+       rounds and splices the extras off the end, so index 0 is literally the
+       same object that fought round 1 and the last index is the body that
+       walked in tonight. `seniority` is stored because updateLevel needs it
+       every frame and re-deriving it there would mean threading the squad
+       size through the whole knight update. */
     var kt = ktree();
-    k.level = kt ? kt.spawnLevel(name) : 1;
+    var count = Math.max(1, n || knights.length || 1);
+    k.seniority = kt ? kt.seniorityFor(i, count) : 1;
+    k.joinRound = Math.max(1, roundNow() - k.seniority + 1);
+    k.level = kt ? kt.spawnLevel(name, k.seniority) : 1;
     k.levelT = 0;
     k.levelTell = 0;
     return k.brain;
@@ -3586,7 +3612,12 @@ CHLOE.engine = CHLOE.engine || {};
     if (!kt || !k.alive || !k.brain) return;
     k.levelT += dt;
     if (k.levelTell > 0) k.levelTell = Math.max(0, k.levelTell - dt);
-    var want = kt.levelFor(k.brain.personality, k.levelT, roundNow());
+    /* §30: seniority is the fourth argument, and without it this line would
+       silently undo the whole change — levelFor computed an ABSOLUTE level
+       from seconds alone, so a veteran spawned at level 6 was repriced to 1
+       on his first frame. He now climbs FROM his opening level, and stops
+       overCap past it rather than overCap past the round. */
+    var want = kt.levelFor(k.brain.personality, k.levelT, roundNow(), k.seniority);
     if (want === k.level) return;
     k.level = want;
     /* THE TELL. Not a pose — a pose would interrupt whatever he is doing and
@@ -4501,6 +4532,11 @@ CHLOE.engine = CHLOE.engine || {};
       levelCap: ktree() ? ktree().capForRound(roundNow()) : 1,
       knightLevels: knights.map(function (k) { return k.level || 1; }),
       knightLevelT: knights.map(function (k) { return +(k.levelT || 0).toFixed(1); }),
+      /* §30: what each knight OPENED at and why. Without these two a test
+         cannot tell a seniority ladder from a coincidence — knightLevels
+         alone shows the numbers but not that index 0 earned his. */
+      knightSeniority: knights.map(function (k) { return k.seniority || 1; }),
+      knightJoinRound: knights.map(function (k) { return k.joinRound || 1; }),
       // §28 A2: the round's speed multiplier, and what it is doing to a swing
       roundSpeed: +roundSpeed().toFixed(3),
       squad: knights.length,

@@ -65,28 +65,79 @@ CHLOE.engine.knighttree = (function () {
     return out;
   }
 
-  /* Where a knight of this temperament starts. An unknown personality (or
-     none, on the fallback totem) is treated as the plain baseline rather than
-     refused — a knight who cannot level is worse than one who levels dully. */
-  function spawnLevel(personality) {
-    var g = growth();
-    return clamp((g.startLevel || 1) + (g.baseBonus[personality] || 0));
+  /* §30: how many rounds this knight has been COMING, from his place in the
+     squad. Round N fields N knights and each round adds exactly one, so the
+     squad index IS a join date: index 0 has been here since round 1, the last
+     index walked in tonight. arena3d reuses knights[0] across rounds and
+     splices the extras, so index 0 is literally the same object that fought
+     round 1 — the arithmetic names something the code already does.
+     1-based: a knight arriving this round has seniority 1, never 0. */
+  function seniorityFor(index, count) {
+    var n = Math.max(1, Math.floor(count || 1));
+    var i = Math.max(0, Math.min(n - 1, Math.floor(index || 0)));
+    return n - i;
   }
 
-  // How far past the round's own baseline any knight is allowed to climb.
+  /* Where a knight of this temperament starts. An unknown personality (or
+     none, on the fallback totem) is treated as the plain baseline rather than
+     refused — a knight who cannot level is worse than one who levels dully.
+
+     §30 adds the second term: he also carries a level for every round he has
+     already come back from. Seniority 1 — the newcomer — reproduces §28's
+     number exactly, which is why every caller that does not know about
+     seniority keeps behaving as it did. The brute's +1 rides on top of both,
+     so temperament still separates two knights who joined the same night. */
+  function spawnLevel(personality, seniority) {
+    var g = growth();
+    var s = Math.max(1, Math.floor(seniority || 1));
+    return clamp((g.startLevel || 1) + (g.baseBonus[personality] || 0) +
+                 (s - 1) * (T().levelPerRound || 1));
+  }
+
+  /* How far past the round's own baseline ANY knight may climb. §28 used
+     this as every knight's ceiling; §30 keeps it as the round's ceiling —
+     what the round is worth plus the overrun — because debug() and the
+     balance note are both written in terms of it. */
   function capForRound(r) {
     return clamp(levelForRound(r) + (growth().overCap || 0));
   }
 
+  /* §30: the ceiling for ONE knight, and the reason the ladder does not
+     collapse. Under §28 every knight was capped at round + overCap, so a long
+     round-5 fight ended with five knights at level 7 — the spread evaporated
+     precisely when the fight had gone on long enough for it to matter. A
+     ceiling measured from his OWN opening level keeps the shape: the veteran
+     still tops out where §28 put him (round + overCap, because his opening
+     level IS the round), and the newcomer tops out at overCap + 1. */
+  function capForKnight(personality, seniority, r) {
+    var g = growth();
+    var base = spawnLevel(personality, seniority);
+    return Math.min(clamp(base + (g.overCap || 0)),
+                    clamp(capForRound(r == null ? round() : r) ));
+  }
+
   /* Seconds ALIVE in this fight -> his level. Floor, not round: a knight is
      what he has finished earning, so the tell fires on a boundary the player
-     can be shown rather than halfway through one. */
-  function levelFor(personality, seconds, r) {
+     can be shown rather than halfway through one.
+
+     §30: growth is measured FROM HIS OWN OPENING LEVEL rather than from a
+     shared floor of 1, and is capped against his own ceiling. Both halves are
+     required — an absolute ladder computed from seconds alone would overwrite
+     a veteran's opening level on the first frame, which is exactly what §28's
+     version did to anything that tried to set one.
+
+     Omitting the seniority argument makes him a NEWCOMER (seniority 1), which
+     is §28's opening level exactly — but not §28's ceiling: he now tops out
+     overCap past his OWN opening rather than past the round baseline, so
+     levelFor('brute', 120) answers 4 where §28 answered 7. That is the change,
+     not a regression: a knight who walked in tonight must not finish the
+     fight level with the one who has been coming since round 1. */
+  function levelFor(personality, seconds, r, seniority) {
     var g = growth();
     var per = Math.max(0.1, (g.secondsPerLevel || 6) * (g.rate[personality] || 1));
-    var lv = spawnLevel(personality) + Math.floor(Math.max(0, seconds || 0) / per);
-    var cap = capForRound(r == null ? round() : r);
-    return Math.min(cap, clamp(lv));
+    var lv = spawnLevel(personality, seniority) +
+             Math.floor(Math.max(0, seconds || 0) / per);
+    return Math.min(capForKnight(personality, seniority, r), clamp(lv));
   }
 
   // Seconds per level for this temperament — for the tell, and for a test.
@@ -157,7 +208,9 @@ CHLOE.engine.knighttree = (function () {
     levelForRound: levelForRound, level: level, round: round, rowsUpTo: rowsUpTo,
     patterns: patterns, stats: stats, mults: mults, rowAt: rowAt, nextRow: nextRow,
     // §28 A — the per-knight ladder; compose with patterns()/stats() above
+    // §30 — seniorityFor/capForKnight, and spawnLevel/levelFor take seniority
     spawnLevel: spawnLevel, levelFor: levelFor, capForRound: capForRound,
+    seniorityFor: seniorityFor, capForKnight: capForKnight,
     secondsPerLevel: secondsPerLevel, tellMs: tellMs
   };
 })();
