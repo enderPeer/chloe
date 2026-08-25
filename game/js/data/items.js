@@ -2,6 +2,7 @@
    effect conventions:
      { hp:n }                 -> restore n life
      { mp:n }                 -> restore n magic
+     { sta:n }                -> §31: restore n stamina (evade, sprint, most swings)
      { revivePct:n }          -> revive at n% life
      { revivePct:n, self:1 }  -> §27C: revive the DRINKER, and do it by itself
      { cure:[...] }           -> clear the listed §12 statuses (and their buildup meters)
@@ -21,6 +22,27 @@ CHLOE.data.items = {
   energy_drink: {
     id: 'energy_drink', name: 'Energy Drink', effect: { mp: 20 }, price: 20, icon: '🥤',
     desc: 'Tastes like neon. Restores 20 MP.'
+  },
+  /* §31 — the third pool finally gets a bottle. Life had the bandage and
+     magic had the drink; stamina, which pays for every evade and most of
+     the swings, had nothing you could hold.
+
+     28 IS AUTHORED AGAINST ONE NUMBER: an evade costs 22 (data/abilities.js
+     evade). So this is exactly "one more dodge, right now", with a little
+     change — the thing you reach for when the bar is empty and the wind-up
+     has already started. A round number like 30 would buy the same dodge
+     and say less about why.
+
+     CHEAPER THAN THE BANDAGE (14 against 15 for 30 life) even though the
+     number is smaller, because stamina is the one pool that comes back on
+     its own: combat3 regenerates it at 9/s, so 28 stamina is about three
+     seconds you would have got for free. What you are buying is the three
+     seconds you do not have, which is worth less than life you cannot get
+     back at all. Priced under the bandage so the first shop trip is a real
+     choice rather than an obvious one. */
+  smelling_salts: {
+    id: 'smelling_salts', name: 'Smelling Salts', effect: { sta: 28 }, price: 14, icon: '🧂',
+    desc: 'Ammonia and a jolt. The room snaps back. Restores 28 stamina.'
   },
   adrenaline_shot: {
     id: 'adrenaline_shot', name: 'Adrenaline Shot', effect: { revivePct: 50 }, price: 60, icon: '💉',
@@ -110,8 +132,15 @@ CHLOE.data.itemRules = (function(){
   'use strict';
 
   /* The rule, as data. Any effect key here means "restores a pool on yourself,
-     the moment you press it". */
-  var COMBAT_EFFECT_KEYS = ['hp', 'mp'];
+     the moment you press it".
+     §31 added 'sta'. That one word is what makes the smelling salts bindable
+     to a key, offered in the Moves screen's pockets group and auto-placed
+     into a pocket at run start — the header's promise that a new potion is a
+     data edit and nothing else holds for the stamina pool too. The engine
+     side (combat3.useItem) had to learn the pool separately: it read hp and
+     mp only, so a {sta:n} item was bindable, pressable, and then refused as
+     "Already full." at full health. */
+  var COMBAT_EFFECT_KEYS = ['hp', 'mp', 'sta'];
 
   /* Accepts an item id or an item def, because callers have one or the other
      depending on whether they came from a bind string or the bag. */

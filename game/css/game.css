@@ -1694,9 +1694,18 @@ button:disabled .cost-chip{ opacity:.7; }
 .b3d-res-row .num{ font-size:.6rem; color:var(--dim); width:56px; text-align:right; flex:0 0 auto; }
 
 /* hotbar */
+/* §31: the strip is now up to THIRTEEN tiles — 9 keys, 2 buttons, 2 wheel
+   directions — and 13 x 66px plus gaps is ~935px, which hangs off both edges
+   of a laptop and off the bottom of a phone. It wraps rather than shrinks:
+   a tile that scales down loses the icon before it loses the number, and the
+   icon is what you actually aim at mid-fight. `max-width` keeps it inside the
+   viewport with the same 50%/translateX centring it always had, and
+   `justify-content:center` keeps a wrapped second row centred under the
+   first instead of hugging the left edge. */
 .b3d-hotbar{
   position:absolute; left:50%; bottom:calc(1.1rem + env(safe-area-inset-bottom));
   transform:translateX(-50%); display:flex; gap:.4rem; z-index:6;
+  max-width:min(96vw, 960px); flex-wrap:wrap; justify-content:center;
 }
 .b3d-slot{
   position:relative; width:66px; height:66px; overflow:hidden;
@@ -1751,7 +1760,14 @@ button:disabled .cost-chip{ opacity:.7; }
    row. The label is 'LMB'/'RMB' — never a 10 or an 11, which would be a lie
    about how you press it — so the key corner needs the room for three glyphs. */
 .b3d-slot.mouse{ margin-left:.28rem; border-color:#3a4152; }
-.b3d-slot.mouse:first-of-type{ margin-left:.55rem; }
+/* The wider gap that separates the number keys from the mouse family. This
+   was `.mouse:first-of-type`, which never matched anything: :first-of-type
+   means "first <div> among its siblings" and buildHotbar appends the nine
+   key tiles first, so the hotbar's first div is never a .mouse one. The
+   adjacent-sibling form says what was meant — the first .mouse tile that
+   FOLLOWS a key tile — and it matters more now that four tiles share that
+   side of the divide instead of two. */
+.b3d-slot:not(.mouse) + .b3d-slot.mouse{ margin-left:.55rem; }
 .b3d-slot.mouse .key{ font-size:.52rem; color:#8fa2c0; letter-spacing:.04em; }
 .b3d-slot.mouse.ready{ border-color:var(--red); }
 
