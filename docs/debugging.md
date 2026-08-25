@@ -386,13 +386,16 @@ grep. Also plausible, also consistent, also **wrong** — measured directly, the
 a CR becomes the empty pattern. This one is probably right, and it is deliberately not asserted
 here, because:
 
-**Every instrument in the chain also handles carriage returns specially, so the measurement is part
-of the phenomenon.** Command substitution `$(…)` strips a trailing CR, so a byte count taken through
-it reports zero for a byte that exists. A CR reaching the terminal returns the cursor and overwrites
-the line already printed, so a result *read off the screen* can be a different number from the one
-produced — that is how explanation 2 got its supporting evidence. Two runs of the same
-`printf '%s' $'\r' | wc -c` disagreed, 1 against 0, depending only on whether the value passed
-through a substitution.
+**Every instrument in the chain may handle carriage returns specially, so the measurement becomes
+part of the phenomenon.** The same pipeline answers differently depending only on how it is read:
+`printf '%s' $'\r' | wc -c` reports **1** piped directly and **0** through a command substitution.
+The tempting explanation — that `$(…)` strips a trailing CR — does not survive its own control
+either: `x=$(printf 'abc\r')` gives `${#x}` of **4**, and interior carriage returns survive too, so
+substitution is not discarding them in general. Something narrower is happening and this page does
+not know what, so it claims only the observation. Separately and definitely, a CR reaching the
+terminal returns the cursor and overwrites the line already printed, so a number *read off the
+screen* can differ from the number produced — which is how explanation 2 collected its supporting
+evidence.
 
 What survives all three passes, and is what you actually need:
 
