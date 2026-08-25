@@ -29,12 +29,72 @@ CHLOE.engine.knighttree = (function () {
     return clamp(1 + ((round || 1) - 1) * (T().levelPerRound || 1));
   }
 
-  /* His level is the round you are on — beating him is what makes him worse. */
+  /* THE ROUND BASELINE (§28 A). Every existing caller keeps reading this and
+     keeps getting what it always got: the poster headline, `combat3`'s
+     opening enemy stats, the HUD plate and the pattern pool a round rolls
+     from. What changed is what it MEANS — it is the level the ROUND is worth,
+     not the level any particular knight currently is. A knight's own number
+     comes from levelFor() below and is capped against this one. */
   function level() {
+    return levelForRound(round());
+  }
+
+  function round() {
     var p = CHLOE.engine.party;
     var rs = p && p.state ? p.state.runStats : null;
-    return levelForRound((rs && rs.round) || 1);
+    return (rs && rs.round) || 1;
   }
+
+  /* ---------- §28 A: the per-knight ladder ----------
+     A knight's level is his own: he spawns at 1 (a brute at 2) and climbs on
+     seconds alive at a rate his §22 personality sets, capped `overCap` levels
+     past the round's baseline so a fight nobody ends cannot spiral.
+
+     These are PURE FUNCTIONS of (personality, seconds, round) exactly like
+     everything else in this file — no state, nothing to save or de-sync
+     (§15). The knight instance owns the seconds; this owns what they mean. */
+  var GROWTH_DEFAULT = {
+    startLevel: 1, secondsPerLevel: 6, overCap: 2, tellMs: 800,
+    rate: {}, baseBonus: {}
+  };
+  function growth() {
+    var g = T().growth || {};
+    var out = {}, k;
+    for (k in GROWTH_DEFAULT) out[k] = GROWTH_DEFAULT[k];
+    for (k in g) out[k] = g[k];
+    return out;
+  }
+
+  /* Where a knight of this temperament starts. An unknown personality (or
+     none, on the fallback totem) is treated as the plain baseline rather than
+     refused — a knight who cannot level is worse than one who levels dully. */
+  function spawnLevel(personality) {
+    var g = growth();
+    return clamp((g.startLevel || 1) + (g.baseBonus[personality] || 0));
+  }
+
+  // How far past the round's own baseline any knight is allowed to climb.
+  function capForRound(r) {
+    return clamp(levelForRound(r) + (growth().overCap || 0));
+  }
+
+  /* Seconds ALIVE in this fight -> his level. Floor, not round: a knight is
+     what he has finished earning, so the tell fires on a boundary the player
+     can be shown rather than halfway through one. */
+  function levelFor(personality, seconds, r) {
+    var g = growth();
+    var per = Math.max(0.1, (g.secondsPerLevel || 6) * (g.rate[personality] || 1));
+    var lv = spawnLevel(personality) + Math.floor(Math.max(0, seconds || 0) / per);
+    var cap = capForRound(r == null ? round() : r);
+    return Math.min(cap, clamp(lv));
+  }
+
+  // Seconds per level for this temperament — for the tell, and for a test.
+  function secondsPerLevel(personality) {
+    var g = growth();
+    return Math.max(0.1, (g.secondsPerLevel || 6) * (g.rate[personality] || 1));
+  }
+  function tellMs() { return growth().tellMs || 800; }
 
   function rowsUpTo(L) {
     var rows = T().rows || {}, out = [];
@@ -94,7 +154,10 @@ CHLOE.engine.knighttree = (function () {
   }
 
   return {
-    levelForRound: levelForRound, level: level, rowsUpTo: rowsUpTo,
-    patterns: patterns, stats: stats, mults: mults, rowAt: rowAt, nextRow: nextRow
+    levelForRound: levelForRound, level: level, round: round, rowsUpTo: rowsUpTo,
+    patterns: patterns, stats: stats, mults: mults, rowAt: rowAt, nextRow: nextRow,
+    // §28 A — the per-knight ladder; compose with patterns()/stats() above
+    spawnLevel: spawnLevel, levelFor: levelFor, capForRound: capForRound,
+    secondsPerLevel: secondsPerLevel, tellMs: tellMs
   };
 })();

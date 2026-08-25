@@ -67,12 +67,70 @@ CHLOE.data = CHLOE.data || {};
     };
   }
 
+  /* §28 A — EVERY KNIGHT SPAWNS AT LEVEL 1 AND GROWS DURING THE FIGHT.
+     Until now `level()` was a pure function of the round, so a round-6 squad
+     was six identical level-6 knights and not one of them changed while you
+     fought it. The round still sets the CEILING (see `overCap`); what a knight
+     actually is at any moment is now his own number, and the floor therefore
+     holds a spread.
+
+     The trigger is seconds alive in the fight — the only clock every knight
+     shares, and the one that makes "he has been standing here a while" the
+     thing that makes him dangerous. Rate varies by the §22 personality he was
+     dealt at spawn, because if all six start at 1 and climb at one rate they
+     are identical again by construction:
+
+       personality  seconds/level        starts at   reaches lv 6 (round 6)
+       aggressive   6.0 x 0.70 =  4.2        1            21.0s
+       cautious     6.0 x 1.00 =  6.0        1            30.0s
+       brute        6.0 x 1.45 =  8.7        2            34.8s
+
+     THE BRUTE IS SLOWEST FROM A HARDER BASE: he opens a level up (so he
+     already knows the overhead when the others only know the slash) and then
+     climbs slowest, which is exactly the §22 temperament — heavy, and not in
+     a hurry. The aggressive knight overtakes him at 8.4s and is a level clear
+     by 12.6s.
+
+     BALANCE, said out loud. Six level-1 knights at t=0 are dramatically
+     weaker than the six flat level-6s round 6 used to field: life x1.00
+     against x1.80, atk x1.00 against x1.32, and a move pool of ONE swing
+     instead of five. The danger has to be earned, and the numbers above put
+     the squad's average multiplier back level with the old flat 6 at about
+     t=27s and past it from there — measured, not guessed, by
+     tools-side arithmetic over this table. Slowing `secondsPerLevel` past
+     ~7 pushes that crossover beyond a typical round-6 fight and the floor
+     becomes a farm; speeding it below ~5 skips the readable ramp where he
+     only knows the slash, which is most of what makes the spread visible.
+
+     `overCap` is what stops a long fight spiralling: a knight may climb TWO
+     levels past the round's own baseline and no further, so a round-1 fight
+     you refuse to end can produce a level-3 knight (he learns the overhead
+     and the thrust combo in front of you) but never a level-9 one. */
+  var growth = {
+    trigger: 'aliveSeconds',
+    startLevel: 1,
+    secondsPerLevel: 6.0,
+    // multiplier on secondsPerLevel — bigger is SLOWER
+    rate: { aggressive: 0.70, cautious: 1.00, brute: 1.45 },
+    // levels granted at spawn on top of startLevel
+    baseBonus: { aggressive: 0, cautious: 0, brute: 1 },
+    overCap: 2,
+    /* How long the level-up tell burns. Long enough to notice across the
+       nave, short enough that a knight levelling mid-swing does not read as a
+       second attack starting. */
+    tellMs: 800
+  };
+
   CHLOE.data.knighttree = {
     name: 'What The Armour Learns',
     maxLevel: 100,
-    /* His level IS the round. Kept as a knob rather than hardcoded so the
-       curve can be slowed later without touching the round counter. */
+    /* The ROUND BASELINE. This is no longer "his level" — it is the level the
+       round is worth, which the poster and the HUD name, which `combat3`
+       prices the squad off before anyone has grown, and which caps how far a
+       knight may climb. Kept as a knob rather than hardcoded so the curve can
+       be slowed later without touching the round counter. */
     levelPerRound: 1,
+    growth: growth,
     rows: rows
   };
 })();

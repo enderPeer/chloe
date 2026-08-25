@@ -571,11 +571,20 @@ CHLOE.engine.combat3 = (function () {
       enemyDef: def,
       enemyLevel: enemyLevel,
       enemyStats: es,
-      // one entry per knight on the floor
+      /* One entry per knight on the floor. §28 A: each carries its OWN level
+         and its own stat line, because they no longer share one. They all
+         open at the ladder's spawn level (a brute one higher) and diverge
+         from there — `syncLevels` below repices them every tick off what the
+         3D layer says each knight has grown to. `enemyStats` above stays as
+         the ROUND's stat block: it is what the poster and the HUD show, and
+         what a caller with no per-knight index still gets. */
       enemies: (function () {
         var arr = [];
+        var open = kt ? kt.spawnLevel('') : enemyLevel;
+        var os = kt ? kt.stats(open, def) : es;
         for (var q = 0; q < count; q++) {
-          arr.push({ index: q, life: es.life || 40, max: es.life || 40, alive: true });
+          arr.push({ index: q, life: os.life || 40, max: os.life || 40, alive: true,
+                     level: open, stats: os });
         }
         return arr;
       })(),
@@ -865,14 +874,20 @@ CHLOE.engine.combat3 = (function () {
     var base = a.usesMag ? eff.mag : eff.atk;
     var chart = types().multiplier(a.type, st.enemyDef);
     var rand = 0.9 + Math.random() * 0.2;
-    // §21: his LEVELLED defence, not the flat number in data/enemies.js
-    var def = (st.enemyStats && st.enemyStats.def) ||
-              (st.enemyDef.stats && st.enemyDef.stats.def) || 0;
-    var dmg = Math.max(1, Math.round(
-      base * ((a.power || 50) / 100) * chart * (mult || 1) * rand - def * 0.5));
     var idx = (typeof target === 'number') ? target : 0;
     var e = st.enemies[idx];
     if (!e || !e.alive) return null;
+    /* §21 gave him a LEVELLED defence instead of the flat number in
+       data/enemies.js; §28 A makes it HIS defence rather than the squad's.
+       Read off the knight that was actually hit — a level-1 knight next to a
+       level-7 one must not be as hard to cut, or the spread is a light show.
+       Falls back through the round stat block to the flat def, so a target
+       index the 3D layer never levelled still prices honestly. */
+    var def = (e.stats && e.stats.def) ||
+              (st.enemyStats && st.enemyStats.def) ||
+              (st.enemyDef.stats && st.enemyDef.stats.def) || 0;
+    var dmg = Math.max(1, Math.round(
+      base * ((a.power || 50) / 100) * chart * (mult || 1) * rand - def * 0.5));
     e.life = Math.max(0, e.life - dmg);
     var killed = e.life <= 0;
     if (killed) e.alive = false;
@@ -924,8 +939,21 @@ CHLOE.engine.combat3 = (function () {
     return 100;
   }
 
-  /* The knight's swing landed, missed, or was evaded. */
-  function takeHit(pattern) {
+  /* §28 A: whose swing this is. An explicit index always wins; without one,
+     ask the 3D layer which knight is mid-strike-callback RIGHT NOW. arena3d
+     clears that the instant the callback returns, so the worst a deferred
+     caller can get is -1 and the round baseline — never a stale knight, which
+     would be wrong in a way nobody could see. */
+  function strikerIndex() {
+    var a3d = CHLOE.engine.arena3d;
+    var i = (a3d && typeof a3d.striker === 'function') ? a3d.striker() : -1;
+    return (i >= 0 && st.enemies[i]) ? i : -1;
+  }
+
+  /* The knight's swing landed, missed, or was evaded. `index` is optional and
+     names WHICH knight swung: with the §28 spread on the floor, a level-1
+     knight and a level-7 one no longer hit for the same number. */
+  function takeHit(pattern, index) {
     if (isOver()) return null;
     /* §25 THE BUG: no pattern means no hit, and a miss must cost NOTHING.
        ui/battle3d.js used to hand us `null` on a geometric miss; with only the
@@ -944,8 +972,12 @@ CHLOE.engine.combat3 = (function () {
     var p = party();
     var m = p.get(st.charId);
     var eff = p.effStats(m);
-    // §21: he hits with his LEVELLED attack - round 8 is not round 1
-    var es = st.enemyStats || st.enemyDef.stats || {};
+    /* §21 gave him a LEVELLED attack — round 8 is not round 1. §28 A makes it
+       HIS attack: the striker's own stat line if we can tell who swung, the
+       round's baseline if we cannot. */
+    var who = (typeof index === 'number' && st.enemies[index]) ? index : strikerIndex();
+    var es = (who >= 0 && st.enemies[who] && st.enemies[who].stats) ||
+             st.enemyStats || st.enemyDef.stats || {};
     var cdef = (CHLOE.data.characters || {})[st.charId] || {};
     var atkType = st.enemyDef.type || st.enemyDef.element;
     var chart = types().multiplier(atkType, { type: cdef.type || cdef.element, resists: cdef.resists || null });
@@ -1074,10 +1106,52 @@ CHLOE.engine.combat3 = (function () {
   function takeRevive() { var v = lastRevive; lastRevive = null; return v; }
 
   /* ---------- tick ---------- */
+  /* §28 A: every knight levels on his own clock while the fight runs, so the
+     numbers have to follow. The 3D layer owns the clock (it owns the
+     personality, the seconds alive and the moment of death), so this PULLS —
+     the same direction combat3 already reaches for the §23 stun, and it
+     degrades through arena3d's disabled API to the round baseline on a
+     machine with no WebGL rather than needing a second path here.
+
+     LIFE IS SCALED BY RATIO, NOT REWRITTEN. A knight at half health who
+     levels up must come out at half of his NEW maximum: assigning the new
+     max would heal him to full every level, and leaving `max` alone would
+     make the bar lie about how much is left. A level-up is therefore worth a
+     real chunk of effective health, which is most of what makes the ramp in
+     data/knighttree.js bite — and it can never kill him, because a ratio of
+     a positive maximum is positive.
+
+     Emitted as an event so a HUD can float "LEVEL 4" over the right body;
+     nothing renders it yet (ui/battle3d.js still names the round baseline on
+     the plate), and an event nobody consumes is cheaper than a level-up
+     nobody can see. */
+  function syncLevels() {
+    var kt = CHLOE.engine.knighttree;
+    var a3d = CHLOE.engine.arena3d;
+    if (!kt || !a3d || typeof a3d.knightLevels !== 'function') return null;
+    var levels = a3d.knightLevels(st.enemies.length);
+    var out = null;
+    for (var i = 0; i < st.enemies.length; i++) {
+      var e = st.enemies[i];
+      var want = levels[i];
+      if (!e.alive || want == null || want === e.level) continue;
+      var ns = kt.stats(want, st.enemyDef);
+      var ratio = e.max > 0 ? (e.life / e.max) : 1;
+      e.level = want;
+      e.stats = ns;
+      e.max = ns.life || e.max;
+      e.life = Math.max(1, Math.round(e.max * ratio));
+      (out = out || []).push({ t: 'enemyLevel', index: i, level: want });
+    }
+    return out;
+  }
+
   function tick(dt) {
     if (!st || st.over) return [];
     var ev = [];
     st.now += dt * 1000;
+    var lv = syncLevels();
+    if (lv) for (var li = 0; li < lv.length; li++) ev.push(lv[li]);
 
     // cast progress -> hit windows
     if (st.cast) {
@@ -1281,7 +1355,15 @@ CHLOE.engine.combat3 = (function () {
         return {
           life: life, max: max,
           count: st.enemies.length, alive: aliveCount(),
-          each: st.enemies.map(function (e) { return { life: e.life, max: e.max, alive: e.alive }; }),
+          /* §28 A: `level` per entry, and the round's baseline alongside it.
+             ui/battle3d.js still names `knighttree.level()` on the plate,
+             which is correct for "what round is this" — but the spread is
+             here the moment that plate wants to show a range instead. */
+          each: st.enemies.map(function (e) {
+            return { life: e.life, max: e.max, alive: e.alive, level: e.level || 1 };
+          }),
+          roundLevel: st.enemyLevel,
+          levels: st.enemies.map(function (e) { return e.level || 1; }),
           name: (CHLOE.data.arena3d && CHLOE.data.arena3d.knight && CHLOE.data.arena3d.knight.name) || st.enemyDef.name
         };
       })(),
