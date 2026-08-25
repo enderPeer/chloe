@@ -12,14 +12,39 @@ CHLOE.data.arena3d = {
      as ?v=N so browsers that cached an older build refetch instead of
      rendering the stale one (a cached all-black church looked like "no
      textures" long after the fix shipped). */
-  assetVersion: 6,
+  assetVersion: 7,
   models: {
     church: 'assets/3d/church.glb',
     knight: 'assets/3d/knight.glb',
     punch:  'assets/3d/punch.glb',
     tornado: 'assets/3d/firetornado.glb',
     handsign: 'assets/3d/handsign.glb',
-    asteroid: 'assets/3d/asteroid.glb'
+    asteroid: 'assets/3d/asteroid.glb',
+    /* §29. Built by tools/convert-gun9mm.js: normalised to 1.000m along its
+       barrel axis, barrel down -Z, one material, Draco'd, with `Muzzle` and
+       `Grip` empties the first-person rig mounts from. engine/gunrig.js reads
+       this key and falls back to the same literal path if it is missing, so
+       the entry exists mainly to keep every model URL in one table — and to
+       stay inside versioned(), which is what makes a rebuilt GLB refetch. */
+    gun: 'assets/3d/gun9mm.glb'
+  },
+
+  /* §29 THE SHOT'S PICTURES — the muzzle flash and the tracer.
+     Separate from `gunProp` (engine/gunrig.js, which owns where the pistol
+     sits in the hand) because these two describe the SHOT, not the weapon:
+     they exist for 55 and 60 milliseconds respectively and nothing about them
+     changes if the prop is re-placed.
+     `flashSize` is the flash quad's width in metres AT the muzzle — 0.22 is
+     about the length of the gun, which is roughly what a 9mm flash looks like
+     and comfortably reads at 72° FOV without whiting out the sights.
+     `tracerRadius` 12mm: a real 9mm round is 9mm across and would be a
+     sub-pixel line at 20m, so this is a deliberate, stated exaggeration — the
+     tracer's job is to be seen, and it is on screen for one sixteenth of a
+     second. Warm on both, because they read as fire against the cool key. */
+  gunFx: {
+    flashSize: 0.22,
+    tracerRadius: 0.012,
+    tracerColor: 0xffd9a0
   },
   /* §21 Asteroid presentation. The ball is normalised to 1m in the GLB, so
      `size` is literally its diameter in metres. It tumbles as it falls and

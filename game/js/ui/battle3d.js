@@ -391,7 +391,18 @@ CHLOE.ui.battle3d = (function () {
       d.classList.toggle('cooling', s.cdPct > 0);
       d.classList.toggle('broke', !s.affordable && s.cdPct <= 0);
       if (d._sweep) d._sweep.style.height = Math.round(s.cdPct * 100) + '%';
-      if (d._ch) d._ch.textContent = s.maxCharges > 1 ? String(s.charges) : '';
+      /* §29: a magazine reads "4/6" and a charge stack reads "2". They are
+         different questions — a stack asks "how many uses do I have banked",
+         a magazine asks "how much is left before the reload" — and the
+         denominator is the only thing that makes the second one answerable at
+         a glance mid-burst. The engine says which it is (`s.magazine`); this
+         never infers it from the count. */
+      if (d._ch) {
+        d._ch.textContent = s.magazine ? (s.charges + '/' + s.maxCharges)
+                          : (s.maxCharges > 1 ? String(s.charges) : '');
+      }
+      // an empty magazine is not merely "cooling down": it is out
+      d.classList.toggle('out', !!s.empty);
       if (d._cd) d._cd.textContent = s.cdLeft > 0.05 ? s.cdLeft.toFixed(1) : '';
     }
   }
@@ -501,6 +512,46 @@ CHLOE.ui.battle3d = (function () {
     var s = ui.el('div', 'b3d-splash ' + (cls || ''), text);
     root().appendChild(s);
     later(function () { if (s.parentNode) s.parentNode.removeChild(s); }, 1100);
+  }
+
+  /* ------------------------------------------------- §29 the hit marker
+     The third of the three pictures a hitscan shot owes the player (the flash
+     and the tracer are arena3d's; see its §29 block). It answers a question
+     none of the others can: the tracer proves the round went where you aimed,
+     the damage number proves SOMETHING was hurt — but the number floats over
+     the knight, several metres from where you are looking, and at 3.5 rounds
+     a second you cannot track it. The marker is on the crosshair, which is
+     the one place on screen your eye is already fixed, so a burst reads as
+     four ticks and two blanks instead of as a wall of numbers.
+
+     Styled inline rather than through a class on purpose: this is the only
+     element in the file that has to live exactly on the centre of the canvas,
+     the CSS for this screen is another session's file, and a marker that
+     depends on a rule somebody else has to add first is a marker that ships
+     invisible. Two bars, an X, one animation, no keyframes. */
+  function hitMark(killed) {
+    var wrap = ui.el('div', 'b3d-hitmark');
+    wrap.style.cssText = 'position:absolute;left:50%;top:50%;width:30px;height:30px;' +
+      'margin:-15px 0 0 -15px;pointer-events:none;z-index:45;opacity:1;' +
+      'transform:scale(0.62);transition:opacity 200ms linear,transform 200ms ease-out;';
+    /* A kill goes red and a touch bigger — the one distinction worth drawing,
+       because "he is down" changes what you do next and "he is hurt" does not. */
+    var col = killed ? '#ff6a5a' : '#ffe9c2';
+    var glow = killed ? 'rgba(255,80,60,.95)' : 'rgba(255,190,90,.9)';
+    for (var i = 0; i < 2; i++) {
+      var bar = ui.el('div');
+      bar.style.cssText = 'position:absolute;left:50%;top:50%;width:2px;height:26px;' +
+        'margin:-13px 0 0 -1px;background:' + col + ';box-shadow:0 0 7px ' + glow + ';' +
+        'transform:rotate(' + (i ? -45 : 45) + 'deg);';
+      wrap.appendChild(bar);
+    }
+    root().appendChild(wrap);
+    // one frame later, so the transition has a start state to run from
+    later(function () {
+      wrap.style.opacity = '0';
+      wrap.style.transform = killed ? 'scale(1.5)' : 'scale(1.15)';
+    }, 16);
+    later(function () { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); }, 260);
   }
 
   /* ------------------------------------------------- §23 the "STUNNED" float
@@ -631,7 +682,7 @@ CHLOE.ui.battle3d = (function () {
       return;
     }
     var r = C3.press(slot);
-    if (!r.ok) { log(r.reason || 'Not ready.'); return; }
+    if (!r.ok) { pressRefused(r, view); return; }
     fireResult(r, view);
   }
 
@@ -654,10 +705,50 @@ CHLOE.ui.battle3d = (function () {
       // §18: raise the hand and trace the sigil; the funnel drops on the
       // first hit window (handled in frame()).
       a3d.showSign(true);
+    } else if (a.hitscan) {
+      /* §29: the gun does NOT go through playAbility, and this is the one
+         branch that has to be here rather than in the engine. playAbility
+         falls back to the `Punch` clip for any ability that names no `anim`
+         (§17: several abilities share one clip), so routing the pistol through
+         it would put the fists on screen throwing a flurry while the gun in
+         the same hand fired — and engine/gunrig.js would keep the pistol drawn
+         through it, because it correctly reads "the arms are busy with MY
+         cast". The pistol's own recoil is the animation, so ask for that and
+         nothing else. */
+      if (typeof a3d.gunFire === 'function') a3d.gunFire();
     } else {
       a3d.playAbility(a.id, a.anim, a.animSpeed, total + (a.recoverMs || 0));
     }
     log(a.name);
+    /* §29: the round that empties the magazine starts the reload, and the
+       reload is 3.2 seconds you have to be told about — the hotbar dial shows
+       WHEN it ends, this says THAT it started. Asked of the engine rather than
+       counted here, because the engine owns the magazine and a second count
+       would be a second thing to keep true. */
+    if (a.magazine && C3.readiness) {
+      var rd = C3.readiness(a.id);
+      if (rd && rd.empty) prompt('RELOADING', 'banner', a.rechargeMs || 3000);
+    }
+  }
+
+  /* §29: a press that was refused. Almost all of them are one line of HUD
+     text — but an empty magazine is a REFUSAL WITH A PICTURE, and it has to
+     be, because it is the only one the player caused on purpose and the only
+     one they have to plan around. The dry click is diegetic (arena3d kicks a
+     spark of a flash with no tracer behind it) so the message is "the weapon
+     is empty" rather than "the game ignored you".
+
+     Decided off `r.empty`, never off the wording: combat3 sets that flag
+     precisely so this branch does not have to string-match 'Reloading'. */
+  function pressRefused(r, view) {
+    if (r && r.empty) {
+      if (typeof a3d.gunDry === 'function') a3d.gunDry();
+      splash('*click*', 'miss');
+      var nm = (r.ability && r.ability.name) || (view && view.name) || 'It';
+      log(nm + ' is empty. Reloading — you do not get to choose when.');
+      return;
+    }
+    log((r && r.reason) || 'Not ready.');
   }
 
   /* One consumable went down. The bag is the engine's to decrement — this only
@@ -816,6 +907,11 @@ CHLOE.ui.battle3d = (function () {
      number and the impact are the same moment rather than the number arriving
      while the rock is still in the air. */
   function resolveStrike(ab, e) {
+    /* §29 FIRST, because a hitscan shares nothing with the paths below. It has
+       no cone, no splash, no travel time and no ability to be dodged by
+       walking out of an arc — the ray was solved and answered in one call, and
+       everything after that is reporting. */
+    if (ab && ab.hitscan) { resolveShot(ab, e); return; }
     if (ab && ab.vfx === 'asteroid') {
       a3d.showSign(false);
       splash('ASTEROID', 'super');
@@ -862,7 +958,64 @@ CHLOE.ui.battle3d = (function () {
     applyHits(e.abilityId, targets, null);
   }
 
-  function applyHits(abilityId, targets, tag) {
+  /* §29 THE SHOT, START TO FINISH, ON ONE FRAME.
+
+     Everything here happens inside the `strike` event, which is the tick
+     combat3 says the hit window opened on — §21's one clock. That matters more
+     for this ability than for any other in the game: a tornado can afford its
+     picture to be a frame off because you watch it for two seconds, and a
+     bullet cannot, because the flash, the tracer, the marker and the number
+     ARE the whole event. Resolve, draw, report, in that order, once.
+
+     THE RAY IS ASKED FOR EXACTLY ONCE. arena3d answers with the hit AND the
+     line it travelled, and that same object is handed to gunShot() — so the
+     tracer is the ray drawn rather than a second line rebuilt from the same
+     inputs. Two calls would be two rays: the camera moves every frame, and the
+     second one would be aimed a few milliradians from the one that decided the
+     damage. The picture would be a lie about the hit test roughly a third of
+     the time, and it would be a subtle enough lie to be blamed on the netcode
+     of a game that has none.
+
+     A MISS STILL DRAWS. The flash and the tracer fire whether or not anything
+     was hit — that is the entire reason they exist (see arena3d's §29 block):
+     without them a missed shot is indistinguishable from a press that never
+     registered, and the player learns "the gun is unreliable" instead of "I
+     was aiming left". */
+  function resolveShot(ab, e) {
+    var info = (typeof a3d.hitscan === 'function') ? a3d.hitscan(ab) : null;
+    if (!info) { applyHits(e.abilityId, [], null); return; }
+    if (typeof a3d.gunShot === 'function') a3d.gunShot(info);
+
+    if (!info.hit) {
+      splash('miss', 'miss');
+      /* Name WHY, because the two misses ask for different corrections: wide
+         means aim, stone means move. */
+      log(info.blocked ? 'The round buries itself in the stone.'
+                       : 'The round goes wide into the dark.');
+      return;
+    }
+    /* `info.mult` is the distance falloff (data/abilities.js `falloff`),
+       carried into applyHits as a plain multiplier so it multiplies WITH the
+       §22 stagger bonus rather than replacing it — a staggered knight shot at
+       20m is both further away and still reeling, and both facts should be in
+       the number. */
+    applyHits(e.abilityId, [info.index], null, info.mult);
+    /* After applyHits, so a killing round shows the kill marker. `aliveCount`
+       is the cheapest honest read of "did that one drop": the shot hit exactly
+       one knight, so a drop in the count during this call was him. */
+    hitMark(shotKilled);
+    if (info.dist > (ab.falloff && ab.falloff.full ? ab.falloff.full : info.dist)) {
+      log('Long shot — ' + info.dist.toFixed(1) + 'm, and it landed soft.');
+    }
+  }
+  /* Set by applyHits for the one caller that needs it. A return value would be
+     cleaner, but applyHits is called from four places that all ignore what it
+     returns and this stays a one-line change to the shared path rather than a
+     new contract three callers have to start honouring. */
+  var shotKilled = false;
+
+  function applyHits(abilityId, targets, tag, extraMult) {
+    shotKilled = false;
     if (!targets || !targets.length) { splash('miss', 'miss'); return; }
     var shown = 0;
     /* §23: what the rock does after the damage. combat3.hitEnemy owns this —
@@ -883,12 +1036,19 @@ CHLOE.ui.battle3d = (function () {
          his footing. The multiplier crosses here or the punish window is a
          pose with no payoff — which is exactly what it was.
          `a3d` degrades to the no-WebGL surface, which answers 1. */
-      var mult = a3d.staggerMult ? (a3d.staggerMult(ti) || 1) : 1;
+      var stag = a3d.staggerMult ? (a3d.staggerMult(ti) || 1) : 1;
+      /* §29: the caller may add a multiplier of its own — today that is the
+         9mm's distance falloff. It MULTIPLIES with the stagger bonus instead
+         of replacing it, and the label below still reads `stag` alone, or a
+         long shot at a reeling knight would come back under 1.0 and silently
+         stop saying STAGGERED while he was very much staggered. */
+      var mult = stag * (extraMult > 0 ? extraMult : 1);
       var res = C3.hitEnemy(abilityId, mult, ti);
       if (!res) return;
+      if (res.killed) shotKilled = true;
       a3d.flinch(res.dmg, res.killed, ti);
       if (!shown++) {
-        splash('-' + res.dmg + (mult > 1 ? ' STAGGERED' : '') +
+        splash('-' + res.dmg + (stag > 1 ? ' STAGGERED' : '') +
                (res.mult >= 2 ? ' SUPER' : '') +
                (targets.length > 1 ? ' x' + targets.length : ''),
                res.mult >= 2 ? 'super' : 'dmg');
@@ -1147,6 +1307,15 @@ CHLOE.ui.battle3d = (function () {
         resolveStrike(ab, e);
       } else if (e.t === 'castEnd') {
         a3d.stopAbility();
+      } else if (e.t === 'reload') {
+        /* §29: a MAGAZINE came back whole. Distinct from combat3's 'charge'
+           event (one more use trickled in) because only this one is worth
+           saying out loud — it is the end of the 3.2 seconds the player spent
+           unable to shoot, and they are usually looking at the knight rather
+           than at the hotbar dial when it lands. */
+        var rab = (CHLOE.data.abilities || {})[e.abilityId];
+        splash('RELOADED', 'evade');
+        log((rab && rab.name ? rab.name : 'Magazine') + ' — ' + e.charges + ' rounds.');
       }
     }
 
@@ -1334,8 +1503,9 @@ CHLOE.ui.battle3d = (function () {
       e.preventDefault();
       e.stopPropagation();
       var r = res.result || {};
-      if (!r.ok) { log(r.reason || 'Not ready.'); return; }
-      fireResult(r, viewOf(C3.snapshot(), res.slot));
+      var mv = viewOf(C3.snapshot(), res.slot);
+      if (!r.ok) { pressRefused(r, mv); return; }
+      fireResult(r, mv);
     };
     // RMB opens the context menu over the canvas otherwise, which eats the fight
     ctxHandler = function (e) { if (active && ui.current() === 'battle3d') e.preventDefault(); };
@@ -1368,6 +1538,26 @@ CHLOE.ui.battle3d = (function () {
     else end(snap ? snap.result : 'fled');
   }
 
+  /* Where an auto-bound ability landed, said out loud. A slot is a NUMBER or
+     one of the §27B button ids, and the level-up card below used to format it
+     as `'key ' + (slot + 1)` — correct for the whole game right up until §29,
+     because until §29 nothing was ever auto-bound to a button. The 9mm is, and
+     'mouseR' + 1 is the string "mouseR1": the level-5 card announced the gun as
+     "ready on key mouseR1". That is the §25 bug class exactly — a string
+     arriving where a number was assumed — and it lands on the one line whose
+     entire job is telling the player which button their new weapon is on.
+
+     The label comes from combat3.mouseLabel, the same source ui/binds.js reads,
+     so the card and the bind screen cannot drift into calling one button two
+     names. A build whose engine predates §27B degrades to the id itself, which
+     is wrong-looking but readable — never arithmetic on a string. */
+  function placedSlotLabel(slot) {
+    if (C3.isMouseSlot && C3.isMouseSlot(slot)) {
+      return (C3.mouseLabel ? C3.mouseLabel(slot) : String(slot));
+    }
+    return 'key ' + (slot + 1);
+  }
+
   function showVictory() {
     var stt = C3.get();
     var veil = ui.el('div', 'battle-panel-veil');
@@ -1389,11 +1579,21 @@ CHLOE.ui.battle3d = (function () {
       });
       var auto = C3.takeAutoBound ? C3.takeAutoBound() : null;
       if (auto && auto.placed.length) {
+        /* Whose key it is, but only when that is a live question. One member
+           levelled is the ordinary case and "key 4" means yours; two members
+           levelled and an unattributed key 4 is worse than no line, because
+           the player goes and looks at their own key 4 and finds it empty. */
+        var manyChars = !!(auto.byChar && auto.byChar.length > 1);
         auto.placed.forEach(function (pl) {
           var ad = (CHLOE.data.abilities || {})[pl.abilityId] || {};
+          var who = '';
+          if (manyChars && pl.charId) {
+            var cd = (CHLOE.data.characters || {})[pl.charId] || {};
+            who = (cd.name || pl.charId) + ': ';
+          }
           lines.appendChild(ui.el('div', 'lvl',
-            (ad.icon || '•') + ' ' + (ad.name || pl.abilityId) +
-            ' — ready on key ' + (pl.slot + 1)));
+            who + (ad.icon || '•') + ' ' + (ad.name || pl.abilityId) +
+            ' — ready on ' + placedSlotLabel(pl.slot)));
         });
       }
       var sk = CHLOE.engine.skilltree;

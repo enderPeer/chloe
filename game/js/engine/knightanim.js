@@ -101,6 +101,17 @@ CHLOE.engine.knightanim = (function () {
     var def = (CHLOE.data && CHLOE.data.knightRig) || null;
     if (!def) { console.warn('[knightanim] data/knightrig.js missing — knight stays static'); return null; }
 
+    /* The header's totem clause, CHECKED rather than merely described. When
+       knight.glb is slow, engine/arena3d.js stands a box-and-sword totem in
+       the fight and rigs it like anything else — and the miss report below,
+       which exists to catch a stale manifest, could only see 103 lookups that
+       failed and told the reader to regenerate a file that was correct. The
+       totem says what it is (`buildFallbackKnight`), so this is a decline and
+       not a diagnosis. No warning: nothing is wrong, the model just is not
+       this manifest's model, and arena3d already falls back to the pre-§28
+       placement on a null. */
+    if (model && model.userData && model.userData.fallbackTotem) return null;
+
     var rig = { bones: {}, root: new THREE.Group(), state: null, t: 0, THREE: THREE,
                 rootRest: new THREE.Vector3(0, 0, 0), drove: false };
     rig.root.name = 'knightRig';

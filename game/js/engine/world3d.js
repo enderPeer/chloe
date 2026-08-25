@@ -1047,6 +1047,14 @@ CHLOE.engine = CHLOE.engine || {};
   // ------------------------------------------------------ first-person hands
   // Primitive gloved hands (dark worn leather, subtle red rim) parented to the
   // camera. renderOrder high + near plane 0.05 keep them on top of the room.
+  //
+  // §29, and it is a rule and not an oversight: the 9mm is NOT mounted here.
+  // The room's mouse buttons open and close these hands and grab things, and
+  // the pistol fires only in the arena — so engine/gunrig.js is mounted by
+  // engine/arena3d.js onto the ARENA camera and by nothing else. Two cameras,
+  // two rigs, and the split is enforced by where the mount call lives. Adding
+  // a gunrig.mount() to this file would put a drawn weapon in the bedroom and
+  // quietly undo half of §27's room/arena contract.
   function buildHands() {
     hands.group = new THREE.Group();
     var glove = stdMat({

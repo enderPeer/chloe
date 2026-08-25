@@ -13,6 +13,8 @@
      telegraph(pattern, onResult), flinch(dmg, killed), setKnightAlive(bool),
      stun(i, seconds),                            // §23 the asteroid's stun
      shove(i, dirX, dirZ, distance, ms),          // §25 the Water Wave's throw
+     hitscan(ability),                            // §29 the 9mm's straight ray
+     gunShot(info), gunDry(),                     // ...and its flash + tracer
      waveTargets(ability), spawnWave(ability),    // §25 who it catches, and it
      debug(), _teleport(x, z), _setCrouch(bool)   // test hooks (§13 spirit)
    }
@@ -99,6 +101,26 @@ CHLOE.engine = CHLOE.engine || {};
        was certainly not thrown anywhere. */
     A.shove = function () { return false; };
     A.isShoved = function () { return false; };
+    /* §29 the 9mm. ui/battle3d.js resolves the shot through `hitscan` on the
+       strike event, so on a machine with no WebGL it has to answer with the
+       full shape and not with undefined — a caller reading `.hit` off nothing
+       is a fight that throws instead of degrading. A miss, deliberately: there
+       is no camera, so there is no aim, so nothing was aimed AT. The pictures
+       are all no-ops for the obvious reason. `gunMuzzle` answers null, which
+       is what the loaded surface answers with no prop, so the fallback path is
+       the same one either way. */
+    A.hitscan = function (ability) {
+      var r = (ability && ability.range) || 20;
+      return { hit: false, index: -1, dist: r, mult: 1, blocked: false,
+               origin: { x: 0, y: 0, z: 0 }, dir: { x: 0, y: 0, z: -1 },
+               end: { x: 0, y: 0, z: -r } };
+    };
+    A.gunShot = function () { return false; };
+    A.gunDry = function () { return false; };
+    A.gunMuzzle = function () { return null; };
+    A.gunMuzzleDir = function () { return null; };
+    A.gunFire = function () { return false; };
+    A._gunFxProbe = function () { return { shots: 0, muzzle: null }; };
     /* §28 A per-knight levels. engine/combat3.js PULLS these every tick to
        price the squad, so on a machine with no WebGL it must answer with
        something a stat line can be built from.
@@ -725,6 +747,14 @@ CHLOE.engine = CHLOE.engine || {};
     eye.position.set(0, 1.92, 0.22); g.add(eye);
     var sword = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.7, 0.05), mat);
     sword.position.set(0.62, 1.1, 0.1); sword.rotation.z = -0.15; g.add(sword);
+    /* Say what it is, out loud, because mountKnight rigs whatever it is handed
+       and knightanim cannot tell "five boxes that were never the knight" from
+       "knight.glb with a stale manifest" by name evidence alone — both look
+       like 103 lookups that missed. Left unmarked, a slow load (this totem
+       exists for one that passed 12s) printed "rerun tools/build-knight-rig.js"
+       about a manifest that was perfectly correct, which is a wrong diagnosis
+       aimed at the one file nobody should touch. */
+    g.userData.fallbackTotem = true;
     return g;
   }
 
@@ -1593,6 +1623,79 @@ CHLOE.engine = CHLOE.engine || {};
     });
   }
 
+  // ------------------------------------------------- the 9mm prop (§29)
+  /* The pistol is the second thing parented to this camera, and it is enough
+     unlike the punch rig to be worth its own module: it is a rigid prop, it is
+     visible OUTSIDE a cast, and something else has to be able to ask it where
+     its barrel is every frame. engine/gunrig.js owns all of that; this
+     function is only the wiring — the loader, the URL, and the asset gate.
+
+     Feature detection is doubled on purpose. No gunrig.js (no script tag, an
+     older deploy) and no `models.gun` in data both mean "no pistol", and both
+     have to leave the shot working: §29's gun resolves in engine/combat3.js
+     and never asks this file whether it drew anything. */
+  function GUN() { return (CHLOE.engine && CHLOE.engine.gunrig) || null; }
+
+  function loadGunProp() {
+    var g = GUN();
+    if (!g) return;                       // module absent: no prop, no crash
+    assetExpect('gun');
+    var models = D().models || {};
+    /* The path may be absent from data/arena3d.js while §29 is still landing.
+       Fall back to the shipped filename rather than skipping, but keep it
+       versioned the same way everything else here is — a rebuilt gun9mm.glb
+       must not be served from cache (the all-black church, §17). */
+    var url = versioned(models.gun || 'assets/3d/gun9mm.glb');
+    g.mount({
+      camera: camera, scene: scene, loader: makeLoader(), url: url,
+      onDone: function (how) { assetDone('gun', how); }
+    });
+  }
+
+  /* Ticked AFTER updatePlayer, deliberately: updatePlayer is what moves the
+     camera this frame, and a muzzle published before it is a tracer that
+     starts where the player WAS. It rides the camera's own `bobPhase` so the
+     gun and the head sway as one body, and hides while the punch rig is
+     swinging — fists and a drawn pistol on screen at once read as a bug. */
+  function updateGunProp(dt) {
+    var g = GUN();
+    if (!g || !g.isMounted()) return;
+    var speed = Math.sqrt(vel.x * vel.x + vel.z * vel.z);
+    g.tick(dt, {
+      speed: speed,
+      bobPhase: bobPhase,
+      elapsed: elapsed,
+      crouch: isCrouching(),
+      sprinting: !!(keys.ShiftLeft || keys.ShiftRight) && speed > WALK * 0.9,
+      /* "The arms are up for something ELSE." The gun's own cast may well play
+         a clip on the punch rig, and hiding the pistol on the one frame it
+         fires would be the worst possible time to hide it. */
+      armsBusy: !!(fp.root && fp.root.visible) && castingId !== g.abilityId()
+    });
+  }
+
+  /* Where the bore is in WORLD space this frame — the point §29 requires the
+     tracer and the muzzle flash to start from. Safe to call with no gunrig, no
+     GLB and no fight: it answers null only when there is no camera at all, and
+     otherwise always names a real point in front of the player. */
+  A.gunMuzzle = function (out) {
+    var g = GUN();
+    if (!g || !camera) return null;
+    return g.muzzleWorld(out);
+  };
+
+  /* The barrel's world -Z, recoil included. For orienting a flash; the HIT ray
+     is the camera's own aim, not this — see gunrig.js's header for why. */
+  A.gunMuzzleDir = function (out) {
+    var g = GUN();
+    return (g && camera) ? g.muzzleDir(out) : null;
+  };
+
+  /* Kick it by hand. `playAbility` already does this for the gun's own cast,
+     and gunrig swallows a repeat inside 30ms, so a tracer author calling both
+     gets one recoil rather than two. */
+  A.gunFire = function () { var g = GUN(); return g ? g.fire() : false; };
+
   // --------------------------------------------- §18 hand sign + fire tornado
   var sign = { hand: null, rune: null, t: 0, active: false };
   var tornado = { root: null, tubes: [], light: null, t: 0, active: false, dur: 2.4 };
@@ -2009,6 +2112,11 @@ CHLOE.engine = CHLOE.engine || {};
      serve several abilities (§17). */
   A.playAbility = function (abilityId, clipName, speed, durationMs) {
     castingId = abilityId;
+    /* §29: the pistol kicks off the SAME call that starts every other cast, so
+       recoil cannot drift out of step with the shot — and it happens before
+       the early returns below, because a missing punch.glb must not also cost
+       the gun its recoil. gunrig ignores every id but its own. */
+    if (GUN()) GUN().noteCast(abilityId);
     if (!fp.loaded || !fp.mixer) return false;
     var clip = fp.clips[clipName] || fp.clips.Punch;
     if (!clip) return false;
@@ -2107,6 +2215,158 @@ CHLOE.engine = CHLOE.engine || {};
   };
   A.abilityHits = function (ability) { return A.abilityTargets(ability).length > 0; };
 
+  /* ================================================================== §29
+     HITSCAN — a straight line out of the barrel, and what it touches first.
+
+     Every other ability in the game is a REACH AND AN ARC: "is he within 3m
+     and within 65° of where I am facing". That is right for a swing and wrong
+     for a bullet, and not by a little. A cone narrow enough to feel like
+     aiming — say 8° — is still 1.9m wide at 14m, so at range it is a lane you
+     cannot miss out of; at point-blank the same cone is 0.4m wide and it is a
+     hole you cannot miss into. The error runs the wrong way at both ends.
+     A ray has the same width everywhere, which is what makes the crosshair
+     mean something and what makes a miss the player's.
+
+     THE TEST. The knight is a vertical CAPSULE — a cylinder of `rayRadius`
+     (0.55m, KNIGHT_RADIUS: the ray is thin and the body is knight-shaped)
+     standing from the floor to his crown. The ray is solved against the
+     infinite cylinder in XZ and then the hit height is checked against the
+     body, which is exactly a capsule test without the end caps and is the
+     difference between shooting him and shooting over his head. PITCH IS IN
+     IT — unlike abilityTargets, which is flat yaw only, because a swing
+     cannot go over anybody and a bullet can.
+
+     NEAREST WINS, and it is stated because it is a rule and not a fallout: a
+     line through three knights kills the FIRST one. The bullet does not pick
+     the weakest, does not pick the one you were looking at last, and does not
+     carry on through the body — which is also why a squad closing abreast is
+     still a squad and not a shooting gallery.
+
+     WHAT IT DOES NOT DO: it is not stopped by scenery on the `round` stages,
+     because there is none — the Ring (§26's opening floor) is a lit disc with
+     nothing on it, and that is where this weapon spends most of its life. On a
+     `model` stage with a baked navgrid it IS stopped, cheaply, by marching the
+     grid (see rayBlocked) rather than by raycasting a Draco-merged 26MB church
+     per trigger pull — which would be a frame hitch landing on the one clock
+     the shot has to resolve on (§21). The grid answers "is there floor here",
+     so what it really blocks on is the altar block and the outer walls, which
+     is every occluder the §22 nave still has.
+
+     Returns a plain object, always — a caller must never have to tell a miss
+     from an exception:
+       { hit, index, dist, mult, origin:{x,y,z}, dir:{x,y,z}, end:{x,y,z},
+         blocked }
+     `end` is where the tracer stops: the body, the wall, or the end of the
+     ray. `mult` is the distance falloff, ready to hand to combat3.hitEnemy as
+     its positional multiplier — the same argument the §22 stagger bonus rides
+     on, so footing and range are priced by one multiplication. */
+  function gunFalloff(ability, dist) {
+    var f = ability && ability.falloff;
+    if (!f) return 1;
+    var full = f.full != null ? f.full : (ability.range || 20);
+    var max = f.max != null ? f.max : (ability.range || 20);
+    var min = f.min != null ? f.min : 1;
+    if (dist <= full || max <= full) return 1;
+    var t = Math.min(1, (dist - full) / (max - full));
+    return min + (1 - min) * (1 - t);
+  }
+
+  /* Does the world stop the bullet before `maxT`? Only meaningful where a
+     navgrid was baked; the Ring has none and answers "no" for free.
+     Marched at the grid's own cell size, so the sample rate is the data's
+     resolution rather than a number invented here. `navPoint`, not `navFree`:
+     a bullet is not a body and does not need room to stand — it goes through
+     the doorway a knight cannot squeeze into. The 2.0m ceiling is what keeps
+     this honest about being a floor grid: above head height it stops claiming
+     to know anything, so a shot arcing over the altar block is not eaten by
+     the block's footprint. */
+  function rayBlocked(ox, oy, oz, dx, dy, dz, maxT) {
+    if (!nav) return 0;
+    var step = nav.cell || 0.4;
+    for (var t = step; t < maxT; t += step) {
+      var y = oy + dy * t;
+      if (y > 2.0) continue;
+      if (y < 0) return t;                       // it went into the flagstones
+      if (!navPoint(nav, ox + dx * t, oz + dz * t)) return t;
+    }
+    return 0;
+  }
+
+  /* Where the ray starts. gunrig's `A.gunMuzzle()` is the answer whenever
+     there is a prop and a camera; it returns NULL otherwise (no module, no
+     script tag, a headless test that never built a renderer) and the shot must
+     still happen — §29's gun resolves in the rules layer and does not care
+     whether anything was drawn. The eye is the honest fallback: it is where
+     the aim ray already lives, so a build with no pistol model shoots from the
+     crosshair rather than from the origin of the world. */
+  function rayOrigin() {
+    var m = (typeof A.gunMuzzle === 'function') ? A.gunMuzzle() : null;
+    if (m && typeof m.x === 'number') return { x: m.x, y: m.y, z: m.z };
+    return { x: pos.x, y: eyeH, z: pos.z };
+  }
+
+  A.hitscan = function (ability) {
+    var ab = ability || {};
+    var range = ab.range || 20;
+    var rad = ab.rayRadius != null ? ab.rayRadius : KNIGHT_RADIUS;
+    var m = rayOrigin();
+    /* Direction is the CAMERA's, not the muzzle prop's. The prop is dressed
+       into the corner of the screen at a slight inward yaw so it reads as
+       held; if the ray took the barrel's own rotation the gun would shoot
+       where it is pointed and not where you are aiming, and the crosshair
+       would be decoration. The barrel gives the tracer its ORIGIN, the camera
+       gives it its LINE — which is the compromise every first-person shooter
+       makes and the reason the two are read from different places here. */
+    var cp = Math.cos(pitch);
+    var dx = -Math.sin(yaw) * cp, dz = -Math.cos(yaw) * cp, dy = Math.sin(pitch);
+    var out = { hit: false, index: -1, dist: range, mult: 1, blocked: false,
+                origin: { x: m.x, y: m.y, z: m.z }, dir: { x: dx, y: dy, z: dz },
+                end: { x: m.x + dx * range, y: m.y + dy * range, z: m.z + dz * range } };
+
+    var best = -1, bestT = range;
+    var a2 = dx * dx + dz * dz;                  // cos^2(pitch); 0 only straight up
+    if (a2 > 1e-6) {
+      for (var i = 0; i < knights.length; i++) {
+        var k = knights[i];
+        if (!k.alive || !k.group) continue;
+        var ex = m.x - k.group.position.x, ez = m.z - k.group.position.z;
+        var b = 2 * (ex * dx + ez * dz);
+        var c = ex * ex + ez * ez - rad * rad;
+        var disc = b * b - 4 * a2 * c;
+        if (disc < 0) continue;                  // the line passes beside him
+        var sq = Math.sqrt(disc);
+        var t = (-b - sq) / (2 * a2);            // near face of the cylinder
+        if (t < 0) t = (-b + sq) / (2 * a2);     // muzzle already inside it
+        if (t < 0 || t >= bestT) continue;
+        var hy = m.y + dy * t;
+        /* His own height, not a constant: §21 normalises the model to
+           `targetHeight` and §28 gives every knight the same one, but a stage
+           that ever scales him must not silently become unshootable. */
+        var top = (D().knight && D().knight.targetHeight) || 2.15;
+        if (hy < 0 || hy > top) continue;        // over his head, or into the floor
+        bestT = t; best = i;
+      }
+    }
+
+    var wall = rayBlocked(m.x, m.y, m.z, dx, dy, dz, best !== -1 ? bestT : range);
+    if (wall > 0) {
+      /* Stone first. The tracer must stop where the bullet did or the picture
+         says the shot went through a wall it did not go through. */
+      out.blocked = true;
+      out.dist = wall;
+      out.end = { x: m.x + dx * wall, y: m.y + dy * wall, z: m.z + dz * wall };
+      return out;
+    }
+    if (best === -1) return out;
+
+    out.hit = true;
+    out.index = best;
+    out.dist = bestT;
+    out.mult = gunFalloff(ab, bestT);
+    out.end = { x: m.x + dx * bestT, y: m.y + dy * bestT, z: m.z + dz * bestT };
+    return out;
+  };
+
   /* Dash for the evade: along movement input, or straight back if idle. */
   A.doEvade = function (distance, durationMs) {
     var f = ((keys.KeyW || keys.ArrowUp) ? 1 : 0) - ((keys.KeyS || keys.ArrowDown) ? 1 : 0);
@@ -2180,6 +2440,11 @@ CHLOE.engine = CHLOE.engine || {};
        you cast while a sword is already coming down, so the frame it first
        appears on is the worst frame in the fight to compile a material. */
     makeWave();
+    /* §29: and the muzzle flash + tracer, for the third time and the same
+       reason — a hitscan weapon's whole legibility is those two objects, and
+       compiling them on the frame of the first shot would put the hitch
+       exactly where the fight can least afford it. */
+    makeGunFx();
     /* §24: fog, lights, the church-or-Ring geometry and the env probe are all
        one stage build now, so the switch path and the first build are the same
        code. Anything that goes only through init() is a thing that will be
@@ -2187,6 +2452,7 @@ CHLOE.engine = CHLOE.engine || {};
     buildStage();
     loadKnight();
     loadFirstPerson();
+    loadGunProp();
     loadHandSign();
     loadTornado();
     loadAsteroid();
@@ -2205,6 +2471,11 @@ CHLOE.engine = CHLOE.engine || {};
     pitch = 0; bobPhase = 0;
     crouchForced = false;
     eyeH = eyeStand();
+    /* §29: a fight that ended on the frame after a shot leaves a tracer hanging
+       in the air; the next fight must not open with it. Same reasoning as
+       clearAttack below — reset means "nothing is mid-anything". */
+    if (gunfx.flash) { gunfx.flash.visible = false; gunfx.flashT = 0; }
+    if (gunfx.tracer) { gunfx.tracer.visible = false; gunfx.tracerT = 0; }
     clearAttack();
     for (var ki = 0; ki < knights.length; ki++) {
       var kk = knights[ki];
@@ -4433,6 +4704,244 @@ CHLOE.engine = CHLOE.engine || {};
     return out;
   };
 
+  /* ================================================================== §29
+     THE SHOT'S THREE PICTURES — flash, tracer, and the click when it is empty.
+
+     WHO OWNS WHAT. engine/gunrig.js holds the PISTOL: where it sits in the
+     hand, how it kicks, and — the part this block leans on entirely —
+     `A.gunMuzzle()`, the world position of the bore, recoil included, every
+     frame. This block holds what the SHOT looks like. Two files because they
+     are two lifetimes: the prop is on screen for a whole fight, the flash for
+     55 milliseconds.
+
+     FEEDBACK IS LOAD-BEARING HERE IN A WAY IT IS NOT FOR ANYTHING ELSE IN THE
+     KIT. Every other ability has travel time you can read: the tornado winds
+     up for 1250ms, the rock falls for 850, the wave crosses its cone in 300.
+     A bullet arrives on the frame you press. With nothing drawn, the only
+     evidence a shot happened at all is the number floating off a knight —
+     which means a MISS is indistinguishable from a bug. So the shot draws
+     three things and they answer three different questions:
+       muzzle flash  — "it fired", and because it is pinned to gunMuzzle() it
+                       also answers "from where"
+       tracer        — "it went there": the line IS the ray A.hitscan solved,
+                       handed straight in, never rebuilt from the same inputs
+       hit marker    — "it connected". That one is a crosshair, and a crosshair
+                       is HUD, so ui/battle3d.js draws it.
+     The magazine needs two more: a click when the press finds nothing in the
+     pipe, and a visible reload. There is no audio anywhere in this game (grep:
+     no AudioContext, no `new Audio`), so "click" is a picture too — a spark of
+     a flash with no tracer behind it. The reload is the hotbar's own dial and
+     ammo counter (ui/battle3d.js), because 3.2 seconds of waiting belongs on
+     the thing that tells you when it ends.
+
+     NO POINT LIGHT, for the reason the wave block above states at length: a
+     punctual light joining the scene mid-fight makes r128 recompile every
+     material that can receive it, which is the 444ms hitch §21 built the
+     warm-up pass to kill. A muzzle flash that costs a quarter of a second is
+     worse than no muzzle flash. Additive geometry carries it.
+
+     Built once at init and never allocated again (§24's leak), and hidden — so
+     the §21 warm-up pass draws both objects behind the loading veil and the
+     first shot of the run costs what the sixtieth costs.
+
+     WORLD SPACE, not camera space, and the two objects differ for a reason.
+     The tracer is a streak left in the air: it must NOT turn with your head or
+     it reads as a laser sight welded to the screen. The flash is pinned to the
+     barrel, so it is re-placed from gunMuzzle() every frame it lives and
+     billboarded to the camera — which is the same thing as camera space
+     except that it follows gunrig's recoil for free. */
+  var gunfx = {
+    flash: null, quad: null, flashT: 0, flashDur: 0.055, flashScale: 1,
+    tracer: null, tracerT: 0, tracerDur: 0.06, tracerLen: 1,
+    shots: 0, last: null, roll: 0
+  };
+  var GUN_UP = null, GUN_V = null;
+
+  function gunFxCfg() { return D().gunFx || {}; }
+
+  /* A soft radial blob on a canvas — the same trick makeRuneTexture uses, and
+     for the same reason: one 128px canvas beats shipping another PNG for
+     something that is on screen for 55 milliseconds. */
+  function makeFlashTexture() {
+    var c = document.createElement('canvas'); c.width = c.height = 128;
+    var g = c.getContext('2d');
+    var rg = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    rg.addColorStop(0.00, 'rgba(255,255,240,1)');
+    rg.addColorStop(0.25, 'rgba(255,214,120,0.85)');
+    rg.addColorStop(0.60, 'rgba(255,140,40,0.30)');
+    rg.addColorStop(1.00, 'rgba(255,110,20,0)');
+    g.fillStyle = rg; g.fillRect(0, 0, 128, 128);
+    // four short spikes, so it reads as a flash and not as a glowing dot
+    g.strokeStyle = 'rgba(255,236,190,0.9)'; g.lineWidth = 5;
+    g.beginPath();
+    g.moveTo(64, 6); g.lineTo(64, 122); g.moveTo(6, 64); g.lineTo(122, 64);
+    g.stroke();
+    var t = new THREE.CanvasTexture(c);
+    if (THREE.sRGBEncoding !== undefined) t.encoding = THREE.sRGBEncoding;
+    return t;
+  }
+
+  function makeGunFx() {
+    if (!scene || gunfx.flash) return;
+    var fc = gunFxCfg();
+
+    gunfx.quad = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({
+        map: makeFlashTexture(), transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+        /* depthTest OFF: the flash sits at the muzzle, which is a hand's
+           breadth from the near plane and INSIDE the prop's own geometry —
+           depth-tested it would be half-eaten by the slide. */
+        depthTest: false, side: THREE.DoubleSide
+      })
+    );
+    gunfx.quad.frustumCulled = false;
+    gunfx.quad.renderOrder = 950;        // over the arms and the prop, which are 900
+    gunfx.flash = new THREE.Group();
+    gunfx.flash.add(gunfx.quad);
+    gunfx.flash.visible = false;
+    scene.add(gunfx.flash);
+
+    /* The tracer is a unit cylinder along +Y with its base at the origin, so
+       one geometry serves any length: point it down the ray, scale Y to the
+       distance. Six sides, because at 12mm across nobody will ever count
+       them and every extra one is a triangle drawn for 60ms. */
+    var geo = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true);
+    geo.translate(0, 0.5, 0);
+    gunfx.tracer = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      color: (fc.tracerColor != null ? fc.tracerColor : 0xffd9a0),
+      transparent: true, opacity: 0, blending: THREE.AdditiveBlending,
+      depthWrite: false
+    }));
+    gunfx.tracer.frustumCulled = false;
+    gunfx.tracer.visible = false;
+    scene.add(gunfx.tracer);
+
+    GUN_UP = new THREE.Vector3(0, 1, 0);
+    GUN_V = new THREE.Vector3();
+  }
+
+  /* Fire the picture. `info` is exactly what A.hitscan() returned, so the
+     tracer is the ray DRAWN rather than a second line built from the same
+     inputs that can quietly drift from it — the same principle the shockwave
+     and the wave are built on: the picture is the hit test.
+
+     Called on the strike event, which is the frame combat3 resolves the damage
+     on: §21's one clock, and on a hitscan weapon there is nothing else to
+     hang the shot on. */
+  A.gunShot = function (info) {
+    if (!gunfx.flash) makeGunFx();
+    if (!gunfx.flash) return false;
+    gunfx.shots++;
+    gunfx.last = info || null;
+
+    gunfx.flashT = gunfx.flashDur;
+    gunfx.flashScale = 1;
+    gunfx.flash.visible = true;
+    gunfx.roll = Math.random() * Math.PI;               // never the same stamp twice
+    placeFlash();
+
+    if (info && info.origin && info.end) {
+      var ox = info.origin.x, oy = info.origin.y, oz = info.origin.z;
+      var vx = info.end.x - ox, vy = info.end.y - oy, vz = info.end.z - oz;
+      var len = Math.sqrt(vx * vx + vy * vy + vz * vz);
+      if (len > 0.05) {
+        GUN_V.set(vx / len, vy / len, vz / len);
+        gunfx.tracer.position.set(ox, oy, oz);
+        gunfx.tracer.quaternion.setFromUnitVectors(GUN_UP, GUN_V);
+        var rad = (gunFxCfg().tracerRadius != null ? gunFxCfg().tracerRadius : 0.012);
+        gunfx.tracer.scale.set(rad, len, rad);
+        gunfx.tracerLen = len;
+        gunfx.tracerT = gunfx.tracerDur;
+        gunfx.tracer.visible = true;
+      }
+    }
+    return true;
+  };
+
+  /* The click: hammer down on an empty chamber. A spark of a flash at a
+     fraction of the size and NO tracer, because the whole message is "nothing
+     left the barrel". It has to draw something — a press that produces no
+     picture at all is indistinguishable from a press that never registered,
+     which is the one reading a dry click must not have. The rest of the tell
+     (the word, the 0/6, the reload dial) is the hotbar's, in ui/battle3d.js. */
+  A.gunDry = function () {
+    if (!gunfx.flash) makeGunFx();
+    if (!gunfx.flash) return false;
+    gunfx.flashT = gunfx.flashDur * 0.7;
+    gunfx.flashScale = 0.22;
+    gunfx.flash.visible = true;
+    gunfx.roll = Math.random() * Math.PI;
+    placeFlash();
+    return true;
+  };
+
+  /* Pin the flash to the bore and turn it to face the lens. Re-run every frame
+     it lives rather than once at spawn: gunrig is kicking the prop through its
+     recoil spring during exactly these 55ms, and a flash left at the muzzle's
+     position from the frame BEFORE the kick is a flash floating off the end of
+     a gun that has already moved. */
+  function placeFlash() {
+    if (!gunfx.flash) return;
+    var m = rayOrigin();
+    gunfx.flash.position.set(m.x, m.y, m.z);
+    /* Billboard: the flash is a flat card and the lens is the only place it
+       is ever seen from. Copying the camera orientation and then rolling by
+       the per-shot angle keeps consecutive shots from stamping identically. */
+    if (camera) {
+      gunfx.flash.quaternion.copy(camera.quaternion);
+      gunfx.flash.rotateZ(gunfx.roll);
+    }
+  }
+
+  function updateGunFx(dt) {
+    if (gunfx.flashT > 0) {
+      gunfx.flashT = Math.max(0, gunfx.flashT - dt);
+      var f = gunfx.flashT / gunfx.flashDur;
+      placeFlash();
+      if (gunfx.quad) {
+        // big and bright instantly, gone fast: a flash has no attack
+        gunfx.quad.material.opacity = Math.min(1, f * 1.4);
+        var s = (gunFxCfg().flashSize != null ? gunFxCfg().flashSize : 0.22) *
+                gunfx.flashScale * (0.55 + 0.45 * f);
+        gunfx.quad.scale.set(s, s, s);
+      }
+      if (gunfx.flashT <= 0) gunfx.flash.visible = false;
+    }
+
+    if (gunfx.tracerT > 0) {
+      gunfx.tracerT = Math.max(0, gunfx.tracerT - dt);
+      var tf = gunfx.tracerT / gunfx.tracerDur;
+      gunfx.tracer.material.opacity = 0.75 * tf;
+      /* It also SHORTENS from the muzzle end as it fades, so the streak reads
+         as something that went that way rather than a rod that appeared. */
+      gunfx.tracer.scale.y = gunfx.tracerLen * (0.35 + 0.65 * tf);
+      if (gunfx.tracerT <= 0) gunfx.tracer.visible = false;
+    }
+  }
+
+  /* §29 verification hook: everything a test needs to prove the shot came out
+     of the barrel and went where the ray said, without a screenshot. */
+  A._gunFxProbe = function () {
+    var m = rayOrigin();
+    return {
+      shots: gunfx.shots,
+      muzzle: { x: +m.x.toFixed(3), y: +m.y.toFixed(3), z: +m.z.toFixed(3) },
+      propMuzzle: (typeof A.gunMuzzle === 'function' && A.gunMuzzle()) ? true : false,
+      flashVisible: !!(gunfx.flash && gunfx.flash.visible),
+      flashAt: gunfx.flash ? { x: +gunfx.flash.position.x.toFixed(3),
+                               y: +gunfx.flash.position.y.toFixed(3),
+                               z: +gunfx.flash.position.z.toFixed(3) } : null,
+      tracerVisible: !!(gunfx.tracer && gunfx.tracer.visible),
+      tracerFrom: gunfx.tracer ? { x: +gunfx.tracer.position.x.toFixed(3),
+                                   y: +gunfx.tracer.position.y.toFixed(3),
+                                   z: +gunfx.tracer.position.z.toFixed(3) } : null,
+      tracerLen: +gunfx.tracerLen.toFixed(3),
+      last: gunfx.last
+    };
+  };
+
   function updateFx(dt) {
     for (var i = 0; i < candleLights.length; i++) {
       var c = candleLights[i];
@@ -4440,6 +4949,7 @@ CHLOE.engine = CHLOE.engine || {};
     }
     updateShocks(dt);
     updateWave(dt);
+    updateGunFx(dt);
   }
 
   function loop(now) {
@@ -4450,6 +4960,7 @@ CHLOE.engine = CHLOE.engine || {};
     updatePlayer(dt);
     updateKnight(dt);
     if (fp.mixer) fp.mixer.update(dt);
+    updateGunProp(dt);
     updateSignAndTornado(dt);
     updateFx(dt);
     try { renderer.render(scene, camera); }
@@ -4603,6 +5114,12 @@ CHLOE.engine = CHLOE.engine || {};
          the difference. Only the clamp in play is reported, so the field
          cannot claim a rectangle the engine is ignoring. */
       stage: stageDebug(),
+      /* §29: the pistol, and the one number the tracer depends on. `loaded`
+         false with `mounted` true is the DEGRADED path working as designed —
+         no visible gun, a muzzle point that is still real. `muzzleNode` false
+         says that point came from the authored offset rather than from the
+         bore ring the converter measured. */
+      gun: GUN() ? GUN().debug() : null,
       locked: isLocked()
     };
   };
@@ -4671,6 +5188,7 @@ CHLOE.engine = CHLOE.engine || {};
     updatePlayer(dt);
     updateKnight(dt);
     if (fp.mixer) fp.mixer.update(dt);
+    updateGunProp(dt);
     updateSignAndTornado(dt);
     updateFx(dt);
     return A.debug();

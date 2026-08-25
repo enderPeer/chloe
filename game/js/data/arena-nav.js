@@ -25,9 +25,22 @@ window.CHLOE = window.CHLOE || {};
 CHLOE.data = CHLOE.data || {};
 
 CHLOE.data.arenaNav = {
-  // assetVersion 6 added asteroid.glb; the CHURCH is byte-identical, so the
-  // baked floor is still valid and only the version half of the key moved.
-  key: '6|0|34.04|-7.5|1.5708',
+  // assetVersion 7 (§29) added gun9mm.glb; 6 added asteroid.glb. Neither
+  // touched church.glb — it is byte-identical to the model this floor was
+  // measured against — so the baked grid is still valid and only the version
+  // half of the key moves. Re-baking would spend a minute to reproduce it.
+  //
+  // BUMPING assetVersion MEANS BUMPING THIS LINE, and it is the whole reason
+  // this comment keeps growing: the key's job is "has the church moved", but
+  // its first field is a cache-buster shared by every .glb in the game, so an
+  // unrelated asset invalidates a perfectly good floor. It has now happened
+  // twice. The failure is SILENT in play — arena3d warns to the console, then
+  // falls back to the bounds rectangle, and the church quietly becomes an
+  // empty box: the knights walk through the altar block (§22) and the 9mm's
+  // ray stops being stopped by stone (§29 rayBlocked). Nothing on screen says
+  // so. If a third bump lands here, key the grid on the church file alone
+  // instead of on assetVersion.
+  key: '7|0|34.04|-7.5|1.5708',
   cell: 0.4,
   minX: -9.7,
   minZ: -13.5,

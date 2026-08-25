@@ -676,6 +676,32 @@ Related, unreached today: `debug().shopReady` has **zero consumers**. If the sho
 ### Verification
 Prove: 103/103 meshes reparent with the knight's on-screen height unchanged at 2.15m; all five attack patterns AND all six §22 locomotion/reaction states play on the new rig; the sword tracks the elbow and the hips move; impact frames still land on the strike timer; a squad's levels visibly diverge during a fight while a fresh round-6 squad is no harder at t=0 than today.
 
+## 29. The 9mm, and three fists become one (supersedes §21's level 5-9 ladder rows for hammer_fist and ember_jab)
+
+### The three melee abilities really were one move
+`hammer_fist`, `ember_jab` and `hollow_breaker` all share `anim: 'Punch'`, range 2.9-3.1, arc 55-65, single target. They are one move with three price tags, and the ladder spent three of its nine authored levels on it. Resolution, per the player:
+- **DELETE `hammer_fist`** — the level-5/6 slot goes to the gun.
+- **DELETE `ember_jab`**.
+- **RENAME `hollow_breaker` -> `killer_fist`**, display name **"Killer Fist"**. Rename the ID too, not just the label — there are no saves (§15) so nothing persisted references it, and a stale id is how the next reader concludes they are different moves. Update `data/skilltree.js` and `data/tree.js`, and keep its mechanics (divine, 2 hits, rising strike) — it is the survivor, not a new move.
+
+### `gun_9mm` — level 5, on the mouse
+A 9mm pistol. **Hitscan**: a straight line from the muzzle, hit or miss decided along that ray — not an arc, not a lane volume. `cost: { sta: 10 }` and **strong** damage.
+- **It lives on the mouse.** §27 put `mouseL`/`mouseR` OUTSIDE the nine number keys, so a mouse-bound gun costs no keyboard slot — which is why the ladder can afford it. On unlock it auto-binds to a free mouse button (prefer `mouseR`, leaving `mouseL` for the hands), and the player may rebind it like anything else. It must obey §27's room/arena split: in the ROOM the mouse still opens/closes hands and grabs; the gun fires only in the arena.
+- **A magazine is the real cost, not the stamina.** 10 stamina is cheap enough to spam, so the gate is `charges` (a magazine) with a `rechargeMs` reload and a short `cooldownMs` fire rate. Author the numbers; state why. A reload that lands mid-swing is the tension — the gun must never be strictly better than closing to melee.
+- Range long enough to cross the Ring (radius 14) meaningfully without trivialising it; state the number and the falloff, if any.
+- Feedback is load-bearing for a hitscan weapon, because there is no travel time to read: muzzle flash, a brief tracer along the ray, a hit marker, and a distinct dry-click plus reload tell when the magazine is empty.
+- **§21's one clock still governs.** The shot resolves on the same timer the picture fires on.
+
+### The asset
+`C:\Users\Olaf\Downloads\9-mm.zip` -> FBX + PBR set (albedo/normal/roughness/AO/metallic/emissive, ~16MB of PNG). Convert exactly the way the church and knight were: headless Blender, relink textures, **downscale to 1k**, Draco, GLB into `game/assets/3d/`, and bump `assetVersion` in `data/arena3d.js` so caches refetch. Blender is NOT currently installed (it was, for §16) — reinstall it; do not hand-roll an FBX parser.
+Mount it as a first-person prop on the camera like the §17 punch rig, sized and placed so the muzzle is where the ray starts — a tracer that does not leave the barrel is worse than no tracer.
+
+### Ladder after the change (levels 1-9, §21's "every level hands you something you can feel")
+`1 punch · 2 fire_tornado · 3 asteroid · 4 water_wave + Ash · 5 gun_9mm · 6 +1 keybind · 7 stat · 8 stat · 9 killer_fist`.
+**Slot arithmetic — check it, this bit §25.** Today: base 1 + 6 ladder slots = 7 keys, + 2 pockets = 9 = cap. After: the gun takes NO number key, and two ability rows become a keybind and a stat. Recount from the authored rows (the §25 fix already derives `slotsSoFar` rather than hardcoding it) and assert the total never exceeds `maxSlots` at ANY level 1-100, with every known ability still bound.
+
+### Verification
+Prove: the gun unlocks at 5, auto-binds to a mouse button, fires a straight ray in the arena and still grabs in the room; strong damage at 10 stamina but magazine-gated; the muzzle flash starts at the barrel; `hammer_fist` and `ember_jab` are gone from every file (grep); `killer_fist` is the renamed survivor with its mechanics intact; and no level 1-100 exceeds the key cap or leaves an ability unbound.
 ## 30. A knight levels for every round he comes back (supersedes §28 A's "every knight spawns at level 1" and its round-baseline ceiling; extends §20 squads, §28 A per-knight levels)
 
 ### The rule
