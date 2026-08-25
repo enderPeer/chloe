@@ -306,6 +306,68 @@ allocated in sequence.)*
 
 ---
 
+## The probe that cannot fail loudly
+
+The most expensive failure mode in this repo is not a wrong answer. It is a **plausible** one,
+returned by a probe that had no way to report that it had failed. Across one day of parallel work
+on this codebase it happened seven times, to four different people, through six different
+mechanisms — and every single time the output was a clean, readable number that looked exactly
+like a measurement.
+
+This codebase is unusually prone to it, for reasons that are all deliberate elsewhere:
+
+- **Every consumer degrades rather than throws** (see trap 1). A missing module leaves an
+  `undefined` namespace slot and the call site guards it, so nothing anywhere raises.
+- **The engines default rather than refuse.** `knighttree` treats an unknown personality as the
+  plain baseline on purpose — "a knight who cannot level is worse than one who levels dully"
+  ([engine/knighttree.js:84](../game/js/engine/knighttree.js:84)) — so a typo in a personality
+  string produces a real level, not an error.
+- **The debug surfaces are pure reads.** They answer correctly whether or not anything is running,
+  which is what makes them safe to call and dangerous to trust.
+
+### The six mechanisms, and the tell for each
+
+| Mechanism | What it returns | How to catch it |
+|---|---|---|
+| A function that does not exist | `undefined`, then whatever your own fallback does | Assert the name resolves before calling: `typeof CHLOE.engine.knighttree.levelFor === 'function'` |
+| An argument in the wrong position | A real answer computed from the wrong values | Read the signature off the source, never off memory. `levelFor(personality, seconds, round, seniority)` takes seniority **fourth** |
+| An accessor defaulting on the wrong shape | The stub, not the state | `arena3d.debug()` is `deadDebug()` before `init()`; `combat3.snapshot()` is `null` outside a round |
+| A synthetic test object | The unknown-input path, silently | A hand-built knight with no `brain` is not a knight; drive `spawnSquad` instead |
+| A table read above its override | The wrong row | `mults()` returns the **last** row that set a value — rows are absolute, not cumulative ([engine/knighttree.js:172](../game/js/engine/knighttree.js:172)) |
+| A frozen `requestAnimationFrame` | The world exactly as it was at `init()` | Trap 6 below — prove the clock moved before believing anything |
+
+### A worked example, because the general rule is easy to nod at
+
+Probing the §30 seniority ladder by calling `spawnLevel(p, seniorityFor(i, 5))` with a single
+personality returns `[5, 4, 3, 2, 1]`. It is plausible, it is self-consistent, and it matches the
+number [GAME_SPEC.md §30](../GAME_SPEC.md) prints. It is also a squad the game cannot deal.
+
+Personalities are **dealt round-robin from a random seed**, not chosen
+([engine/arena3d.js:3558](../game/js/engine/arena3d.js:3558)), so five consecutive indices always
+contain at least one `brute` — and the brute's `baseBonus` of +1 rides on top of his own rung. The
+three reachable openings at round 5 are `[5,4,4,2,1]`, `[5,5,3,2,2]` and `[6,4,3,3,1]`. The middle
+one is where §30's own measured figure came from.
+
+The probe was not wrong about `spawnLevel`. It was wrong about what it had modelled — it asked a
+question the game never asks. Nothing in the answer said so.
+
+### The rule
+
+**Before believing a probe, make it fail on purpose.** Feed it an input you know is broken — a
+misspelled personality, an out-of-range index, a function name with a typo — and confirm it
+complains. A probe that returns a plausible number for deliberately broken input is not measuring
+anything, and you have no way to tell its output from a real one.
+
+Two corollaries worth keeping:
+
+- **A number that matches the spec is not confirmation.** The spec is layered by supersession and
+  can be behind the code — that is why the wiki's second convention exists. Two sources agreeing
+  is only evidence when they are independent.
+- **Report what the probe actually established**, not what it appeared to. "`spawnLevel` returns
+  the seniority ladder" was true; "round 5 fields `[5,4,3,2,1]`" did not follow from it.
+
+---
+
 ## The traps
 
 ### 1. A new module with no `<script>` tag is a whole feature shipped dead — silently
