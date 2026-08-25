@@ -1462,9 +1462,18 @@ CHLOE.ui.battle3d = (function () {
   }
 
   var keyHandler = null;
+  /* §31 wheel state. NOTCH_DELTA is the travel one detent is worth: a classic
+     mouse wheel reports 100 per notch in Chrome and a trackpad reports a
+     stream of small deltas, so 100 fires once per notch on the former and
+     once per deliberate flick on the latter. WHEEL_OPTS is a shared constant
+     because add and remove must be handed the SAME options object. */
+  var wheelHandler = null, wheelAccum = 0;
+  var NOTCH_DELTA = 100;
+  var WHEEL_OPTS = { passive: false, capture: true };
   var mouseHandler = null, ctxHandler = null;
   function wireKeys() {
     if (keyHandler) return;
+    wheelAccum = 0;
     keyHandler = function (e) {
       if (!active || ui.current() !== 'battle3d') return;
       if (e.code === 'Space') { e.preventDefault(); doEvade(); return; }
@@ -1509,12 +1518,54 @@ CHLOE.ui.battle3d = (function () {
     };
     // RMB opens the context menu over the canvas otherwise, which eats the fight
     ctxHandler = function (e) { if (active && ui.current() === 'battle3d') e.preventDefault(); };
+    /* §31 THE WHEEL. Same arena-only enforcement as the buttons above — it
+       lives and dies with the fight, so in the room a notch is nothing.
+
+       THREE THINGS THIS HANDLER HAS TO GET RIGHT, and each of them is a bug
+       if it does not:
+       1. ONE NOTCH IS SEVERAL EVENTS. Trackpads and free-spin wheels emit a
+          stream of small deltas; a naive handler spends a bandage on the
+          first and then prints 'Pockets cooling down' for every one after it.
+          Deltas accumulate and fire once per NOTCH_DELTA worth of travel, and
+          the accumulator resets on direction change so a flick back the other
+          way is immediate rather than having to unwind the first flick.
+       2. UNBOUND MUST NOT preventDefault. `handled:false` means the page keeps
+          its scroll — the bind screen and the shop are scrollable containers
+          and a greedy wheel handler would freeze both.
+       3. PASSIVE LISTENERS CANNOT preventDefault. Chrome makes window-level
+          wheel passive by default, so {passive:false} is required, and
+          removeEventListener must be given the identical options object or
+          the listener outlives the fight. */
+    wheelHandler = function (e) {
+      if (!active || ui.current() !== 'battle3d') return;
+      if (!C3.wheelPress) return;                    // older engine: no wheel
+      var dy = e.deltaY || 0;
+      if (!dy) return;
+      if ((dy > 0) !== (wheelAccum > 0)) wheelAccum = 0;   // direction change
+      wheelAccum += dy;
+      if (Math.abs(wheelAccum) < NOTCH_DELTA) return;
+      var dir = wheelAccum;
+      wheelAccum = 0;
+      var res = C3.wheelPress(dir);
+      if (!res || !res.handled) return;              // not a bind — let it scroll
+      e.preventDefault();
+      e.stopPropagation();
+      var r = res.result || {};
+      if (!r.ok) { log(r.reason || 'Not ready.'); return; }
+      fireResult(r, viewOf(C3.snapshot(), res.slot));
+    };
+    window.addEventListener('wheel', wheelHandler, WHEEL_OPTS);
     window.addEventListener('mousedown', mouseHandler, true);
     window.addEventListener('contextmenu', ctxHandler, true);
   }
   function unwireKeys() {
     if (keyHandler) { window.removeEventListener('keydown', keyHandler); keyHandler = null; }
     if (mouseHandler) { window.removeEventListener('mousedown', mouseHandler, true); mouseHandler = null; }
+    /* WHEEL_OPTS is a module constant rather than a fresh object literal for
+       exactly this line: an options object that does not match the one used to
+       add is a listener that never comes off, and it would then eat scrolling
+       in the menus for the rest of the session. */
+    if (wheelHandler) { window.removeEventListener('wheel', wheelHandler, WHEEL_OPTS); wheelHandler = null; }
     if (ctxHandler) { window.removeEventListener('contextmenu', ctxHandler, true); ctxHandler = null; }
   }
 
@@ -1750,6 +1801,20 @@ CHLOE.ui.battle3d = (function () {
     /* §27B: fire a slot the way an input event would, so "LMB casts in the
        arena" is driven through the same code a click reaches. */
     _press: fire,
+    /* §31: the wheel's headless entry point. Everything downstream of the
+       listener runs off rAF, which is frozen in a non-compositing tab, so
+       without this the wheel would be the one input in the game whose only
+       test is a human scrolling. Takes a DIRECTION ('up'/'down' or a signed
+       number), not an event — the same argument wheelPress takes, and for the
+       same reason: a WheelEvent.button reads 0 and would fire mouseL. */
+    _wheel: function (dir) {
+      if (!C3 || !C3.wheelPress) return { handled: false };
+      var res = C3.wheelPress(dir);
+      if (res && res.handled && res.result && res.result.ok) {
+        fireResult(res.result, viewOf(C3.snapshot(), res.slot));
+      }
+      return res;
+    },
     _mouse: function (button) {
       if (!C3 || !C3.mousePress) return { handled: false };
       var res = C3.mousePress(button);

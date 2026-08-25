@@ -288,7 +288,11 @@ CHLOE.data.abilities = {
   gun_9mm: {
     id: 'gun_9mm', name: '9mm', icon: '🔫', type: 'physical',
     desc: 'A pistol. It hits where the crosshair is, as far as you can see, and it holds six.',
-    cost: { sta: 10 },
+    /* §31: 18 is the ROW-1 price and 10 is what level 5 buys it down to
+       (data/skilltree.js row 5, `costMod`). §29 authored the 10 for a gun that
+       arrived at level 5; the player moved it to level 1, so the gate moved
+       from WHEN you get it to WHAT IT COSTS while you are new. */
+    cost: { sta: 18 },
     /* Almost no wind-up: the trigger IS the cast. 90ms is one frame of arm
        before the flash so the shot has a moment to belong to, and 130ms of
        recover so a full magazine is a stutter of six rather than one press.

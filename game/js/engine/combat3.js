@@ -294,7 +294,21 @@ CHLOE.engine.combat3 = (function () {
     /* Key 1 defaults to the first thing you know — unless it is already bound
        elsewhere (putting punch on key 5 used to leave a duplicate on key 1 and
        waste the key) or you cleared it on purpose. */
+    /* §31 added the third condition. The comment above has always promised
+       "unless it is already bound elsewhere", but the check only ever looked
+       at `out` — the KEY array — and a button was invisible to it.
+
+       IT WAS NEVER UNREACHABLE, and an earlier version of this comment said
+       so wrongly. bind() clears an entry off its key when you move it to a
+       button, and the next binds() read re-places known[0] on key 1 because
+       the default cannot see the button — so any player who put their first
+       ability on the mouse has been getting a duplicate, and wasting the key
+       this comment exists to protect, since §27B shipped.
+       §31 changed the ODDS, not the possibility: seeding the fist onto LMB
+       makes it the opening state of every run rather than something you had
+       to go and do. */
     if (!out[0] && known.length && out.indexOf(known[0]) === -1 &&
+        mouseEntries(charId).indexOf(known[0]) === -1 &&
         clearedOf(charId).indexOf(known[0]) === -1) {
       out[0] = known[0];
     }
@@ -781,6 +795,19 @@ CHLOE.engine.combat3 = (function () {
     return true;
   }
 
+  /* §31: what an ability costs THIS character, after the ladder has had its
+     say. data/skilltree.js row 5 discounts the 9mm from 18 stamina to 10, so
+     the price is a function of level and not a constant on the ability. Every
+     reader goes through here — the readiness check, the spend, and the three
+     the hotbar draws from — because a HUD that shows 18 while the engine
+     charges 10 is the same class of lie as a board naming the wrong stage. */
+  function costOf(a) {
+    if (!a) return {};
+    var tree = CHLOE.engine.skilltree;
+    if (!tree || typeof tree.costFor !== 'function' || !st) return a.cost || {};
+    return tree.costFor(st.charId, a.id, a.cost) || a.cost || {};
+  }
+
   function canPay(cost) {
     cost = cost || {};
     return (cost.sta || 0) <= st.sta && (cost.mana || 0) <= st.mana;
@@ -839,7 +866,8 @@ CHLOE.engine.combat3 = (function () {
       return { ready: false, reason: 'Recharging', pct: cooldownPct(id) };
     }
     if (st.now < c.nextAt) return { ready: false, reason: 'Cooling down', pct: cooldownPct(id) };
-    if (!canPay(a.cost)) return { ready: false, reason: 'Not enough ' + ((a.cost && a.cost.mana) ? 'magic' : 'stamina') };
+    var payFor = costOf(a);
+    if (!canPay(payFor)) return { ready: false, reason: 'Not enough ' + (payFor.mana ? 'magic' : 'stamina') };
     return { ready: true };
   }
 
@@ -887,14 +915,22 @@ CHLOE.engine.combat3 = (function () {
     var eff = def.effect || {};
     var hp = Math.max(0, Math.min(st.max.hp - st.hp, eff.hp || 0));
     var mana = Math.max(0, Math.min(st.max.mana - st.mana, eff.mp || 0));
+    /* §31: stamina is a pool like the other two and the smelling salts put a
+       number back in it. Without this branch a {sta:n} item was bindable
+       (data/items.js decides that), pressable, and then refused as "Already
+       full." at full health — the item worked everywhere except the fight it
+       was for. Clamped to the headroom exactly like hp and mana, so drinking
+       at 39/40 wastes 27 of the 28 and refuses at 40. */
+    var sta = Math.max(0, Math.min(st.max.sta - st.sta, eff.sta || 0));
     /* Refuse before consuming, never after. A bandage pressed at full life is
        a fumbled key, not a decision, and eating the last one for zero healing
        is the single most annoying thing this feature could do. "Never refund
        on a failed press" is satisfied by never taking it in the first place. */
-    if (hp <= 0 && mana <= 0) return { ok: false, reason: 'Already full.' };
+    if (hp <= 0 && mana <= 0 && sta <= 0) return { ok: false, reason: 'Already full.' };
 
     st.hp += hp;
     st.mana += mana;
+    st.sta += sta;   // §31: the third pool, applied like the other two
     var m = party().get(st.charId);
     if (m) m.hp = st.hp;          // same mirror takeHit keeps
     inv.remove(itemId, 1);
@@ -911,8 +947,11 @@ CHLOE.engine.combat3 = (function () {
     /* `kind` and `cooldownMs` are for the HUD: it has to tell an item press
        from a cast without re-reading the bind, and it sweeps the pocket dial
        against the same span this pressed. */
+    /* §31 reports `sta` beside hp/mana so the HUD can float "+28 STA" the
+       same way it floats the other two. A restore the engine performs and
+       does not report is a number the player has to infer from a bar. */
     return { ok: true, kind: 'item', item: def, itemId: itemId,
-             hp: hp, mana: mana, count: inv.count(itemId),
+             hp: hp, mana: mana, sta: sta, count: inv.count(itemId),
              lockMs: (cfg.itemUseMs || 350), cooldownMs: (cfg.itemCooldownMs || 2500) };
   }
 
@@ -935,7 +974,7 @@ CHLOE.engine.combat3 = (function () {
        the wording, which is copy and may change. `ability` rides along so the
        caller can tell WHICH slot clicked dry without re-resolving the bind. */
     if (!r.ready) return { ok: false, reason: r.reason, empty: !!r.empty, ability: a };
-    if (!spend(a.cost)) return { ok: false, reason: 'Not enough resources.' };
+    if (!spend(costOf(a))) return { ok: false, reason: 'Not enough resources.' };
 
     var c = st.cd[a.id];
     c.charges = Math.max(0, c.charges - 1);
@@ -976,6 +1015,35 @@ CHLOE.engine.combat3 = (function () {
      That is the whole of "a bound mouse button must not also trigger a grab,
      and must not collide with click-to-engage": both rules fall out of one
      boolean, and the caller never has to ask what screen it is on. */
+  /* §31: the wheel, and why it does NOT go through mouseSlotOf.
+     A WheelEvent's `button` property reads 0 — structurally valid, semantically
+     a left click — so routing a notch through the button mapper would fire
+     mouseL every time and never fail loudly. This mapper takes a DIRECTION,
+     not an event: a number whose sign is the direction (deltaY convention:
+     negative is up), or the strings 'up'/'down'. */
+  function wheelSlotOf(dir) {
+    if (dir === 'up' || dir === 'wheelUp') return 'wheelUp';
+    if (dir === 'down' || dir === 'wheelDown') return 'wheelDown';
+    if (typeof dir === 'number' && dir !== 0) return dir < 0 ? 'wheelUp' : 'wheelDown';
+    return null;
+  }
+
+  /* Same contract as mousePress, deliberately: `handled` decides whether the
+     input layer swallows the event. An UNBOUND direction must come back
+     handled:false so ui/battle3d.js does not preventDefault — for a wheel that
+     means the page is still allowed to scroll, which the bind screen and the
+     shop both depend on. */
+  function wheelPress(dir) {
+    var slot = wheelSlotOf(dir);
+    if (!slot) return { handled: false, reason: 'Not a wheel direction.' };
+    if (!isMouseSlot(slot)) return { handled: false, slot: slot, reason: 'This build has no wheel slots.' };
+    if (isOver()) return { handled: false, slot: slot, reason: 'The wheel fires binds only in the arena.' };
+    if (!mouseBinds(st.charId)[slot]) {
+      return { handled: false, slot: slot, reason: 'Nothing bound to that direction.' };
+    }
+    return { handled: true, slot: slot, result: press(slot) };
+  }
+
   function mousePress(side) {
     var slot = mouseSlotOf(side);
     if (!slot) return { handled: false, reason: 'Not a bindable button.' };
@@ -1476,14 +1544,14 @@ CHLOE.engine.combat3 = (function () {
     return {
       slot: slot, key: key, kind: 'ability',
       id: entry, name: a.name, icon: a.icon, type: a.type,
-      cost: a.cost || {},
+      cost: costOf(a),
       // "8 STA" / "14 MAG" / "14 MAG + 6 STA" for the HUD chip
       costText: (function (c) {
         var b = [];
         if (c.mana) b.push(c.mana + ' MAG');
         if (c.sta) b.push(c.sta + ' STA');
         return b.join(' + ') || 'free';
-      })(a.cost || {}),
+      })(costOf(a)),
       charges: st.cd[entry] ? st.cd[entry].charges : 0,
       maxCharges: a.charges || 1,
       /* §29: the HUD draws a magazine as "4/6" and a charge stack as "2", and
@@ -1492,7 +1560,7 @@ CHLOE.engine.combat3 = (function () {
       empty: !!(a.magazine && st.cd[entry] && st.cd[entry].charges <= 0),
       cdPct: cooldownPct(entry),
       cdLeft: st.cd[entry] ? Math.max(0, (st.cd[entry].nextAt - st.now) / 1000) : 0,
-      affordable: canPay(a.cost),
+      affordable: canPay(costOf(a)),
       ready: r.ready,
       reason: r.ready ? null : r.reason
     };
@@ -1579,7 +1647,9 @@ CHLOE.engine.combat3 = (function () {
        comment before wiring a click to anything. */
     MOUSE_SLOTS: MOUSE_SLOTS, isMouseSlot: isMouseSlot, mouseSlotOf: mouseSlotOf,
     mouseLabel: mouseLabel, mouseBinds: mouseBinds, mouseSlots: resolvedMouseSlots,
-    mousePress: mousePress, mouseArmed: mouseArmed,
+    mousePress: mousePress,
+    // §31 the wheel: a DIRECTION, never an event (a WheelEvent.button reads 0)
+    wheelPress: wheelPress, wheelSlotOf: wheelSlotOf, mouseArmed: mouseArmed,
     slotIds: slotIds, entryAt: entryAt,
     /* §27C. `passiveItem` is what tells a HUD to draw a slot armed instead of
        pressable; `takeRevive` is the read-and-clear feed for a splash. */

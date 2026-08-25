@@ -185,14 +185,15 @@ CHLOE.ui.binds = (function () {
 
     body.appendChild(ui.el('div', 'menu-note',
       'Bind abilities and pocket items to number keys — or to the mouse. In the ' +
-      'fight: 1-9, left click and right click all fire what you put on them, ' +
+      'fight: 1-9, the two mouse buttons and the wheel all fire what you put ' +
+      'on them, ' +
       'SPACE to evade, Shift to sprint, Ctrl or C to crouch. New moves arrive ' +
       'already bound — rearrange them here if you want them somewhere else.'));
     /* §27B: the buttons do two different jobs in two different places, and a
        player who is not told that will think one of them is broken. */
     if (mouseIds().length) {
       body.appendChild(ui.el('div', 'menu-note',
-        'The mouse only fires binds in the church. Back in the room it is still ' +
+        'The mouse and the wheel only fire binds in the ARENA — either floor. Back in the room they are still ' +
         'your hands — click to close them, and to take what you are looking at.'));
     }
     if (notice) body.appendChild(ui.el('div', 'menu-note warn', notice));
