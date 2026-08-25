@@ -67,8 +67,8 @@ CHLOE.data.room3d = {
   },
 
   // kind drives the mesh composition + collidability in world3d.js.
-  // Collidable kinds: vanity, couch, tv, lamp, chair. Wall-flush planes
-  // (mirror, door, poster) are covered by the wall colliders.
+  // Collidable kinds: vanity, couch, tv, lamp, chair, giftbox. Wall-flush planes
+  // (mirror, door, poster, frame_records) are covered by the wall colliders.
   // Section 14 fields: model = canonical manifest id (null = always textured-box),
   // targetH = uniform-scale target height in meters for the GLTF model.
   furniture: [
@@ -97,7 +97,30 @@ CHLOE.data.room3d = {
        plausible on the wall. `tex` stays the same sheet for both: it is only
        the fallback when the canvas cannot be painted. */
     { kind: 'poster',       id: 'poster_knight', x: -3.96, z: 0.6,  w: 0.85, d: 0.04, h: 1.15, rotY: Math.PI / 2, tex: 'poster', model: null },
-    { kind: 'poster_stage', id: 'poster_stage',  x: -1.4,  z: 2.96, w: 0.85, d: 0.04, h: 1.15, rotY: Math.PI,     tex: 'poster', model: null }
+    { kind: 'poster_stage', id: 'poster_stage',  x: -1.4,  z: 2.96, w: 0.85, d: 0.04, h: 1.15, rotY: Math.PI,     tex: 'poster', model: null },
+
+    /* §27D — the shop. A wrapped box left standing in the open south-east
+       floor: you can see it from the spawn, walk a straight line to it and
+       click it. Deliberately NOT against a wall — the couch corner and the
+       vanity are already crowded, and a shop you have to hunt for is a shop
+       nobody opens. It stays clear of the three things that must never be
+       blocked: the door (0.8, 2.96), the TV in the south-west corner and the
+       stage board on the south wall; it also sits well off the spawn->ghost
+       sightline (which passes ~z -1.1 at this x), so walking up to it can
+       never start a fight by accident. Collidable — it is a solid object and
+       reads as one when you bump it. */
+    { kind: 'giftbox', id: 'gift_shop', x: 1.6, z: 1.35, w: 0.62, d: 0.52, h: 0.5, rotY: 0.35, tex: null, model: null },
+
+    /* §27E — the record board, in a picture frame on the free (east) half of
+       the north wall, beside the vanity/mirror corner and at the same eye
+       height as the other panels. Left of the ghost's spawn so the billboard
+       does not stand in front of it, and reachable: the floor in front is
+       open all the way to the wall. `y` is authored HERE rather than assumed
+       by the engine because this frame is the only wall prop that does not
+       share the posters' height, and a number in data is one you can move
+       without touching engine code. Distinct kind + id like the posters (§24):
+       the engine picks the canvas by NAME, never by position in this list. */
+    { kind: 'frame_records', id: 'frame_records', x: 0.95, z: -2.96, y: 1.52, w: 0.82, d: 0.05, h: 1.12, rotY: 0, tex: null, model: null }
   ],
 
   lights: {

@@ -24,7 +24,10 @@ CHLOE.engine.party = (function(){
     loadouts: {},  // charId -> { phaseId: [<=5 moveIds] }  (Combat v2)
     binds: {},     // charId -> [entry|null] per number key  (Combat v3 §17;
                    //  an entry is an ability id or 'item:<id>' — §23 pockets)
-    autoBound: {}, // charId -> entries already offered a key once (§21/§23)
+    mouseBinds: {},   // charId -> {mouseL:entry|null, mouseR:entry|null} (§27B —
+                      //  addressed by id, never by index; see data/config.js)
+    autoBound: {},    // charId -> entries auto-bind has PLACED at least once (§21/§23)
+    bindsCleared: {}, // charId -> entries the PLAYER emptied off a key (§27A)
     pocketAt: {},  // charId -> {'item:<id>': slot} auto-bind lent it (§23)
     skillPoints: {}, // charId -> unspent skill points        (Progression v3)
     tree: {},        // charId -> [owned nodeIds]             (Progression v3)
@@ -76,22 +79,53 @@ CHLOE.engine.party = (function(){
     if (!Array.isArray(state.tree[m.id])) state.tree[m.id] = [];
   }
 
+  /* ---------- the hotbar, as ONE unit (§27A) ----------
+     THE BUG THIS FUNCTION EXISTS TO MAKE IMPOSSIBLE.
+     The hotbar is not one map, it is five that only mean anything together:
+       binds        what is on each number key
+       mouseBinds   what is on LMB/RMB (§27B)
+       autoBound    what auto-bind has already placed, so a level-up card does
+                    not re-announce a move you have had for six rounds
+       bindsCleared what the PLAYER deliberately emptied off a key, so the
+                    engine never puts it back
+       pocketAt     which key auto-bind LENT a consumable, so it may shuffle
+                    that one right and nothing the player placed by hand
+     Wiping any subset of those and keeping the rest is the §27A bug in one
+     move: a `binds` map cleared while `autoBound` survives leaves every
+     ability that was ever auto-placed marked "done" with nowhere to be, and
+     they never come back. The old code carried a comment warning that two of
+     them had to move together; a comment cannot be called, so this can.
+
+     Call it for one character, or with no id to reset the whole party. It is
+     the ONLY sanctioned way to rebuild a hotbar from empty — reaching into
+     party.state.binds directly is what re-arms the trap.
+
+     (binds() self-heals as a second line of defence, so even a caller that
+     ignores this recovers. Both, not either: the reset keeps the memories
+     honest, the self-heal survives a caller who never learned about it.) */
+  var BIND_STORES = ['binds', 'mouseBinds', 'autoBound', 'bindsCleared', 'pocketAt'];
+  function resetBinds(charId){
+    for (var i = 0; i < BIND_STORES.length; i++) {
+      var k = BIND_STORES[i];
+      if (!state[k] || typeof state[k] !== 'object') state[k] = {};
+      if (charId) delete state[k][charId];
+      else state[k] = {};
+    }
+    return true;
+  }
+
   function newGame(){
     state.members = [];
     state.loadouts = {};
     state.skillPoints = {};
     state.tree = {};
     state.runStats = { kills: 0, round: 1, trophies: [] };
-    /* Both halves of the hotbar are run-scoped (§15), and they must be cleared
-       TOGETHER. Clearing only `autoBound` was survivable while a slot could
-       only hold an ability — a level-1 character knows nothing but punch, so
-       last run's binds were dropped as unknown on the next read. §23 item
-       binds are not: 'item:bandage' validates against the item table, which
-       has no idea a new run started, so a stale pocket layout would follow you
-       into the next run and the auto-bind would refuse to redo it. */
-    state.binds = {};
-    state.autoBound = {};   // §21/§23: which entries have been auto-keyed once
-    state.pocketAt = {};    // §23: where auto-bind lent a key to a consumable
+    /* Every part of the hotbar is run-scoped (§15) and goes together (§27A).
+       Item binds are the reason this cannot be sloppy: 'item:bandage'
+       validates against the item table, which has no idea a new run started,
+       so a stale pocket layout would otherwise follow you into the next run
+       with auto-bind refusing to redo it. */
+    resetBinds();
     // §11: new game starts solo Chloe; Ash joins once the Room is cleared.
     var m = makeMember('chloe');
     if (m) { state.members.push(m); ensureLoadout(m); ensureProgress(m); }
@@ -282,6 +316,7 @@ CHLOE.engine.party = (function(){
   return {
     state: state,
     newGame: newGame,
+    resetBinds: resetBinds,   // §27A: the hotbar's five maps move as one
     get: get,
     add: add,
     ensureAsh: ensureAsh,

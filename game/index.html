@@ -55,6 +55,13 @@
 <script src="js/engine/displays.js"></script>
 <script src="js/engine/party.js"></script>
 <script src="js/engine/inventory.js"></script>
+<!-- §27D/E. Engines, so they load after every data file (shop prices come from
+     data/items.js, the record patch line from data/version.js) and before the
+     UI and world3d that call them. A new module with no script tag is a whole
+     feature shipped dead — §24 did exactly that — so these three tags are as
+     load-bearing as the code they pull in. -->
+<script src="js/engine/shop.js"></script>
+<script src="js/engine/records.js"></script>
 <script src="js/engine/battle.js"></script>
 <script src="js/engine/arena.js"></script>
 <script src="js/engine/combat3.js"></script>
@@ -72,6 +79,9 @@
 <script src="js/ui/sheet.js"></script>
 <script src="js/ui/room3d.js"></script>
 <script src="js/ui/menu.js"></script>
+<!-- the shop overlay: after ui/ui.js (it assigns onto CHLOE.ui and draws with
+     ui.el) and after engine/shop.js, whose rules it renders. -->
+<script src="js/ui/shop.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>

@@ -23,7 +23,7 @@
 
 ## Key decisions (don't re-litigate)
 - Zero-build vanilla JS, classic scripts, `window.CHLOE.*` namespace, runs from `file://` and any static host.
-- **Roguelike (spec §15): no accounts, no persistence.** One run per page load, permadeath. The cloud-save Worker/KV plan is dead (`worker/` kept only as reference).
+- **Roguelike (spec §15): no accounts, no RUN saves.** One run per page load, permadeath — death still starts you over at level 1 and restores nothing. **Narrowed by §27:** a records board may persist in `localStorage`, because a leaderboard is an artefact ABOUT finished runs, not a save that resumes one — it must never restore run state. §27 also reopens `worker/` (previously called dead) for an optional records endpoint; cloud-saving progress stays dead.
 - Hosting free: GitHub Pages (primary) + Cloudflare Pages (mirror).
 - Art: 111 existing photos in `game/assets/chloe/` (catalog in `tools/catalog/`); new art via `tools/generate-image.ps1` (Pollinations.ai, free, keyless).
 - Machine: Windows 11, gh CLI authenticated; Node LTS installed.
