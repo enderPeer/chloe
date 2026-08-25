@@ -24,7 +24,7 @@
      2  fire_tornado   + key 2     the first spell
      3  asteroid       + key 3     the first ranged spell
      4  ally + water_wave + key 4  Ash joins, and the way out of a corner
-     5  gun_9mm        + a MOUSE BUTTON, not a key
+     5  9mm gate off   the pistol's stamina cost drops 18 -> 10
      6  +1 keybind     key 5, empty and yours
      7  stat           you get harder to kill
      8  stat           the well gets deeper
@@ -73,8 +73,19 @@ CHLOE.data = CHLOE.data || {};
   'use strict';
 
   var rows = {
-    1:  { ability: 'punch', slot: 0, name: 'Fists',
-          desc: 'You always have your hands. Weak, cheap, always ready. Key 1.' },
+    /* §31: the night opens with BOTH hands full — the fist seeded onto the
+       left mouse button, the 9mm claiming the right through its own `bindsTo`
+       preference (data/abilities.js). Two abilities on one row is new and the
+       engine takes an array; row 1 is the only row that does it, because a
+       mouse with one button bound is not a hotbar.
+       ORDER MATTERS: the fist is first because known[0] is what combat3's
+       key-1 default reaches for, and a player whose key 1 held a pistol they
+       cannot aim with the keyboard would have been handed a joke.
+       The gun was §29's row 5. It moved here on the player's instruction; what
+       row 5 was really protecting was its UPTIME, and that is preserved by the
+       18-stamina price it now arrives with. See row 5. */
+    1:  { ability: ['punch', 'gun_9mm'], slot: 0, name: 'Fists, and the 9mm',
+          desc: 'You always have your hands — weak, cheap, always ready, on key 1 and the LEFT MOUSE BUTTON. And a pistol on the RIGHT: it hits where the crosshair is, holds six, and costs 18 stamina a shot — nearly your whole bar for two of them.' },
     2:  { ability: 'fire_tornado', slot: 1, name: 'Fire Tornado',
           desc: 'Trace the sign and drop a pillar of fire on him. Comes with key 2 to carry it, so you hold fists AND fire.' },
     /* §21: the first thing you can throw. Everything before this needed you
@@ -91,8 +102,26 @@ CHLOE.data = CHLOE.data || {};
        this row is affordable at all — see the arithmetic in the header. Say
        so in the desc, because a row that grants a move and no key would
        otherwise read as the bug §21 warns about. */
-    5:  { ability: 'gun_9mm', name: 'The 9mm',
-          desc: 'A pistol, and the first thing you own that kills him from where you are standing. It goes on the RIGHT MOUSE BUTTON, not a number key — your left hand still opens and closes back in the room. Six rounds, then you reload, and you do not get to choose when that lands.' },
+    /* §31: the gun arrived at row 1, so row 5 now sells what row 5 was really
+       protecting — its UPTIME. 18 -> 10 stamina a shot.
+
+       WHY STAMINA IS THE ONLY KNOB THAT WORKS. The magazine is not the
+       constraint (six rounds, but a 40-point bar at 18 funds two) and the
+       reload only bites if you empty a magazine, which stamina stops you
+       doing. Damage is the wrong lever in the other direction: a weak pistol
+       reads as a bad gun rather than an early one.
+
+       AND WHY 18 IS PRICED ON THE CLOCK RATHER THAN AS A BUDGET. Stamina
+       regenerates at 9/s (combat3), so 18 is refunded in 2.0 seconds — against
+       knight telegraphs of 1500ms (slash) to 2100ms (ground slam). Firing once
+       leaves exactly one evade intact (40 - 18 = 22, and an evade costs 22);
+       firing twice empties you, and climbing back to evade cost takes almost
+       exactly one wind-up. The second shot is a bet that his swing outlasts
+       your stamina. At 10 that bet stops existing, which is what this row
+       sells. (§29 authored the weapon and the 10; §31 moved the row and priced
+       the 18.) */
+    5:  { costMod: { gun_9mm: { sta: 10 } }, name: 'Trigger Discipline',
+          desc: 'The 9mm costs 10 stamina a shot instead of 18. Same gun, twice the trigger — and you keep a dodge in the bank while you use it.' },
     6:  { slot: 1, name: 'Wider Grip',
           desc: '+1 ability keybind — key 5, and it arrives EMPTY. Put a bandage on it, or the move you keep forgetting you own.' },
     7:  { stat: { life: 12, stamina: 6 }, name: 'Roadworn',

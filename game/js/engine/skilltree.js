@@ -33,10 +33,20 @@ CHLOE.engine.skilltree = (function () {
     return out;
   }
 
+  /* §31: `ability` may be an id OR an array of them. Row 1 is the only row
+     that grants two — the fist and the 9mm, one per mouse button — because a
+     mouse with one button bound is not a hotbar. Order is preserved, and it
+     matters: known[0] is what combat3's key-1 default reaches for, and that
+     must stay the fist. */
   function abilities(charId) {
     var out = [];
     rowsUpTo(levelOf(charId)).forEach(function (e) {
-      if (e.row.ability && out.indexOf(e.row.ability) === -1) out.push(e.row.ability);
+      var a = e.row.ability;
+      if (!a) return;
+      var list = (typeof a === 'string') ? [a] : a;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] && out.indexOf(list[i]) === -1) out.push(list[i]);
+      }
     });
     return out;
   }
@@ -55,6 +65,27 @@ CHLOE.engine.skilltree = (function () {
       for (var k in s) out[k] = (out[k] || 0) + s[k];
     });
     return out;
+  }
+
+  /* §31: what a row can do to an ability it did not grant.
+     `costMod: { gun_9mm: { sta: 10 } }` REPLACES that ability's cost from that
+     level on; later rows win, so the ladder reads top to bottom the way every
+     other grant here does.
+
+     WHY A ROW AND NOT A SECOND ABILITY: the alternative is two entries in
+     data/abilities.js — a cheap gun and an expensive one — which the player
+     would meet as two icons, two binds and two cooldowns for one weapon. The
+     ladder already says what you have EARNED; what it costs to use is the same
+     kind of statement. §21's rule that every one of levels 1-9 hands you
+     something you can FEEL is satisfied by a discount as honestly as by a move
+     — arguably more so, since you feel it on a weapon you already know. */
+  function costFor(charId, abilityId, base) {
+    var out = null;
+    rowsUpTo(levelOf(charId)).forEach(function (e) {
+      var m = e.row.costMod;
+      if (m && m[abilityId]) out = m[abilityId];
+    });
+    return out || base;
   }
 
   /* Party members earned by a given level (the leader's level drives this). */
@@ -81,6 +112,7 @@ CHLOE.engine.skilltree = (function () {
     slots: slots,
     stats: stats,
     alliesAt: alliesAt,
+    costFor: costFor,
     nextRow: nextRow,
     levelOf: levelOf
   };

@@ -730,3 +730,55 @@ Round 5 total life multiplier: the pre-§28 flat squad was **8.10x**, §28's all
 
 ### Verification hooks
 `arena3d.debug()` publishes `knightLevels` and now `knightSeniority` / `knightJoinRound`; `combat3.snapshot().enemy` carries `levels` and per-entry `seniority`. A test must prove: round N spawns `[N, N-1, … 1]` before any tick; the ladder is not flattened by the per-frame sync; a long fight ends on a ladder rather than a flat squad; the no-WebGL stub returns the same shape; and the HUD range matches the living knights.
+
+## 31. The whole mouse, and a bottle for stamina (extends §23 pockets, §27B mouse binds; supersedes §29's ladder row for the 9mm)
+
+### The wheel is two more slots, not a special case
+`data/config.js mouseSlots` gains `wheelUp` and `wheelDown` (labels `⇑` / `⇓`), and the name now covers the whole mouse rather than its buttons. That one data edit buys storage, validation, the Moves-screen row, the hotbar tile, `entryAt`/`bind` and `press` — because the engine has exactly one question, `isMouseSlot()`, separating "addressed by id" from "indexed as a number key", and a wheel direction is on the id side for the same reasons a button is: no number, not granted by the ladder, owned from level 1. **A slot id may never be an integer** — keys are dense array indices and a new integer id would collide.
+
+What the data edit does NOT buy is an input event. **There was no wheel listener anywhere in this repo**, so the wheel is new input, not a new binding on existing input:
+- The listener lives in `ui/battle3d.js` `wireKeys()`/`unwireKeys()`, added on fight start and removed on fight end — **the lifecycle IS the arena-only enforcement**. It must be registered `{passive: false}` (window-level wheel is passive by default in Chrome, and a passive listener cannot `preventDefault`) and removed with the identical options argument or it leaks into the room and the menus.
+- It follows `mousePress`'s `handled` protocol: an UNBOUND direction falls through without `preventDefault`, which for a wheel means *let the page scroll*. The bind screen and the shop are scrollable containers and must stay that way.
+- **One physical notch emits several `wheel` events** on most trackpads and some mice. The handler accumulates delta and fires once per notch; without that, one flick spends a pocket and then spams the shared consumable cooldown into the fight log.
+- `mouseSlotOf()` must not be reused blind: a `WheelEvent.button` reads `0`, so passing a wheel through the button path would fire `mouseL`.
+
+The room is deliberately untouched — the wheel does nothing there. §16's hands and grab own the room's mouse, and the two paths stay separate (a bound button still closes a hand in the room, which is why the room needs a *one-per-run* "not here" tell rather than silence).
+
+### The run opens with a layout
+`combat3`'s auto-bind refuses to place anything on a mouse slot by design — a button already has a job in the room, so the engine must not quietly take one. That rule is right for a **reward arriving mid-run** and wrong for the layout a run **starts** with, which the game gets to decide once before the player has a habit to override.
+
+`party.newGame` therefore **seeds** rather than auto-binds: once per run, when every bind store is already empty, it places the fist on `mouseL`, the bandage on `wheelUp` and the mana potion on `wheelDown`. **The 9mm is not seeded** — §29 gave abilities a `bindsTo.mouse` preference list and its `autoBindMouse` claims the first FREE button (`mouseR` first for the gun) without ever evicting one, so with the fist already holding `mouseL` the pistol binds itself to the right button the moment row 1 grants it. Two mechanisms for one job would be one too many; the seed owns the opening layout, the preference list owns what a newly granted ability claims.
+
+The seed never re-places anything, so a cleared slot stays cleared (§27A).
+
+**One semantic, stated because it is a choice and not an accident:** §27A's cleared memory is keyed by ABILITY ID, not by slot — clearing the 9mm off RMB means "not this ability on a button", so it will not then claim LMB either. The wheel inherits that reading rather than inventing a by-slot one. It cannot currently diverge: the seed runs only on an empty store, §23 auto-places consumables into POCKET KEYS and never onto a mouse slot, and §29's `bindsTo` consults the same by-ability list. If anything ever does auto-place onto the wheel, it follows the by-ability reading — two memories disagreeing about what a player's "no" meant is worse than either answer. Its entries are feature-detected against the live tables — an entry naming something absent is what `binds()`' self-heal deletes, and a seed that silently produces nothing is worse than one that never ran.
+
+**Consequence, fixed here:** `combat3`'s key-1 default checked only the key array for a duplicate while the mouse binds it should also consult were read twelve lines later, so the seeded fist appeared on both LMB and key 1. Its own comment already promised otherwise ("unless it is already bound elsewhere … used to leave a duplicate on key 1 and waste the key"); nothing could put an ability on a button at run start before now, so the gap was unreachable.
+
+### The 9mm moves to level 1 — and what row 5 becomes
+§29 built the 9mm as a **row-5** unlock. The player asked for it from level 1, on the right mouse button, with the fist on the left. Row 1 grants it; **row 5 now buys the gate off** rather than the gun.
+
+**The gate is stamina, and it is the only knob that works.** Magazine size is not the constraint (6 rounds, but a 40-point pool at 18 a shot funds two), and reload only bites if you empty a magazine, which stamina stops you doing. So: **row 1 costs `sta: 18`, row 5 drops it to `sta: 10`** — §29's authored value, arriving as a gate coming off rather than as a buff.
+
+Why 18, priced against the clock rather than a budget: stamina regenerates at **9/s**, so 18 is refunded in **2.0 seconds** — and knight telegraphs run **1500ms (slash) to 2100ms (ground slam)**. Firing once leaves exactly one evade intact (40 − 18 = 22, an evade costs 22). Firing twice empties you, and climbing back to evade cost takes almost exactly one wind-up. The second shot is a bet that his swing outlasts your stamina. At 10 that bet disappears, which is what row 5 is selling.
+
+**What the pistol actually is at level 1** — measured through `combat3.hitEnemy`, not derived:
+
+| | presses to kill | stamina each | range |
+|---|---|---|---|
+| 9mm (115 power) | 3 shots | 18 | 22m |
+| Punch (45 power, `hits: 3`) | 4 casts | 8 | 2.6m |
+
+So it is **not** a throughput upgrade: one press fewer for more than twice the stamina. What it buys is **where you are standing while the fight happens** — 22m of hitscan instead of inside a 70° arc against 1.5–2.1s wind-ups. Price it on position, never on damage.
+
+**Do not re-derive that damage from §12's chart.** The chart says physical → occult is 2.0 and the Hollow Black Knight is occult, but he carries `resists: { physical: 1.0 }`, and `combat3` passes the whole def object to `multiplier()`, so the real factor is **1.0**. The chart is right; the instance overrides it.
+
+### Smelling salts — the third pool gets a bottle
+Life had the bandage and magic the drink; stamina, which pays for every evade and most swings, had nothing you could hold. `smelling_salts`: **28 stamina, 14 shards**, one in the opening bag. 28 is authored against one number — an evade costs 22 — so it is "one more dodge, right now" with a little change.
+
+Priced **under** the bandage (14 against 15 for 30 life) despite the smaller number, because stamina is the one pool that returns on its own: 28 stamina is about three seconds you would have got for free, so what you are buying is the three seconds you do not have.
+
+It reaches the shop with **no shop edit** — `engine/shop.js` derives its shelf from `price > 0 && !noShop`. Bindability is likewise data: `'sta'` joins `COMBAT_EFFECT_KEYS` in `data/items.js`, which makes it pressable, offered in the Moves screen's pockets group, and auto-placed into a pocket at run start. The engine half is **not** free: `combat3.useItem` read `hp` and `mp` only, so a `{sta:n}` item was bindable, pressable, and then refused as "Already full." at full health — it needs the third pool in the restore maths and in the result it reports.
+
+### Verification hooks
+`ui/battle3d.js` gains `_wheel(direction)` beside `_press`/`_mouse`, or the wheel path is untestable headlessly — everything downstream of the listener runs off rAF, which is frozen in a non-compositing tab. A test must prove: a fresh run seeds exactly three slots — LMB, wheel-up, wheel-down — and leaves RMB for the ladder to claim; the wheel fires a bound pocket in the arena and nothing in the room; an unbound direction lets the page scroll; one notch spends exactly one item; the salts restore stamina in a fight rather than being refused; and the fist is on LMB and **not** duplicated on key 1.
