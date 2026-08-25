@@ -336,6 +336,20 @@ This codebase is unusually prone to it, for reasons that are all deliberate else
 | A table read above its override | The wrong row | `mults()` returns the **last** row that set a value — rows are absolute, not cumulative ([engine/knighttree.js:172](../game/js/engine/knighttree.js:172)) |
 | A frozen `requestAnimationFrame` | The world exactly as it was at `init()` | Trap 6 below — prove the clock moved before believing anything |
 
+### Existence-shaped failures leave a trace; argument-shaped ones do not
+
+The first mechanism in that table is the mildest, because a name that does not exist is a name you
+can grep for and a `typeof` check will catch. The second is the dangerous one.
+
+`levelFor(personality, seconds, round, seniority)` called with seniority in the third slot is a
+**live function, correct name, right module, plausible output** — the seniority lands in `round`,
+every knight computes as a newcomer, and you get a flat squad that looks like a measurement of a
+flat squad. Nothing is missing, so nothing can be reported missing.
+
+**A signature is a fact about the source, not about the API surface.** `Object.keys` on a module's
+exports gives you names and never argument order; neither does an autocomplete list, and neither
+does a page like this one. Read the definition.
+
 ### A worked example, because the general rule is easy to nod at
 
 Probing the §30 seniority ladder by calling `spawnLevel(p, seniorityFor(i, 5))` with a single
@@ -350,6 +364,37 @@ one is where §30's own measured figure came from.
 
 The probe was not wrong about `spawnLevel`. It was wrong about what it had modelled — it asked a
 question the game never asks. Nothing in the answer said so.
+
+### A second example, in which the first explanation was also wrong
+
+Worth following all the way down, because it took three passes to reach the truth and each wrong
+answer was more convincing than the last.
+
+`grep -c $'\r'` was used to census line endings, and reported every file as containing carriage
+returns on **every single line** — `GAME_SPEC.md` 706/706, `ROADMAP.md` 30/30. The numbers looked
+like a clean result and happened to agree with a true claim (`GAME_SPEC.md` really is mixed), so
+nothing prompted a second look.
+
+**First explanation:** the pattern collapsed to the letter `r`, and prose contains an `r` on nearly
+every line. Plausible, consistent with the numbers, and **wrong** — a control file with no letter
+`r` anywhere still returned the full line count.
+
+**Actual mechanism:** `$'\r'` expands to a **zero-length string** in this shell, so the command was
+`grep -c ''`, which matches every line and returns the line total. That is why every file's "CRLF
+count" was exactly its own line count — a tell that was visible in the first result and read as
+confirmation instead.
+
+**And the opposite pattern fails the opposite way.** On a file with two genuine CRLF line endings,
+`grep -cP '\r'` returns `0`, as does `grep -oaP '.\r'` — this `grep` strips CRLF as the line
+terminator, so the carriage return is never in the text the pattern is matched against. Two probes,
+two false answers, in **opposite directions**, on a question `grep` cannot observe at all. Count the
+bytes: pipe the file through `tr -dc` keeping only carriage returns, then only newlines, and compare
+the two counts.
+
+The layer on top is the part worth keeping. **An explanation that fits the observation is not a
+diagnosis.** The letter-`r` theory predicted that a file with no `r` would count zero; one control
+file disproved it in seconds, and nobody ran one until the numbers were needed for something else.
+Make the explanation fail on purpose too, not just the probe.
 
 ### The rule
 
