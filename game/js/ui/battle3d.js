@@ -10,7 +10,10 @@
    catches. Both read the engine defensively — see slotView() and floatStun().
    §24 makes this the place the round's STAGE is resolved and applied, before
    the arena is built — see resolveStage()/applyStage(), and keep them in step
-   with the room board that promised the player that stage. */
+   with the room board that promised the player that stage.
+   §25 fixes the miss: a swing the 3D layer says did NOT connect never reaches
+   combat3 at all (see enemySwing), and the Water Wave throws what its cone
+   catches sideways instead of back — see shovePlan()/applyShove(). */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -455,16 +458,29 @@ CHLOE.ui.battle3d = (function () {
     };
   }
 
-  function knightAnchor(index, ordinal) {
-    var pt = null;
-    if (typeof a3d.knightPoint === 'function') pt = a3d.knightPoint(index);
+  /* Where knight `index` is STANDING, or null if this build cannot say.
+     Two rungs, best first, and both are feature-detected because the 3D layer
+     publishes neither on the no-WebGL stub. Split out of knightAnchor so §25's
+     wave can ask the same question for a completely different reason — it
+     needs the knight's position to decide which way to throw him, not where to
+     hang a label — and so a real per-knight accessor only has to land once. */
+  function knightWorldPos(index) {
+    if (typeof a3d.knightPoint === 'function') {
+      var p = a3d.knightPoint(index);
+      if (p) return p;
+    }
     /* debug() publishes the LEADER's position and only his, so it is exact for
        index 0 — which is the whole fight for the first rounds, and the rounds
        where you first meet the rock. */
-    if (!pt && index === 0 && a3d.debug) {
+    if (index === 0 && a3d.debug) {
       var dbg = a3d.debug();
-      if (dbg && dbg.knightPos) pt = { x: dbg.knightPos[0], z: dbg.knightPos[1] };
+      if (dbg && dbg.knightPos) return { x: dbg.knightPos[0], z: dbg.knightPos[1] };
     }
+    return null;
+  }
+
+  function knightAnchor(index, ordinal) {
+    var pt = knightWorldPos(index);
     if (!pt && typeof a3d.asteroidPoint === 'function') {
       var c = a3d.asteroidPoint();
       if (c) {
@@ -567,11 +583,127 @@ CHLOE.ui.battle3d = (function () {
     splash('EVADE', 'evade');
   }
 
+  /* ------------------------------------------------ §25 Water Wave: the lane
+     The wave's damage is a courtesy — power 40, the lowest in the kit, less
+     than one punch. What the key actually buys is the DISPLACEMENT, and the
+     displacement is LATERAL: every knight the cone catches is thrown
+     perpendicular to your facing, toward whichever side he is already nearest,
+     so the line PARTS and you can walk down the middle. Shoving them straight
+     back would only re-form the same wall three metres further on and leave
+     you exactly as cornered, which is the situation you cast it in.
+
+     Both halves are feature-detected, independently:
+       - `ab.shove` in the ability data — no block, no displacement, and every
+         other arc ability keeps falling through this branch untouched.
+       - `arena3d.shove` — the engine surface that owns containment. Without it
+         the wave still casts, still damages, still reads on screen; it simply
+         moves nobody. It cannot be allowed to throw: this ability ships on the
+         level-4 ladder row, and the 3D layer may be the no-WebGL stub.
+     Deliberately NOT ours: breaking his wind-up (`shove.breaksWindup`) and
+     clamping the throw to the navgrid or the Ring's kerb. Those belong to
+     arena3d.shove, which owns clearAttack and the §22/§24 containment rules —
+     its signature takes no flags because it reads them off the same data. And
+     there is no stun here: that is the asteroid's (§23). He loses his footing,
+     then he comes back. */
+
+  /* The camera's RIGHT in world XZ, with the player's position along for the
+     ride so a caller needs one debug() read rather than two. arena3d builds
+     forward as (-sin yaw, -cos yaw) and strafe-right as (cos yaw, -sin yaw)
+     — see its doEvade — so this is that same right-hand side rather than a
+     fresh convention that would silently mirror the wave the first time either
+     file moved. Unit length by construction. null = this build publishes no
+     yaw, and without a facing there is no perpendicular to throw along. */
+  function cameraRight() {
+    var d = a3d.debug ? a3d.debug() : null;
+    if (!d || typeof d.yaw !== 'number') return null;
+    return { x: Math.cos(d.yaw), z: -Math.sin(d.yaw),
+             px: d.x || 0, pz: d.z || 0 };
+  }
+
+  /* Inside this band, "which side is he on" is noise: a knight walking a
+     beeline at you stands ON the centre line, and taking the sign of a number
+     that small would throw him left one cast and right the next. So within
+     15cm the side comes from his squad INDEX instead — fixed for the whole
+     fight, never jittering, and it splits a stack of centred knights to both
+     sides rather than firing them all the same way, which is the parting the
+     ability is named for. */
+  var WAVE_CENTRE_EPS = 0.15;
+
+  /* Which way each caught knight goes. Built BEFORE anything is applied, so
+     every side is decided against the same pre-wave snapshot of the floor.
+
+     Two sources, and the ENGINE's answer wins when it has one — the same rule
+     the stun follows with `res.stunned`. arena3d.waveTargets sees the yaw and
+     every knight's position first-hand; this screen only sees what the 3D
+     layer chooses to publish, and without a per-knight accessor that is the
+     leader alone. Identical rule either way (perpendicular to your facing,
+     toward the side he is already nearest, index as the tie-break), so the two
+     agree — the fallback exists so the wave still parts a line on a build
+     whose arena predates §25, not to second-guess one that does not. */
+  function shovePlan(ab, targets) {
+    var plan = [], i;
+    if (typeof a3d.waveTargets === 'function') {
+      var list = a3d.waveTargets(ab) || [];
+      for (i = 0; i < list.length; i++) {
+        var t = list[i];
+        plan.push({ index: t.index, sign: t.side < 0 ? -1 : 1,
+                    dx: t.dirX, dz: t.dirZ,
+                    distance: t.distance, ms: t.ms });
+      }
+      return plan;
+    }
+    var right = cameraRight();
+    if (!right || !targets) return plan;
+    for (i = 0; i < targets.length; i++) {
+      var ti = targets[i];
+      var pt = knightWorldPos(ti);
+      /* Signed distance from your centre line: positive is your right. */
+      var side = pt ? (pt.x - right.px) * right.x + (pt.z - right.pz) * right.z : 0;
+      /* A knight this build cannot locate lands in the same branch as one
+         standing dead centre, on purpose: one deterministic rule, no random,
+         and a squad still comes apart instead of drifting one way. */
+      var sign = (Math.abs(side) > WAVE_CENTRE_EPS) ? (side > 0 ? 1 : -1)
+                                                    : ((ti % 2) ? -1 : 1);
+      plan.push({ index: ti, sign: sign, dx: right.x * sign, dz: right.z * sign });
+    }
+    return plan;
+  }
+
+  /* Throw them. Runs AFTER the damage so a knight the wave killed is never
+     shoved — the same rule §23 keeps for the stun: he is going down and the
+     death animation owns that body. `shove` is read defensively the way
+     `stun` is: only an explicit `false` counts as a refusal, so an engine that
+     returns nothing is still taken at its word that it moved him — but here a
+     `false` is also a real and expected answer, because a knight already flat
+     against the stone on the side the wave throws him has not been thrown. */
+  function applyShove(ab, plan) {
+    var out = { moved: 0, left: 0, right: 0 };
+    var sh = ab && ab.shove;
+    if (!sh || !plan.length || typeof a3d.shove !== 'function') return out;
+    var snap = C3.snapshot();
+    var each = (snap && snap.enemy && snap.enemy.each) || null;
+    for (var i = 0; i < plan.length; i++) {
+      var p = plan[i];
+      var e = each ? each[p.index] : null;
+      if (e && e.alive === false) continue;
+      // the metres and the flight time are the ability's; a plan built by the
+      // engine already carries them, and both spell the same data.
+      var dist = p.distance != null ? p.distance : (sh.distance || 3.2);
+      var ms = p.ms != null ? p.ms : (sh.ms || 300);
+      if (a3d.shove(p.index, p.dx, p.dz, dist, ms) === false) continue;
+      out.moved++;
+      if (p.sign > 0) out.right++; else out.left++;
+    }
+    return out;
+  }
+
   /* ---------- enemy AI loop ---------- */
-  /* Resolve one hit window. Two shapes:
+  /* Resolve one hit window. Three shapes:
        - arc abilities hit whoever is inside your reach/facing cone
        - §21 SPLASH abilities (the asteroid) hit whoever is standing in the
          crater, regardless of where you happen to be looking by then
+       - §25 SHOVE abilities (the wave) hit the same cone as an arc ability
+         and then throw what they caught out of the way
      The asteroid also DELAYS its damage until the rock actually lands, so the
      number and the impact are the same moment rather than the number arriving
      while the rock is still in the air. */
@@ -589,6 +721,36 @@ CHLOE.ui.battle3d = (function () {
       return;
     }
     var targets = (ab && a3d.abilityTargets) ? a3d.abilityTargets(ab) : [];
+    /* §25: the wave. Its DAMAGE goes through the ordinary arc path — the same
+       abilityTargets cone every other reach/arc ability is priced by, so it
+       gains nothing by being special. data/abilities.js states that cone twice
+       on purpose: `range`/`arc` for this test, `cone.reach`/`cone.halfAngle`
+       for the water and the throw, the same shape by construction.
+       Order matters. The plan (which way each of them goes) is built from the
+       pre-wave floor, the damage lands next, and only then are the survivors
+       thrown — so nobody's position is read after he has started moving and
+       nobody is thrown after he has been killed. */
+    if (ab && ab.shove) {
+      a3d.showSign(false);          // cast:'sign' — the hands drop as it goes out
+      /* Green, not the gold the tornado and the rock get: this splash is
+         announcing an ESCAPE, and a gold number-flash would promise damage the
+         wave deliberately does not do. */
+      splash('WATER WAVE', 'evade');
+      // the sheet of water itself, if this arena can draw one. It takes the
+      // whole ability: the cone it fills and how long it takes to cross are
+      // the same numbers the shove is paid out on.
+      if (typeof a3d.spawnWave === 'function') a3d.spawnWave(ab);
+      var plan = shovePlan(ab, targets);
+      applyHits(e.abilityId, targets, null);
+      var thrown = applyShove(ab, plan);
+      if (thrown.moved) {
+        log('The water throws ' + thrown.moved +
+            (thrown.moved === 1 ? ' knight' : ' knights') + ' aside' +
+            (thrown.left && thrown.right ? ' — ' + thrown.left + ' left, ' +
+             thrown.right + ' right' : '') + '. The lane is open.');
+      }
+      return;
+    }
     applyHits(e.abilityId, targets, null);
   }
 
@@ -748,9 +910,23 @@ CHLOE.ui.battle3d = (function () {
       dropPrompt(warn);                 // this window is spent, hit or miss
       if (!active || C3.isOver()) return;
       landed++;
-      var out = C3.takeHit(res.hit ? windowPattern(pattern, res) : null);
-      if (!res.hit || (out && out.evaded)) {
-        splash(out && out.evaded ? 'DODGED!' : 'EVADED!', 'evade');
+      /* §25: on a geometric MISS the engine is not asked at all. It used to be
+         called with `null` "so the miss went through one path", and that null
+         fell through combat3's guards into the damage maths — the bar dropped
+         while this very line said the blade found nothing. The rule is now
+         flat: damage is only ever requested on a TRUE hit test, and the dodge
+         feedback is rendered from `res.hit` alone. combat3 keeps its own null
+         guard as the backstop; neither end relies on the other.
+
+         Two different things happen here and they are named apart on purpose:
+           DODGED! — his blade never reached you. You were out of reach or out
+                     of the arc when the window opened; footwork won it, and
+                     it cost nothing but the ground you gave up.
+           EVADED! — it WOULD have landed and the i-frames from SPACE ate it.
+                     You paid stamina for that one, and the timing was yours. */
+      var out = res.hit ? C3.takeHit(windowPattern(pattern, res)) : null;
+      if (!res.hit || (out && (out.evaded || out.missed))) {
+        splash(res.hit ? 'EVADED!' : 'DODGED!', 'evade');
         log('The blade splits empty air.');
       } else if (out) {
         splash('-' + out.dmg, 'hurt');
@@ -1120,6 +1296,21 @@ CHLOE.ui.battle3d = (function () {
           out: !!(d && d.classList.contains('out'))
         };
       });
+    },
+    /* §25: the wave's two halves, exported for the same reason _hits is — the
+       only route to them is resolveStrike, which runs off rAF and paints. Both
+       wire the layer refs the way begin() does, so a test can stand a squad up
+       in a stub arena with no canvas at all and read back which side each
+       caught knight was thrown toward (_wavePlan) and who actually moved
+       (_waveShove, which is also where "a knight the wave killed is never
+       thrown" and "no arena3d.shove means no displacement" are provable). */
+    _wavePlan: function (ab, targets) {
+      C3 = C3 || CHLOE.engine.combat3; a3d = a3d || CHLOE.engine.arena3d;
+      return shovePlan(ab, targets);
+    },
+    _waveShove: function (ab, plan) {
+      C3 = C3 || CHLOE.engine.combat3; a3d = a3d || CHLOE.engine.arena3d;
+      return applyShove(ab, plan);
     },
     /* How many "STUNNED" labels are on screen right now — distinct element and
        distinct class from anything §22 puts up. */

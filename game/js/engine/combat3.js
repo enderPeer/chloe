@@ -11,7 +11,7 @@
      evade()                   -> {ok, reason?, dirLocked?}
      spendSprint(dt)           -> bool       (false = out of stamina)
      hitEnemy(ability, mult)   -> {dmg, killed}   called by the 3D hit test
-     takeHit(pattern)          -> {dmg, dead, evaded}
+     takeHit(pattern)          -> {dmg, dead, evaded|missed}   null = a miss, costs nothing (§25)
      snapshot()                -> everything the HUD needs
 
    Events are plain objects the UI animates:
@@ -594,9 +594,44 @@ CHLOE.engine.combat3 = (function () {
              stunned: !!(stunMs && !killed), stunMs: killed ? 0 : stunMs };
   }
 
-  /* The knight's swing landed (or was evaded). */
+  /* §25: a pattern that reaches the damage maths with no `power` was priced at
+     100 by a `|| 100` fallback, which made a data bug look like a design
+     choice — an unauthored swing hit exactly as hard as a full-power one and
+     nothing anywhere said so. Report it instead, and only ONCE per pattern:
+     this runs inside the swing loop, so a warn per hit would bury the console
+     under the same line. Still returns 100 afterwards, because a bad row in
+     data/arena3d.js must not be able to stop a fight mid-round. */
+  var warnedPower = {};
+  function patternPower(pattern) {
+    var pw = pattern.power;
+    if (typeof pw === 'number' && pw > 0) return pw;
+    var id = pattern.id || pattern.name || '(unnamed pattern)';
+    if (!warnedPower[id]) {
+      warnedPower[id] = true;
+      if (window.console && console.warn) {
+        console.warn('CHLOE combat3: knight pattern "' + id + '" reached takeHit() ' +
+                     'with no `power` — pricing this swing at 100. Fix the row in data/arena3d.js.');
+      }
+    }
+    return 100;
+  }
+
+  /* The knight's swing landed, missed, or was evaded. */
   function takeHit(pattern) {
     if (isOver()) return null;
+    /* §25 THE BUG: no pattern means no hit, and a miss must cost NOTHING.
+       ui/battle3d.js used to hand us `null` on a geometric miss; with only the
+       isOver/invulnerable guards we fell straight through to the damage maths,
+       priced the swing at the old `|| 100` fallback, and `Math.max(1, ...)`
+       guaranteed at least a point off the bar — while the HUD, branching on
+       its own miss flag, printed that the blade split empty air. The feedback
+       and the health bar disagreed and every clean dodge quietly cost life.
+
+       This guard sits BEFORE any maths, any HP write and any leader-swap
+       check, so a miss has no side effects at all. The caller no longer calls
+       us on a miss (defence in depth, §25) — this is the backstop for the next
+       caller, which is the one that would otherwise re-arm the trap. */
+    if (!pattern) return { dmg: 0, missed: true, dead: false };
     if (invulnerable()) return { dmg: 0, evaded: true, dead: false };
     var p = party();
     var m = p.get(st.charId);
@@ -608,7 +643,7 @@ CHLOE.engine.combat3 = (function () {
     var chart = types().multiplier(atkType, { type: cdef.type || cdef.element, resists: cdef.resists || null });
     var rand = 0.9 + Math.random() * 0.2;
     var dmg = Math.max(1, Math.round(
-      (es.atk || 8) * (((pattern && pattern.power) || 100) / 100) * chart * rand - eff.def * 0.5));
+      (es.atk || 8) * (patternPower(pattern) / 100) * chart * rand - eff.def * 0.5));
     // tree resist nodes are PERCENT cuts, applied after the chart (like §16)
     var tr = CHLOE.engine.tree;
     if (tr && typeof tr.passives === 'function') {

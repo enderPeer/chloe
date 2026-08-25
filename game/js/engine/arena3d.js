@@ -11,6 +11,9 @@
      init(canvas), start(), stop(), resize(), reset(),
      setStage(id), stageInfo(),                   // §24, call setStage BEFORE init
      telegraph(pattern, onResult), flinch(dmg, killed), setKnightAlive(bool),
+     stun(i, seconds),                            // §23 the asteroid's stun
+     shove(i, dirX, dirZ, distance, ms),          // §25 the Water Wave's throw
+     waveTargets(ability), spawnWave(ability),    // §25 who it catches, and it
      debug(), _teleport(x, z), _setCrouch(bool)   // test hooks (§13 spirit)
    }
    Also publishes CHLOE.engine.stages (§24 stage selection) — see the block
@@ -90,6 +93,14 @@ CHLOE.engine = CHLOE.engine || {};
        unguarded call here is a fight that throws instead of degrading. */
     A.stun = function () { return false; };
     A.isStunned = function () { return false; };
+    /* §25 Water Wave. Same reasoning as the stun above: combat3/battle3d call
+       shove() from the hit path the moment the wave lands, so it has to answer
+       on a machine with no WebGL — false, because a knight nobody is rendering
+       was certainly not thrown anywhere. */
+    A.shove = function () { return false; };
+    A.isShoved = function () { return false; };
+    A.waveTargets = function () { return []; };
+    A.spawnWave = function () { return false; };
     A.taunt = noop;
     /* §24. setStage still RECORDS the choice on a dead API: the board and the
        round counter read CHLOE.engine.stages.current(), and a machine with no
@@ -2095,6 +2106,10 @@ CHLOE.engine = CHLOE.engine || {};
        Before buildStage, and stage-INDEPENDENT: the pool survives every switch
        so the warm-up is paid once, not once per round. */
     makeShock();
+    /* §25: and the wave, for the same reason and one more — it is the ability
+       you cast while a sword is already coming down, so the frame it first
+       appears on is the worst frame in the fight to compile a material. */
+    makeWave();
     /* §24: fog, lights, the church-or-Ring geometry and the env probe are all
        one stage build now, so the switch path and the first build are the same
        code. Anything that goes only through init() is a thing that will be
@@ -2502,6 +2517,55 @@ CHLOE.engine = CHLOE.engine || {};
     }
   }
 
+  /* The knight's half of the same rule, and — §25 — the ONLY place his
+     containment is decided. It was written inline in updateOneKnight until the
+     Water Wave arrived: a shove is a second thing that moves him without
+     asking the arena, and a containment rule that exists in two copies is a
+     stage that is contained on one path and not the other (exactly the bug
+     §24 found on the player side). One function, called once per frame, LAST.
+     Same branch order as containPlayer for the same reason: baked stone where
+     it exists, then the fallback rectangle, then the radius — which is the
+     clause the Ring runs on, since its stage entry leaves nav and bounds null.
+     `prevX/prevZ` must be the cell he legally occupied at the top of the frame;
+     the nav branch reverts to it one axis at a time so he slides along stone
+     instead of sticking, and walks him out with navNearest when even that cell
+     was illegal. The 0.5/0.4 insets are his body, kept exactly as they were. */
+  function containKnight(x, z, prevX, prevZ) {
+    var ar = cfg.arena || {};
+    if (nav) {
+      /* §20: the knight obeys the same baked stone the player does, so it
+         cannot walk through the rood screen to reach you — but with his own,
+         wider footprint (§22), so he does not thread gaps he plainly fills. */
+      if (!navFree(x, prevZ, KNIGHT_RADIUS)) x = prevX;
+      if (!navFree(x, z, KNIGHT_RADIUS)) z = prevZ;
+      if (!navFree(x, z, KNIGHT_RADIUS)) {
+        /* §22: the old triple-revert put him back on (prevX,prevZ)
+           unconditionally. When that cell was itself illegal — squad
+           separation shoved him into a pillar, the minDist push backed him
+           into the altar — he reverted to it forever and stood in the wall for
+           the rest of the fight. Revert only to a LEGAL previous cell;
+           otherwise walk him out. */
+        if (navFree(prevX, prevZ, KNIGHT_RADIUS)) { x = prevX; z = prevZ; }
+        else {
+          var kOut = navNearest(x, z, KNIGHT_RADIUS);
+          x = kOut.x; z = kOut.z;
+        }
+      }
+    } else if (ar.bounds) {
+      x = Math.max(ar.bounds.minX + 0.5, Math.min(ar.bounds.maxX - 0.5, x));
+      z = Math.max(ar.bounds.minZ + 0.5, Math.min(ar.bounds.maxZ - 0.5, z));
+    } else {
+      var cxx = x - (ar.cx || 0), czz = z - (ar.cz || 0);
+      var rad = Math.sqrt(cxx * cxx + czz * czz);
+      var maxR = (ar.radius || 6) - 0.4;
+      if (rad > maxR && rad > 0) {
+        x = (ar.cx || 0) + cxx / rad * maxR;
+        z = (ar.cz || 0) + czz / rad * maxR;
+      }
+    }
+    return { x: x, z: z };
+  }
+
   function updatePlayer(dt) {
     var f = ((keys.KeyW || keys.ArrowUp) ? 1 : 0) - ((keys.KeyS || keys.ArrowDown) ? 1 : 0);
     var s = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
@@ -2796,6 +2860,11 @@ CHLOE.engine = CHLOE.engine || {};
       b.state = 'death';
       b.staggerT = 0;
       b.stunT = 0;              // §23: dying outranks being stunned
+      /* §25: and outranks being thrown. updateOneKnight hands a dead knight
+         to updateDeath before the timers run, so a shove left armed here
+         would never tick down — isShoved() would keep answering true over a
+         corpse and debug() would show a flight that never lands. */
+      b.shoveT = 0; b.shoveLeft = 0;
       k.staggerMeter = 0;
       clearAttack(k);
       k.anim.state = 'death';
@@ -2883,6 +2952,92 @@ CHLOE.engine = CHLOE.engine || {};
   A.isStunned = function (index) {
     var k = knights[index == null ? 0 : index];
     return !!(k && k.brain && (k.brain.stunT || 0) > 0);
+  };
+
+  /* §25 the Water Wave's displacement: throw ONE knight `distance` metres
+     along (dirX, dirZ), paid out over `ms`, and answer whether he actually
+     went anywhere. The caller decides the direction — the wave parts a line by
+     throwing each knight toward the side he is already nearest, and only the
+     caster's facing knows which side that is — so this end takes a vector and
+     asks no questions about why.
+
+     WHAT IT IS NOT, and this is the whole difference from A.stun above: it
+     does not touch staggerT, stunT or the staggerMeter. §23's rock is the
+     control tool; the wave is a mobility tool that happens to move him. He
+     loses his footing, his wind-up dies with it, and he comes back — if being
+     thrown also stunned, the cheapest ability in the kit would be the best
+     lockdown in it and the asteroid would have no job.
+
+     NEVER A TELEPORT. The metres are owed, not applied: the frame loop spends
+     them at distance/ms and every one of them goes through containKnight with
+     his own gait, so stone stops him, the rood screen stops him and the Ring's
+     rim stops him — clamped and stopped SHORT, still inside the world. That is
+     also why this function cannot promise the full distance and only reports
+     whether he moved at all; debug().knightBrain[i].shoveMoved is where the
+     metres he really covered are published.
+
+     A fresh wave REPLACES an in-flight one rather than adding to it: two
+     overlapping shoves that summed would throw him twice as far as either
+     ability declares, and distance is the number data is balanced on. */
+  A.shove = function (index, dirX, dirZ, distance, ms) {
+    var k = knights[index == null ? 0 : index];
+    /* Dead or absent is a normal call, not a bug: the wave resolves against a
+       cone that was picked a frame earlier and a knight can die inside it. */
+    if (!k || !k.alive || !k.group) return false;
+    var len = Math.sqrt((+dirX || 0) * (+dirX || 0) + (+dirZ || 0) * (+dirZ || 0));
+    if (!isFinite(len) || len < 1e-6) return false;      // no direction, no throw
+    var dist = +distance || 0;
+    if (!(dist > 0)) return false;
+    /* A missing or zero duration is the one input that would turn this into
+       the teleport it must never be, so it is clamped to a real flight time
+       rather than honoured. */
+    var dur = ((+ms > 0) ? +ms : 300) / 1000;
+    var ux = (+dirX || 0) / len, uz = (+dirZ || 0) / len;
+
+    /* Would he move AT ALL? Ask the arena, with the same function the frame
+       uses, for the first frame's worth of travel — a knight already flat
+       against a pillar on the side the wave throws him has not been thrown,
+       and the caller (which floats the hit numbers) needs to know that without
+       waiting 300ms to find out. Probed at 60Hz because that is the step the
+       payout will really take; a full-distance probe would report "blocked"
+       for a knight who in fact slides most of the way along the wall. */
+    var probe = Math.min(dist, (dist / dur) / 60);
+    var to = containKnight(k.group.position.x + ux * probe,
+                           k.group.position.z + uz * probe,
+                           k.group.position.x, k.group.position.z);
+    var gx = to.x - k.group.position.x, gz = to.z - k.group.position.z;
+    if ((gx * gx + gz * gz) < 1e-8) return false;
+
+    var b = brainOf(k);
+    b.shoveX = ux; b.shoveZ = uz;
+    b.shoveDist = dist;
+    b.shoveLeft = dist;
+    b.shoveDur = dur;
+    b.shoveT = dur;
+    b.shoveMoved = 0;
+    /* He drops the swing he was winding (§25 breaksWindup), exactly as the
+       stun does and by the same route, so a feint held at the apex dies with
+       every strike timer it had armed. */
+    clearAttack(k);
+    /* A COMMITTED lunge has to be taken off him by hand: coil and dash are the
+       two states the cascade refuses to interrupt, so a knight thrown mid-coil
+       would otherwise stand planted through the whole flight and then launch
+       from wherever the water left him — a dash aimed at where you WERE, from
+       a place he never chose. Put the lunge back on cooldown and let him
+       re-decide: being thrown out of a charge should cost him the charge. */
+    if (b.state === 'coil' || b.state === 'dash') {
+      k.anim.dash = 0;
+      k.anim.dashCd = Math.max(k.anim.dashCd, b.tune.dashCooldownMs / 1000);
+      restate(k, b, 'stalk');
+    }
+    return true;
+  };
+
+  /* Is he in the air right now? Same shape as isStaggered/isStunned, and the
+     HUD's answer to "why is he not swinging". */
+  A.isShoved = function (index) {
+    var k = knights[index == null ? 0 : index];
+    return !!(k && k.brain && k.brain.shoveT > 0);
   };
 
   /* §22: roll a taunt. Called on a kill from ui/battle3d.js, and internally
@@ -3325,10 +3480,22 @@ CHLOE.engine = CHLOE.engine || {};
       /* Neighbours arc opposite ways, so a line of them folds around you
          instead of converging on one point. */
       arcSign: (i % 2) ? 1 : -1, arcT: 0,
-      strafeSign: (Math.random() < 0.5) ? 1 : -1,
+      /* strafeFlips: how many times stone has reversed THIS circle. The
+         reversal buys a fresh hold, and without a budget a knight wedged
+         between two walls buys one every other frame and never re-decides. */
+      strafeSign: (Math.random() < 0.5) ? 1 : -1, strafeFlips: 0,
       /* stunT: the §23 slice of staggerT that came from an ability rather than
          from damage. Never longer than staggerT — it only labels it. */
       atkCd: 0, repCd: 0, staggerT: 0, stunT: 0, hitFlash: 0, deathT: 0,
+      /* §25 Water Wave. shoveT is the flight clock, shoveLeft the metres still
+         owed on it and shoveMoved the metres he ACTUALLY covered once the
+         arena had its say — the three of them are what debug() publishes, so
+         "the wave threw him 3.2m" and "the wall ate 1.1m of it" are both
+         measurable instead of eyeballed. Reset here with the rest of the
+         brain, which is what makes A.reset() end a shove that was still in
+         flight when the round did. */
+      shoveT: 0, shoveDur: 0, shoveDist: 0, shoveLeft: 0,
+      shoveX: 0, shoveZ: 0, shoveMoved: 0,
       repFrom: 0, repStuck: false, comboDone: false, wantsAttack: false
     };
     k.staggerMeter = 0;
@@ -3365,7 +3532,8 @@ CHLOE.engine = CHLOE.engine || {};
     return Math.sqrt(dx * dx + dz * dz);
   }
   function onEnterState(k, b, s) {
-    if (s === 'strafe') b.strafeSign = (Math.random() < 0.5) ? 1 : -1;
+    // a fresh circle picks a fresh direction, and a fresh budget of reversals
+    if (s === 'strafe') { b.strafeSign = (Math.random() < 0.5) ? 1 : -1; b.strafeFlips = 0; }
     else if (s === 'reposition') b.repFrom = distToPlayer(k);
     else if (s === 'dash') {
       /* The lunge is COMMITTED: the heading is taken once, at launch, and he
@@ -3573,6 +3741,17 @@ CHLOE.engine = CHLOE.engine || {};
        being something you EARN with a heavy hit and becomes a metronome. */
     if (k.staggerMeter > 0) k.staggerMeter = Math.max(0, k.staggerMeter - t.staggerDecay * dt);
     if (b.arcT >= t.arcHoldMs / 1000) { b.arcSign = -b.arcSign; b.arcT = 0; }
+    /* §25 shove clock. Counted with the other timers so it bleeds on exactly
+       the same dt the payout below is priced against — the two drifting apart
+       is how a knight ends up owing metres he never gets, or sliding forever.
+       The metres owed run out with the clock: shoveLeft can only be spent by
+       the payout, and the clock hitting zero ends the shove whatever is left,
+       so a knight pinned against stone stops the moment the water does rather
+       than leaning on it for the rest of the round. */
+    if (b.shoveT > 0) {
+      b.shoveT = Math.max(0, b.shoveT - dt);
+      if (b.shoveT <= 0) { b.shoveLeft = 0; b.shoveDur = 0; }
+    }
 
     /* Safety net: `swinging` is cleared by clearAttack, which rides on the
        strike timer's setTimeout. A callback path that dies — or a headless
@@ -3657,16 +3836,73 @@ CHLOE.engine = CHLOE.engine || {};
       st.state = 'idle';                // attack / recover: the swing owns him
     }
 
+    /* §25: while the water has him, his own feet are not his. Zeroing the
+       state's movement vector (rather than inventing a `shove` STATE) is
+       deliberate: §22's six states are what the HUD, the pose library and
+       _simKnight all read, and a seventh one would have to be taught to every
+       one of them. He keeps deciding — the clocks run, the choice he lands on
+       is the one he resumes with — he simply does not get to walk while he is
+       being thrown, which is also why he cannot slide on afterwards: there is
+       no velocity to carry, only metres owed that expire with the clock.
+       `backpedal` is the pose because it is the one in the library that reads
+       as losing ground with the guard still up. NOT `stagger` — that is the
+       §23 stun's pose, and the wave explicitly does not stun. */
+    if (b.shoveT > 0) {
+      mvx = 0; mvz = 0;
+      st.state = 'backpedal';
+      /* Nothing schedules a swing at a knight who is airborne: wantsAttack is
+         what ui/battle3d.js reads to pick who telegraphs next. He is not
+         stunned, so the swing is merely postponed by the flight time. */
+      b.wantsAttack = false;
+    }
+
     var nx = kx + mvx * dt, nz = kz + mvz * dt;
     /* Circling into stone REVERSES the orbit. Without this the axis slide
        below walks him sideways into the pillar and holds him there for the
        whole strafeHoldMs, which looks exactly like a stuck AI. */
     if (b.state === 'strafe' && nav && !navFree(nx, nz, KNIGHT_RADIUS)) {
       b.strafeSign = -b.strafeSign;
-      b.t = 0;
+      /* The new lap gets a fresh hold — but only while there IS a new lap.
+         With stone on both sides he flips and re-zeroes this clock every other
+         frame, so `b.t` can never reach `b.hold`, the cascade below never
+         releases him, and he is locked in `strafe` for the rest of the fight:
+         orbiting a wall he cannot leave, never re-deciding, never attacking.
+         Measured after a §25 shove carried a knight behind the altar block —
+         strafeSign flipping every 2 frames with b.t pinned at 0.00/0.02 for
+         40 seconds and pathLength climbing 85m without him moving 5cm.
+         Two free reversals is more than a real corner needs and still lets the
+         clock expire, which is the only thing that hands him back to
+         chooseState. The budget is refilled by onEnterState, so every honest
+         re-decision starts him over. */
+      if ((b.strafeFlips = (b.strafeFlips || 0) + 1) <= 2) b.t = 0;
       nx = kx - mvx * dt; nz = kz - mvz * dt;
     }
     kx = nx; kz = nz;
+
+    /* §25 shove payout. Metres owed, spent at a constant rate over the time
+       the ability asked for, ONE FRAME AT A TIME — a knight who arrives 3.2m
+       away in a single step has not been thrown, he has blinked, and blinking
+       reads as a bug in a game whose whole fight is about reading movement.
+       Deliberately placed here, in the same lane as his own gait: everything
+       after this line (squad separation, the player push, containKnight) then
+       treats a shoved metre exactly like a walked one, so the wave cannot
+       shortcut a rule his own feet obey. */
+    if (b.shoveT > 0 && b.shoveLeft > 0) {
+      var rate = b.shoveDur > 0 ? (b.shoveDist / b.shoveDur) : b.shoveLeft;
+      /* Capped at his own body radius per frame, and that cap is containment,
+         not smoothing: navFree only samples where a step LANDS, so a step
+         longer than the body it is testing can hop clean over a wall the
+         0.4m grid is made of and put him in the choir. At the authored numbers
+         (3.2m over 300ms) a frame is 0.18m and this never fires; it is here
+         for the two cases that do reach it — a hitching frame (the loop caps
+         dt at 0.05s) and a caller who asks for a far bigger throw than data
+         does. When it fires he simply travels less far, which is the safe way
+         to be wrong. */
+      var sstep = Math.min(b.shoveLeft, rate * dt, KNIGHT_RADIUS);
+      kx += b.shoveX * sstep;
+      kz += b.shoveZ * sstep;
+      b.shoveLeft -= sstep;
+    }
     /* Is he TRAVELLING, or just adjusting? Anything slower than his slowest
        deliberate gait (the backpedal) is a shuffle, and a shuffle is exactly
        when a big yaw change has to come from the feet. Testing "moving at all"
@@ -3703,34 +3939,6 @@ CHLOE.engine = CHLOE.engine || {};
       kx = pos.x - (ndx / nd) * minD;
       kz = pos.z - (ndz / nd) * minD;
     }
-    if (nav) {
-      /* §20: the knight obeys the same baked stone the player does, so it
-         cannot walk through the rood screen to reach you — but with his own,
-         wider footprint (§22), so he does not thread gaps he plainly fills. */
-      var okx = k.group.position.x, okz = k.group.position.z;
-      if (!navFree(kx, okz, KNIGHT_RADIUS)) kx = okx;
-      if (!navFree(kx, kz, KNIGHT_RADIUS)) kz = okz;
-      if (!navFree(kx, kz, KNIGHT_RADIUS)) {
-        /* §22: the old triple-revert put him back on (okx,okz) unconditionally.
-           When that cell was itself illegal — squad separation shoved him into
-           a pillar, the minDist push backed him into the altar — he reverted to
-           it forever and stood in the wall for the rest of the fight. Revert
-           only to a LEGAL previous cell; otherwise walk him out. */
-        if (navFree(okx, okz, KNIGHT_RADIUS)) { kx = okx; kz = okz; }
-        else {
-          var kOut = navNearest(kx, kz, KNIGHT_RADIUS);
-          kx = kOut.x; kz = kOut.z;
-        }
-      }
-    } else if (ar.bounds) {
-      kx = Math.max(ar.bounds.minX + 0.5, Math.min(ar.bounds.maxX - 0.5, kx));
-      kz = Math.max(ar.bounds.minZ + 0.5, Math.min(ar.bounds.maxZ - 0.5, kz));
-    } else {
-      var cxx = kx - (ar.cx || 0), czz = kz - (ar.cz || 0);
-      var rad = Math.sqrt(cxx * cxx + czz * czz);
-      var maxR = (ar.radius || 6) - 0.4;
-      if (rad > maxR) { kx = (ar.cx || 0) + cxx / rad * maxR; kz = (ar.cz || 0) + czz / rad * maxR; }
-    }
 
     /* §21: the charge used to start moving only AFTER the strike timer had
        already run the hit test - the picture said "he is coming at you" a
@@ -3753,6 +3961,26 @@ CHLOE.engine = CHLOE.engine || {};
       kx += atk.lockDir.x * step; kz += atk.lockDir.z * step;
       atk.lunge -= step;
     }
+
+    /* CONTAINMENT IS THE LAST WORD (§24's finding, §25's requirement).
+       It used to run above the two lunges, so the only displacements in the
+       frame that were NOT arena-checked were the two that move him furthest —
+       the charge and the thrust_combo step-through — which is why the comment
+       above claims "the stone still stops him" while nothing was stopping him.
+       Everything that moved him this frame (his own gait, squad separation,
+       the player push, a §25 shove, both lunges) is now settled before the
+       clamp reads the result, so there is exactly one rule and it always wins.
+       The fallback is his position at the TOP of the frame: the rescue at the
+       head of updateOneKnight guarantees that cell was legal. */
+    var kept = containKnight(kx, kz, k.group.position.x, k.group.position.z);
+    /* §25: how far the shove actually got him, measured AFTER the clamp — the
+       one honest number, because a wave into a pillar moves him nothing at all
+       and the difference is exactly what "clamped and stopped short" means. */
+    if (b.shoveT > 0) {
+      var mvdx = kept.x - k.group.position.x, mvdz = kept.z - k.group.position.z;
+      b.shoveMoved += Math.sqrt(mvdx * mvdx + mvdz * mvdz);
+    }
+    kx = kept.x; kz = kept.z;
 
     k.group.position.x = kx;
     k.group.position.z = kz;
@@ -3868,12 +4096,185 @@ CHLOE.engine = CHLOE.engine || {};
     }
   }
 
+  /* ------------------------------------------------- §25 Water Wave visual
+     A low sheet of water thrown out along the cast direction: a flat arc,
+     centred on the caster, opening to exactly the ability's `cone.reach` over
+     exactly its `shove.ms`. Same principle as the ground_slam shockwave above
+     — THE PICTURE IS THE HIT TEST DRAWN — which is what lets a player learn
+     "the knights inside that arc get thrown" from watching it once, and is
+     why every number below is read off the ability def rather than tuned here.
+
+     Two meshes: a body wedge and a thin bright crest at its leading edge, so
+     the water has a front to read the speed off. Both are unit-radius and
+     SCALED, which is why one pair of geometries serves any reach.
+
+     No PointLight, unlike the tornado and the asteroid. A punctual light that
+     joins the scene mid-fight makes three r128 recompile every material that
+     can receive it — the exact 444ms hitch §21 measured and built the warm-up
+     pass to kill — and this is the one ability you cast BECAUSE something is
+     already swinging at you. Additive geometry over the floor carries it.
+
+     Built once at init and reused (built here, disposed nowhere, allocated
+     never again): §24 leaked a shadow render target by creating GPU objects
+     per build and freeing none, so the wave takes the other road and creates
+     nothing after init. Its 4.5s cooldown means one instance can never be
+     asked to be in two places at once. */
+  var wave = { root: null, body: null, crest: null, active: false,
+               t: 0, reach: 6, travel: 0.3, fade: 0.26 };
+
+  function makeWave() {
+    if (!scene || wave.root) return;
+    var wc = D().wave || {};
+    /* The wedge is built symmetric about local +X and the GROUP is turned to
+       the cast direction, so the half-angle in data is the half-angle you see
+       and nothing has to reason about RingGeometry's winding at spawn time.
+       Half-angle is a build-time constant here (the geometry is baked) and is
+       re-cut per cast only if the ability declares a different one — see
+       spawnWave, which rebuilds the wedge rather than lying about the arc. */
+    wave.half = (wc.halfAngle != null ? wc.halfAngle : 40) * Math.PI / 180;
+    wave.seg = wc.segments || 36;
+    wave.color = wc.color != null ? wc.color : 0x64d2ff;
+    wave.crestColor = wc.crestColor != null ? wc.crestColor : 0xdff6ff;
+    wave.y = wc.y != null ? wc.y : 0.12;
+
+    wave.root = new THREE.Group();
+    wave.root.visible = false;
+    wave.body = new THREE.Mesh(wedgeGeo(0.28, 1.0, wave.half, wave.seg),
+      new THREE.MeshBasicMaterial({ color: wave.color, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+    wave.crest = new THREE.Mesh(wedgeGeo(0.88, 1.0, wave.half, wave.seg),
+      new THREE.MeshBasicMaterial({ color: wave.crestColor, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+    wave.root.add(wave.body);
+    wave.root.add(wave.crest);
+    scene.add(wave.root);
+  }
+
+  /* Flat unit wedge, symmetric about local +X. RingGeometry lives in XY and
+     is laid down with the same rotateX the shockwave uses, so its own angle 0
+     ends up on +X and the arc opens either side of it. */
+  function wedgeGeo(inner, outer, half, seg) {
+    var g = new THREE.RingGeometry(inner, outer, Math.max(6, seg), 1, -half, half * 2);
+    g.rotateX(-Math.PI / 2);
+    return g;
+  }
+
+  /* Re-cut both wedges when an ability asks for an arc the built one does not
+     have. Disposing the old geometries first is the whole point — a spell cast
+     forty times in a run that left forty ring geometries on the GPU is exactly
+     the leak §24 shipped and this file is not repeating it. */
+  function reshapeWave(half) {
+    if (!wave.root || Math.abs(half - wave.half) < 0.005) return;
+    wave.body.geometry.dispose();
+    wave.crest.geometry.dispose();
+    wave.body.geometry = wedgeGeo(0.28, 1.0, half, wave.seg);
+    wave.crest.geometry = wedgeGeo(0.88, 1.0, half, wave.seg);
+    wave.half = half;
+  }
+
+  /* Throw the sheet. Everything it needs comes off the ability def (§25 data:
+     `cone.reach` / `cone.halfAngle` for the shape, `shove.ms` for how long the
+     water takes to cross it); the fallbacks exist only so a caller with a
+     half-authored ability still sees water instead of an exception. */
+  A.spawnWave = function (ability) {
+    if (!wave.root) makeWave();
+    if (!wave.root) return false;
+    var ab = ability || {};
+    var cone = ab.cone || {};
+    var reach = cone.reach != null ? cone.reach : (ab.range || 6);
+    /* `arc` in the schema is the FULL angle (abilityTargets halves it), so a
+       def that states only `arc` still produces the right wedge. */
+    var half = (cone.halfAngle != null ? cone.halfAngle : ((ab.arc || 80) / 2)) * Math.PI / 180;
+    var sh = ab.shove || {};
+    reshapeWave(half);
+
+    var fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+    wave.root.position.set(pos.x, wave.y, pos.z);
+    /* Local +X onto the cast direction. atan2 rather than yaw + PI/2 because
+       the mapping through rotateX is easy to get a sign wrong in, and this one
+       is derived from the vector the hit test itself uses. */
+    wave.root.rotation.y = Math.atan2(-fz, fx);
+    wave.reach = reach;
+    /* The water crosses the cone in the time the knights are being thrown, so
+       the picture and the displacement are the same event. */
+    wave.travel = Math.max(0.08, ((sh.ms > 0 ? sh.ms : 300) / 1000));
+    wave.fade = wave.travel * 0.85;
+    wave.t = 0;
+    wave.active = true;
+    wave.root.visible = true;
+    wave.body.material.opacity = 0.0;
+    wave.crest.material.opacity = 0.0;
+    return true;
+  };
+
+  function updateWave(dt) {
+    if (!wave.active || !wave.root) return;
+    wave.t += dt;
+    var life = wave.travel + wave.fade;
+    var f = Math.min(1, wave.t / wave.travel);
+    /* Out fast and then ease into the far edge: water shoved from the hip
+       leaves quickly and runs out of push, and the eased tail is also what
+       makes the crest arrive at `reach` on the frame the shove finishes. */
+    var r = Math.max(0.05, wave.reach * easeOut(f));
+    wave.root.scale.set(r, 1, r);
+    /* Body fills in behind the crest, then both bleed out. Kept off the same
+       curve so the sheet does not vanish as one flat card. */
+    var out = Math.max(0, 1 - Math.max(0, wave.t - wave.travel) / wave.fade);
+    wave.body.material.opacity = 0.42 * Math.min(1, f * 2.2) * out;
+    wave.crest.material.opacity = 0.85 * out;
+    // a hand's breadth of lift as it goes, so it reads as a sheet, not a decal
+    wave.root.position.y = wave.y + 0.06 * f;
+    if (wave.t >= life) {
+      wave.active = false;
+      wave.root.visible = false;
+      wave.body.material.opacity = 0;
+      wave.crest.material.opacity = 0;
+    }
+  }
+
+  /* Who the wave catches, and WHICH WAY each of them goes (§25). The engine
+     answers this rather than the caller because the sides are decided in the
+     caster's frame — perpendicular to your facing, each knight toward the side
+     he is already nearest — and yaw and the knight positions both live here.
+     Hand each entry straight to A.shove(); the distance and the time come off
+     the ability's own `shove` block, so retuning the throw is a data edit.
+     Deliberately free of abilityTargets' taunt side effect: this is a query
+     the caller may run to AIM, and a whiff it never fired must not gloat. */
+  A.waveTargets = function (ability) {
+    var ab = ability || {}, cone = ab.cone || {}, sh = ab.shove || {};
+    var reach = cone.reach != null ? cone.reach : (ab.range || 6);
+    var half = (cone.halfAngle != null ? cone.halfAngle : ((ab.arc || 80) / 2)) * Math.PI / 180;
+    var cosHalf = Math.cos(half);
+    var fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+    var rx = Math.cos(yaw), rz = -Math.sin(yaw);      // your right hand, in world XZ
+    var dist = sh.distance != null ? sh.distance : 3.2;
+    var ms = sh.ms != null ? sh.ms : 300;
+    var out = [];
+    for (var i = 0; i < knights.length; i++) {
+      var k = knights[i];
+      if (!k.alive || !k.group) continue;
+      var dx = k.group.position.x - pos.x, dz = k.group.position.z - pos.z;
+      var d = Math.sqrt(dx * dx + dz * dz);
+      if (d > reach || d < 0.0001) continue;
+      if ((dx * fx + dz * fz) / d < cosHalf) continue;
+      var lat = dx * rx + dz * rz;
+      /* Dead centre has no nearer side, so it is split by index instead of by
+         a coin — two knights standing on your centre line must go opposite
+         ways or the wave shoves them into each other and opens no lane. */
+      var side = (Math.abs(lat) < 1e-4) ? ((i % 2) ? 1 : -1) : (lat > 0 ? 1 : -1);
+      out.push({ index: i, dirX: rx * side, dirZ: rz * side,
+                 distance: dist, ms: ms, side: side });
+    }
+    return out;
+  };
+
   function updateFx(dt) {
     for (var i = 0; i < candleLights.length; i++) {
       var c = candleLights[i];
       c.intensity = c.userData.baseI * (0.75 + 0.25 * Math.sin(elapsed * 7 + c.userData.phase) + 0.1 * Math.random());
     }
     updateShocks(dt);
+    updateWave(dt);
   }
 
   function loop(now) {
@@ -3983,6 +4384,15 @@ CHLOE.engine = CHLOE.engine || {};
           t: +b.t.toFixed(2), hold: +b.hold.toFixed(2), entered: b.entered,
           dashCd: +k.anim.dashCd.toFixed(2), atkCd: +b.atkCd.toFixed(2),
           staggerT: +b.staggerT.toFixed(2), stunT: +(b.stunT || 0).toFixed(2),
+          /* §25: the wave, measurable. shoveT > 0 says he is in the air (and
+             therefore that his own movement is suspended this frame),
+             shoveLeft is what the payout still owes him and shoveMoved is what
+             the arena actually let him have — the gap between the last two is
+             the containment clamp doing its job, which is the one thing a
+             verifier cannot see from the outside. */
+          shoveT: +b.shoveT.toFixed(2),
+          shoveLeft: +(b.shoveLeft || 0).toFixed(2),
+          shoveMoved: +(b.shoveMoved || 0).toFixed(2),
           hitFlash: +b.hitFlash.toFixed(2),
           arcSign: b.arcSign, strafeSign: b.strafeSign,
           wantsAttack: !!b.wantsAttack
