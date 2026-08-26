@@ -18,9 +18,9 @@ CHLOE.data = CHLOE.data || {};
 CHLOE.data.version = {
   major: 0,
   minor: 31,
-  build: 3,
+  build: 4,
   label: 'The Whole Mouse',
-  date: '2026-08-25',
+  date: '2026-08-26',
   /* Called as CHLOE.data.version.string(), so `this` is the object. Kept as
      methods rather than a baked string so the bumper only ever rewrites the
      three numeric lines it owns and can never corrupt the display logic. */

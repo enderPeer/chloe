@@ -92,6 +92,7 @@ input[type=text]:focus{ border-color:var(--red); box-shadow:0 0 0 2px rgba(229,2
   background-image:repeating-conic-gradient(#fff 0% .0001%, transparent .0002% .0004%);
   background-size:7px 7px;
   animation:grain 1.4s steps(4) infinite;
+  will-change:transform;
 }
 @keyframes grain{
   0%{ transform:translate(0,0); } 25%{ transform:translate(-2%,1%); }
@@ -330,7 +331,7 @@ h1,h2,h3,.head{
     transparent 1px, transparent 4px);
   mix-blend-mode:overlay;
 }
-#screen-battle.shake{ animation:screenShake .42s ease; }
+#screen-battle.shake{ animation:screenShake .42s ease; will-change:transform; }
 @keyframes screenShake{
   0%,100%{ transform:translate(0,0); }
   15%{ transform:translate(-10px,4px); } 30%{ transform:translate(9px,-5px); }

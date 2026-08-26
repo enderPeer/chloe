@@ -1698,7 +1698,7 @@ CHLOE.engine = CHLOE.engine || {};
 
   // --------------------------------------------- §18 hand sign + fire tornado
   var sign = { hand: null, rune: null, t: 0, active: false };
-  var tornado = { root: null, tubes: [], light: null, t: 0, active: false, dur: 2.4 };
+  var tornado = { root: null, tubes: [], light: null, t: 0, active: false, dur: 2.4, _prevA: -1 };
 
   /* A glowing rune traced off the fingertips while a sign-cast winds up. */
   function makeRuneTexture() {
@@ -1956,7 +1956,7 @@ CHLOE.engine = CHLOE.engine || {};
     for (var i = 0; i < rock.motes.length; i++) {
       var mt = rock.motes[i];
       var lag = (p + mt.off) % 1;
-      mt.mesh.visible = true;
+      if (!mt.mesh.visible) mt.mesh.visible = true;
       mt.mesh.position.set(
         rock.x + Math.cos(mt.ang) * mt.spread * lag,
         Math.max(0.05, y + lag * 2.6),
@@ -2075,20 +2075,25 @@ CHLOE.engine = CHLOE.engine || {};
     }
 
     // tornado: rise, churn, fade
-    if (!tornado.active || !tornado.root) return;
+    if (!tornado.active || !tornado.root || !tornado.root.visible) return;
     tornado.t += dt;
     var cfgT = D().tornado || {};
     var rise = (cfgT.riseMs || 420) / 1000, fade = (cfgT.fadeMs || 500) / 1000;
     var p = tornado.t;
     var a = (p < rise) ? (p / rise)
           : (p > tornado.dur - fade ? Math.max(0, (tornado.dur - p) / fade) : 1);
+    var targetOp = a * 0.85;
+    var aChanged = Math.abs(a - tornado._prevA) > 0.005;
+    tornado._prevA = a;
     var spin = cfgT.spin || [2.2, -3.1, 4.4];
     for (var i = 0; i < tornado.tubes.length; i++) {
       tornado.tubes[i].rotation.y += (spin[i % spin.length]) * dt;
-      var mats = Array.isArray(tornado.tubes[i].material)
-        ? tornado.tubes[i].material : [tornado.tubes[i].material];
-      for (var m = 0; m < mats.length; m++) {
-        if (mats[m]) mats[m].opacity = a * 0.85;
+      if (aChanged) {
+        var mats = Array.isArray(tornado.tubes[i].material)
+          ? tornado.tubes[i].material : [tornado.tubes[i].material];
+        for (var m = 0; m < mats.length; m++) {
+          if (mats[m]) mats[m].opacity = targetOp;
+        }
       }
     }
     if (tornado.inner) {
@@ -2105,6 +2110,7 @@ CHLOE.engine = CHLOE.engine || {};
     if (p >= tornado.dur) {
       tornado.active = false;
       tornado.root.visible = false;
+      tornado._prevA = -1;
     }
   }
 
@@ -4943,9 +4949,11 @@ CHLOE.engine = CHLOE.engine || {};
   };
 
   function updateFx(dt) {
-    for (var i = 0; i < candleLights.length; i++) {
-      var c = candleLights[i];
-      c.intensity = c.userData.baseI * (0.75 + 0.25 * Math.sin(elapsed * 7 + c.userData.phase) + 0.1 * Math.random());
+    if (candleLights.length) {
+      for (var i = 0; i < candleLights.length; i++) {
+        var c = candleLights[i];
+        c.intensity = c.userData.baseI * (0.75 + 0.25 * Math.sin(elapsed * 7 + c.userData.phase) + 0.1 * Math.random());
+      }
     }
     updateShocks(dt);
     updateWave(dt);
