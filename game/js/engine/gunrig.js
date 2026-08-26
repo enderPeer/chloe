@@ -129,6 +129,17 @@ CHLOE.engine.gunrig = (function () {
     equipCache: false,    // last answer from askEquipped(); re-asked 4x/second
     loaded: false, mounted: false, requested: false
   };
+  /* Akimbo: a second pistol mirrored on the left hand.  Shares the loaded
+     GLB (cloned at mount time) and the same recoil spring constants but has
+     its own kick state so the two guns alternate independently. */
+  var rigL = {
+    root: null, recoil: null, model: null, hand: null,
+    muzzleNode: null, gripLocal: null,
+    loaded: false
+  };
+  var kickL = 0, kickVL = 0;
+  var lastGun = 0;       // 0 = right, 1 = left — alternates on each fire
+
   var cfg = place();
   var visible = false;
   var equipped = null;        // null = ask combat3; true/false = forced
@@ -160,7 +171,7 @@ CHLOE.engine.gunrig = (function () {
      screen behind a pistol, and its whole job is that the gun is HELD rather
      than hovering. The forearm stub is the part that does that work: without
      something receding off the bottom of the frame, a hand alone floats too. */
-  function buildHand(L) {
+  function buildHand(L, mirror) {
     /* Albedo measured, not picked. The punch arms' (0.27,0.18,0.15) is right
        for something on screen for 700ms; on a prop that is up the whole fight
        it rendered at mean luminance 0.76 against a 0.20 background — a glowing
@@ -191,15 +202,16 @@ CHLOE.engine.gunrig = (function () {
     }
     // thumb across the inner face, toward the screen centre
     var thumb = new THREE.Mesh(new THREE.BoxGeometry(0.018 * s, 0.050 * s, 0.020 * s), mat);
-    thumb.position.set(-0.030 * s, 0.012 * s, -0.008 * s);
-    thumb.rotation.z = 0.45;
+    thumb.position.set((mirror ? 0.030 : -0.030) * s, 0.012 * s, -0.008 * s);
+    thumb.rotation.z = mirror ? -0.45 : 0.45;
     g.add(thumb);
 
-    /* Forearm receding toward the bottom-right of the frame. Ends at camera
-       z = -0.135 with the default placement — the near plane is 0.05, and the
-       margin is deliberate because recoil pulls this end another 20mm back. */
+    /* Forearm receding toward the bottom-right of the frame (or bottom-left
+       for the mirrored left hand). Ends at camera z = -0.135 with the default
+       placement — the near plane is 0.05, and the margin is deliberate because
+       recoil pulls this end another 20mm back. */
     var arm = new THREE.Mesh(new THREE.BoxGeometry(0.072 * s, 0.072 * s, 0.140 * s), mat);
-    arm.position.set(0.020 * s, -0.075 * s, 0.095 * s);
+    arm.position.set((mirror ? -0.020 : 0.020) * s, -0.075 * s, 0.095 * s);
     arm.rotation.x = -0.45;
     g.add(arm);
 
@@ -259,13 +271,11 @@ CHLOE.engine.gunrig = (function () {
 
     _v = V3(); _q = new THREE.Quaternion(); _lag = camera.quaternion.clone();
 
+    /* --- right gun (original) --- */
     rig.root = new THREE.Group();
     rig.root.name = 'GunRig';
     rig.recoil = new THREE.Group();
     rig.recoil.name = 'GunRecoil';
-    /* The grip goes where the hand is. Everything else — muzzle included —
-       falls out of the model's own geometry from there, which is the only
-       reason the muzzle offset never needs hand-tuning. */
     rig.recoil.position.set(cfg.x, cfg.y, cfg.z);
     rig.recoil.rotation.z = cfg.roll || 0;
     rig.root.add(rig.recoil);
@@ -273,16 +283,26 @@ CHLOE.engine.gunrig = (function () {
     camera.add(rig.root);
     if (scene.children.indexOf(camera) === -1) scene.add(camera);
 
-    if (cfg.hand) { rig.hand = buildHand(cfg.length); rig.recoil.add(rig.hand); }
+    if (cfg.hand) { rig.hand = buildHand(cfg.length, false); rig.recoil.add(rig.hand); }
+
+    /* --- left gun (akimbo mirror) --- */
+    rigL.root = new THREE.Group();
+    rigL.root.name = 'GunRigL';
+    rigL.recoil = new THREE.Group();
+    rigL.recoil.name = 'GunRecoilL';
+    rigL.recoil.position.set(-cfg.x, cfg.y, cfg.z);
+    rigL.recoil.rotation.z = -(cfg.roll || 0);
+    rigL.root.add(rigL.recoil);
+    rigL.root.visible = false;
+    camera.add(rigL.root);
+
+    if (cfg.hand) { rigL.hand = buildHand(cfg.length, true); rigL.recoil.add(rigL.hand); }
 
     rig.mounted = true;
     rig.requested = true;
 
     var loader = opts.loader;
     if (!loader || !opts.url) {
-      /* No GLTFLoader, or no path in data/arena3d.js: keep the fist and the
-         muzzle maths, skip the pistol. The fallback muzzle below is still
-         exact for the tracer, which is what §29 actually needs. */
       if (typeof opts.onDone === 'function') opts.onDone('skipped');
       return true;
     }
@@ -290,29 +310,33 @@ CHLOE.engine.gunrig = (function () {
     loader.load(opts.url, function (gltf) {
       try {
         var model = gltf.scene;
-        model.scale.setScalar(cfg.length);   // the GLB is normalised to 1m
+        model.scale.setScalar(cfg.length);
         var grip = findNode(model, 'Grip');
         var gl = grip ? grip.position.clone() : new THREE.Vector3().fromArray(cfg.gripLocal);
-        /* Shift the model so its GRIP lands on the recoil group's origin. Read
-           from the node when it is there; the numbers in DEFAULTS are only the
-           net if a re-export drops the empties. */
-        rig.gripLocal = [gl.x, gl.y, gl.z];   // kept so _place() can re-scale
+        rig.gripLocal = [gl.x, gl.y, gl.z];
         model.position.set(-gl.x * cfg.length, -gl.y * cfg.length, -gl.z * cfg.length);
         model.traverse(dress);
         rig.recoil.add(model);
         rig.model = model;
         rig.muzzleNode = findNode(model, 'Muzzle');
         if (rig.muzzleNode) {
-          /* Adopt the ASSET's numbers over the authored ones, for both halves
-             that use them: the fallback path stays right if the node is ever
-             detached, and debug().muzzleCam stops describing a gun we are no
-             longer drawing. */
           cfg.muzzleLocal = rig.muzzleNode.position.toArray();
           cfg.gripLocal = [gl.x, gl.y, gl.z];
         } else {
           console.warn('[gunrig] no Muzzle node in the GLB — tracer falls back to the authored offset');
         }
         rig.loaded = true;
+
+        /* Clone for the left (akimbo) hand — same model, mirrored grip offset. */
+        var modelL = gltf.scene.clone();
+        modelL.scale.setScalar(cfg.length);
+        modelL.position.set(gl.x * cfg.length, -gl.y * cfg.length, -gl.z * cfg.length);
+        modelL.traverse(dress);
+        rigL.recoil.add(modelL);
+        rigL.model = modelL;
+        rigL.muzzleNode = findNode(modelL, 'Muzzle');
+        rigL.gripLocal = rig.gripLocal;
+        rigL.loaded = true;
       } catch (e) {
         console.warn('[gunrig] mount failed — no visible pistol', e);
       }
@@ -328,6 +352,10 @@ CHLOE.engine.gunrig = (function () {
     if (rig.root && rig.root.parent) rig.root.parent.remove(rig.root);
     rig.root = rig.recoil = rig.model = rig.hand = rig.muzzleNode = null;
     rig.loaded = rig.mounted = rig.requested = false;
+    if (rigL.root && rigL.root.parent) rigL.root.parent.remove(rigL.root);
+    rigL.root = rigL.recoil = rigL.model = rigL.hand = rigL.muzzleNode = null;
+    rigL.loaded = false;
+    kickL = kickVL = 0; lastGun = 0;
     camera = scene = null;
     visible = false;
     kick = kickV = 0;
@@ -395,14 +423,14 @@ CHLOE.engine.gunrig = (function () {
   };
 
   // ------------------------------------------------------------------- fire
-  /* One impulse into the recoil spring. Idempotent inside REFIRE_MS: the cast
-     hook in arena3d calls this for you, and a tracer author who also calls it
-     by hand should get one kick, not two. A real double-tap is slower than
-     30ms — the gun's own cooldownMs is the fire rate, and it is far longer. */
+  /* One impulse into the recoil spring of whichever hand is next.  Alternates
+     left/right on each pull so the player sees both guns kicking. */
   G.fire = function () {
     if (lastFireT >= 0 && (clock - lastFireT) * 1000 < REFIRE_MS) return false;
     lastFireT = clock;
-    kickV += KICK_IMPULSE;
+    lastGun = lastGun ? 0 : 1;
+    if (lastGun === 0) { kickV += KICK_IMPULSE; }
+    else               { kickVL += KICK_IMPULSE; }
     return true;
   };
 
@@ -430,8 +458,6 @@ CHLOE.engine.gunrig = (function () {
     state = state || {};
     clock += dt;
 
-    // re-ask combat3 four times a second; it walks arrays, and nothing here
-    // changes between frames
     if (equipped === null) {
       equipCheckT -= dt;
       if (equipCheckT <= 0) { equipCheckT = 0.25; rig.equipCache = askEquipped(); }
@@ -439,18 +465,18 @@ CHLOE.engine.gunrig = (function () {
     var want = (equipped === null) ? !!rig.equipCache : equipped;
     visible = want && !state.armsBusy;
     rig.root.visible = visible;
+    if (rigL.root) rigL.root.visible = visible;
 
-    // recoil spring — integrated even while hidden so re-showing is never mid-kick
+    // recoil springs — both integrated even while hidden
     kickV += (-KICK_STIFF * kick - KICK_DAMP * kickV) * dt;
     kick += kickV * dt;
     if (Math.abs(kick) < 1e-4 && Math.abs(kickV) < 1e-3) { kick = 0; kickV = 0; }
+    kickVL += (-KICK_STIFF * kickL - KICK_DAMP * kickVL) * dt;
+    kickL += kickVL * dt;
+    if (Math.abs(kickL) < 1e-4 && Math.abs(kickVL) < 1e-3) { kickL = 0; kickVL = 0; }
 
     if (!visible) return;
 
-    /* Walk sway, synced to the camera's bob phase and damped by `swayAmp`.
-       Same discipline as the dressing-room hands: the prop must breathe when
-       you stand still and swing when you run, or it looks painted on the
-       glass. Sprint widens it; crouch halves it. */
     var speed = state.speed || 0;
     var mul = (state.sprinting ? 1.5 : 1) * (state.crouch ? 0.5 : 1) * (cfg.swayAmp != null ? cfg.swayAmp : 1);
     var sx = 0, sy = 0;
@@ -461,29 +487,25 @@ CHLOE.engine.gunrig = (function () {
     }
     var breathe = Math.sin((state.elapsed || clock) * 1.7) * 0.0035 * (cfg.swayAmp != null ? cfg.swayAmp : 1);
     rig.root.position.set(sx, breathe + sy, 0);
+    if (rigL.root) rigL.root.position.set(sx, breathe + sy, 0);
 
-    /* Rotational lag: a world-space quaternion chases the camera at ~11/s and
-       the group's LOCAL rotation is whatever delta is left over. This is the
-       one trick that stops a camera-parented prop feeling welded to the
-       screen — the gun swings a little wide when you whip the mouse and
-       catches up after. */
     _lag.slerp(camera.quaternion, Math.min(1, 11 * dt));
     _q.copy(camera.quaternion).invert();
     rig.root.quaternion.multiplyQuaternions(_q, _lag);
+    if (rigL.root) rigL.root.quaternion.copy(rig.root.quaternion);
 
-    /* The kick itself, about the GRIP: back into the hand, up a little, and a
-       muzzle rise. Positive rotation.x lifts the -Z axis, so this is the
-       barrel climbing — and muzzleDir() reports it, which is why that function
-       carries a warning. */
+    // right gun kick
     rig.recoil.position.set(cfg.x, cfg.y + kick * 0.016, cfg.z + kick * 0.042);
     rig.recoil.rotation.set(kick * 0.16, 0, (cfg.roll || 0) - kick * 0.05);
+    // left gun kick (mirrored x, negated roll)
+    if (rigL.recoil) {
+      rigL.recoil.position.set(-cfg.x, cfg.y + kickL * 0.016, cfg.z + kickL * 0.042);
+      rigL.recoil.rotation.set(kickL * 0.16, 0, -(cfg.roll || 0) + kickL * 0.05);
+    }
 
-    /* Publish the muzzle. updateWorldMatrix walks ancestors then this subtree
-       only — the renderer's own pass has not run yet this frame, and calling
-       camera.updateMatrixWorld(true) here would re-walk the punch rig's 147
-       bones for nothing. */
     camera.updateWorldMatrix(true, false);
     rig.root.updateWorldMatrix(false, true);
+    if (rigL.root) rigL.root.updateWorldMatrix(false, true);
   };
 
   // ------------------------------------------------------------- the muzzle
@@ -495,22 +517,20 @@ CHLOE.engine.gunrig = (function () {
      missing: the flash and the tracer still have somewhere honest to start. */
   G.muzzleWorld = function (out) {
     out = out || V3();
-    if (rig.muzzleNode) { rig.muzzleNode.getWorldPosition(out); return out; }
+    /* Akimbo: return the muzzle of whichever gun last fired, so the tracer
+       originates from the correct barrel. */
+    var r = (lastGun === 0) ? rig : rigL;
+    if (r.muzzleNode) { r.muzzleNode.getWorldPosition(out); return out; }
     var L = cfg.length, m = cfg.muzzleLocal, g = cfg.gripLocal;
-    /* Case 2 goes through the SAME group the pistol would hang off, not
-       straight off the camera. The grip carries a few degrees of cant and the
-       recoil kick, and measured against case 1 that is 4mm of horizontal
-       difference at rest and more mid-kick — small, but it is the difference
-       between "the tracer leaves the barrel" and "the tracer leaves roughly
-       where the barrel is", which is the distinction §29 is about. */
-    if (rig.recoil) {
-      out.set((m[0] - g[0]) * L, (m[1] - g[1]) * L, (m[2] - g[2]) * L);
+    var signX = (lastGun === 0) ? 1 : -1;
+    if (r.recoil) {
+      out.set(signX * (m[0] - g[0]) * L, (m[1] - g[1]) * L, (m[2] - g[2]) * L);
       camera.updateWorldMatrix(true, false);
-      rig.root.updateWorldMatrix(false, true);
-      return rig.recoil.localToWorld(out);
+      r.root.updateWorldMatrix(false, true);
+      return r.recoil.localToWorld(out);
     }
-    if (!camera) return out.set(0, 0, 0);   // not mounted at all
-    out.set(cfg.x + (m[0] - g[0]) * L, cfg.y + (m[1] - g[1]) * L, cfg.z + (m[2] - g[2]) * L);
+    if (!camera) return out.set(0, 0, 0);
+    out.set(signX * cfg.x + signX * (m[0] - g[0]) * L, cfg.y + (m[1] - g[1]) * L, cfg.z + (m[2] - g[2]) * L);
     camera.updateWorldMatrix(true, false);
     return out.applyMatrix4(camera.matrixWorld);
   };
@@ -519,12 +539,10 @@ CHLOE.engine.gunrig = (function () {
      deciding hits; see the header. */
   G.muzzleDir = function (out) {
     out = out || V3();
-    var src = rig.muzzleNode || rig.recoil || camera;
+    var r = (lastGun === 0) ? rig : rigL;
+    var src = r.muzzleNode || r.recoil || camera;
     if (!src) return out.set(0, 0, -1);
     src.getWorldDirection(out);
-    /* getWorldDirection returns +Z in r128; the barrel is -Z by the asset
-       contract, so flip it. Getting this sign wrong fires backwards, which is
-       exactly the failure the converter refused to leave to a note. */
     return out.multiplyScalar(-1);
   };
 
@@ -538,19 +556,18 @@ CHLOE.engine.gunrig = (function () {
     var m = G.muzzle();
     return {
       mounted: !!rig.mounted,
-      loaded: !!rig.loaded,          // false = degraded to no pistol, by design
+      loaded: !!rig.loaded,
       hand: !!rig.hand,
-      muzzleNode: !!rig.muzzleNode,  // false = muzzle() is the authored fallback
+      muzzleNode: !!rig.muzzleNode,
       visible: visible,
       equipped: (equipped === null) ? !!rig.equipCache : equipped,
       forced: equipped !== null,
       length: cfg.length,
       grip: [cfg.x, cfg.y, cfg.z],
       kick: +kick.toFixed(4),
+      kickL: +kickL.toFixed(4),
+      lastGun: lastGun,
       muzzle: [m.x, m.y, m.z],
-      /* The nominal camera-space muzzle, WITHOUT the cant or the kick — it is
-         here to answer "is the barrel in front of the near plane?" and to be
-         comparable frame to frame, which the live number deliberately is not. */
       muzzleCam: (function () {
         if (!camera) return null;
         var L = cfg.length, a = cfg.muzzleLocal, b = cfg.gripLocal;
@@ -568,7 +585,9 @@ CHLOE.engine.gunrig = (function () {
      camera near plane" is a claim about. */
   G._nodes = function () {
     return { root: rig.root, recoil: rig.recoil, model: rig.model,
-             hand: rig.hand, muzzle: rig.muzzleNode, camera: camera };
+             hand: rig.hand, muzzle: rig.muzzleNode, camera: camera,
+             rootL: rigL.root, recoilL: rigL.recoil, modelL: rigL.model,
+             handL: rigL.hand, muzzleL: rigL.muzzleNode };
   };
 
   /* The live materials, pistol first then fist (test hook). Sibling of
@@ -587,6 +606,8 @@ CHLOE.engine.gunrig = (function () {
     }
     walk(rig.model, out.gun);
     walk(rig.hand, out.hand);
+    walk(rigL.model, out.gun);
+    walk(rigL.hand, out.hand);
     return out;
   };
 
@@ -600,20 +621,31 @@ CHLOE.engine.gunrig = (function () {
     if (length != null && rig.model) {
       cfg.length = length;
       rig.model.scale.setScalar(length);
-      /* The grip offset is in the SAME metres, so re-scaling the model without
-         re-scaling this slides the pistol out of the fist — the fist would
-         stay put and the gun would drift forward. */
       var g = rig.gripLocal || cfg.gripLocal;
       rig.model.position.set(-g[0] * length, -g[1] * length, -g[2] * length);
       if (rig.hand) {
         rig.recoil.remove(rig.hand);
-        rig.hand = buildHand(length);
+        rig.hand = buildHand(length, false);
         rig.recoil.add(rig.hand);
+      }
+      if (rigL.model) {
+        rigL.model.scale.setScalar(length);
+        rigL.model.position.set(g[0] * length, -g[1] * length, -g[2] * length);
+      }
+      if (rigL.hand) {
+        rigL.recoil.remove(rigL.hand);
+        rigL.hand = buildHand(length, true);
+        rigL.recoil.add(rigL.hand);
       }
     }
     rig.recoil.position.set(x, y, z);
     rig.recoil.rotation.z = cfg.roll || 0;
+    if (rigL.recoil) {
+      rigL.recoil.position.set(-x, y, z);
+      rigL.recoil.rotation.z = -(cfg.roll || 0);
+    }
     rig.root.visible = true;
+    if (rigL.root) rigL.root.visible = true;
     visible = true;
     return G.debug();
   };

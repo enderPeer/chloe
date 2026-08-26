@@ -84,10 +84,10 @@ CHLOE.data = CHLOE.data || {};
        The gun was §29's row 5. It moved here on the player's instruction; what
        row 5 was really protecting was its UPTIME, and that is preserved by the
        18-stamina price it now arrives with. See row 5. */
-    1:  { ability: ['punch', 'gun_9mm'], slot: 0, name: 'Fists, and the 9mm',
-          desc: 'You always have your hands — weak, cheap, always ready, on key 1 and the LEFT MOUSE BUTTON. And a pistol on the RIGHT: it hits where the crosshair is, holds six, and costs 18 stamina a shot — nearly your whole bar for two of them.' },
+    1:  { ability: 'gun_9mm', slot: 0, name: 'Akimbo',
+          desc: 'Two pistols, one in each hand. Left click and right click to fire — six shots, then a reload. Aim for the head.' },
     2:  { ability: 'fire_tornado', slot: 1, name: 'Fire Tornado',
-          desc: 'Trace the sign and drop a pillar of fire on him. Comes with key 2 to carry it, so you hold fists AND fire.' },
+          desc: 'Trace the sign and drop a pillar of fire on him. Comes with key 2.' },
     /* §21: the first thing you can throw. Everything before this needed you
        to be standing next to him. */
     3:  { ability: 'asteroid', slot: 1, name: 'Asteroid',
@@ -120,8 +120,8 @@ CHLOE.data = CHLOE.data || {};
        your stamina. At 10 that bet stops existing, which is what this row
        sells. (§29 authored the weapon and the 10; §31 moved the row and priced
        the 18.) */
-    5:  { costMod: { gun_9mm: { sta: 10 } }, name: 'Trigger Discipline',
-          desc: 'The 9mm costs 10 stamina a shot instead of 18. Same gun, twice the trigger — and you keep a dodge in the bank while you use it.' },
+    5:  { costMod: { gun_9mm: { sta: 8 } }, name: 'Trigger Discipline',
+          desc: 'The 9mm costs 8 stamina a shot instead of 10. Same guns, less breath — and you keep a dodge in the bank while you use them.' },
     6:  { slot: 1, name: 'Wider Grip',
           desc: '+1 ability keybind — key 5, and it arrives EMPTY. Put a bandage on it, or the move you keep forgetting you own.' },
     7:  { stat: { life: 12, stamina: 6 }, name: 'Roadworn',

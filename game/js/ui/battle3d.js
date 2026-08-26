@@ -1000,11 +1000,11 @@ CHLOE.ui.battle3d = (function () {
        20m is both further away and still reeling, and both facts should be in
        the number. */
     applyHits(e.abilityId, [info.index], null, info.mult);
-    /* After applyHits, so a killing round shows the kill marker. `aliveCount`
-       is the cheapest honest read of "did that one drop": the shot hit exactly
-       one knight, so a drop in the count during this call was him. */
     hitMark(shotKilled);
-    if (info.dist > (ab.falloff && ab.falloff.full ? ab.falloff.full : info.dist)) {
+    if (info.headshot) {
+      splash('HEADSHOT', 'super');
+      log('Headshot — double damage!');
+    } else if (info.dist > (ab.falloff && ab.falloff.full ? ab.falloff.full : info.dist)) {
       log('Long shot — ' + info.dist.toFixed(1) + 'm, and it landed soft.');
     }
   }

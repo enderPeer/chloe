@@ -40,11 +40,34 @@ window.CHLOE = window.CHLOE || {};
 CHLOE.data = CHLOE.data || {};
 
 CHLOE.data.abilities = {
+  /* §29 level 5: a 9mm pistol, and the first weapon in the game that does not
+     require you to be standing in his reach.
+
+     ===================================================================
+     AKIMBO (§31): dual-wielded, one in each hand.
+     =================================================================== */
+  gun_9mm: {
+    id: 'gun_9mm', name: '9mm', icon: '🔫', type: 'physical',
+    desc: 'Akimbo pistols. Two guns, six shots, fast reload — and headshots hurt.',
+    cost: { sta: 10 },
+    castMs: 90, recoverMs: 130, cooldownMs: 200,
+    charges: 6, magazine: true, rechargeMs: 2400,
+    hitscan: true,
+    range: 22.0, arc: 0, rayRadius: 0.55,
+    falloff: { full: 14.0, max: 22.0, min: 0.6 },
+    power: 115, usesMag: false,
+    hits: 1, hitAtMs: [90],
+    vfx: 'gunshot',
+    headshot: true,
+    bindsTo: { mouse: ['mouseR', 'mouseL'] },
+    grantedBy: 'start'
+  },
+
   punch: {
     id: 'punch', name: 'Rapid Punches', icon: '✊', type: 'physical',
-    desc: 'A flurry of close-range punches. Cheap, fast, and weak — the move you always have.',
+    desc: 'A flurry of close-range punches. Cheap, fast, and weak.',
     cost: { sta: 8 },
-    castMs: 260,          // wind-up before the first knuckle lands
+    castMs: 260,
     recoverMs: 240,
     cooldownMs: 700,
     charges: 1,
@@ -53,7 +76,7 @@ CHLOE.data.abilities = {
     hits: 3,
     hitAtMs: [260, 500, 760],
     anim: 'Punch', animSpeed: 1.35,
-    grantedBy: 'start'
+    grantedBy: 'tree'
   },
 
   /* §29 DELETED HERE: `hammer_fist` and `ember_jab`.
@@ -211,119 +234,6 @@ CHLOE.data.abilities = {
        (§23) and duplicating it would make the cheap escape the best control
        tool in the kit. He loses his footing, then he comes back. */
     shove: { distance: 3.2, ms: 300, lateral: true, breaksWindup: true },
-    grantedBy: 'tree'
-  },
-  /* §29 level 5: a 9mm pistol, and the first weapon in the game that does not
-     require you to be standing in his reach.
-
-     ===================================================================
-     HITSCAN, AND WHAT THAT COSTS THE REST OF THE FILE
-     ===================================================================
-     `hitscan: true` means engine/arena3d.js resolves this with a STRAIGHT RAY
-     from the muzzle (A.hitscan), not with the reach+arc cone every other
-     ability is priced by. That is not a cosmetic difference: an arc that is
-     narrow enough to feel like aiming (say 8°) still spans 1.9m of floor at
-     14m, so at range a "narrow arc" is a lane you cannot miss out of, and at
-     point-blank it is a cone you cannot miss INTO. A ray misses by a
-     centimetre and hits by a centimetre at every distance, which is the only
-     honest way to make aiming the skill. `arc: 0` is stated below so anything
-     that reads `arc` without noticing `hitscan` gets a cone of zero width and
-     hits nothing, rather than silently inheriting a 60° default swing.
-
-     `rayRadius` is how fat the bullet is: 0.55m, which is KNIGHT_RADIUS
-     exactly — the ray is thin and the TARGET is a knight-wide vertical
-     capsule, so "the line touches his body" is the whole test. It is deliberately
-     not padded: the sights are the crosshair, and a bullet that lands because
-     the engine widened the target by a hand's breadth teaches nothing.
-     Several knights on one line: the NEAREST one eats it. A bullet does not
-     pick a favourite and it does not pass through the first body.
-
-     ===================================================================
-     THE NUMBERS, AND WHY THEY ARE NOT STRICTLY BETTER THAN WALKING IN
-     ===================================================================
-     At the level it arrives on (5): Chloe atk 12 + 2*4 + 4 (Crimson Fret) =
-     24, the knight's def 5, and `physical` reads 1.0 against him — his plate
-     `resists:{physical:1.0}` overrides the chart's 2x, exactly as it does for
-     your fists, so the gun buys no type advantage either.
-
-     MEASURED through combat3.hitEnemy with the 0.9-1.1 roll pinned to 1.0 —
-     these are outputs, not intentions:
-
-       move                       dmg   sta   dmg/sta   reach    window
-       punch (3 hits)              24     8      3.00    2.6m    1.00s lock
-       gun, one round              25    10      2.50    22m     0.22s lock
-       gun, a whole magazine (6)  150    60      2.50    22m     1.6s + 3.2s reload
-       hammer_fist (§29 deleted)   43    26      1.65    2.9m    1.04s + 3.2s cd
-
-     Read the first two rows together, because they are the design: ONE round
-     is one entire punch flurry, delivered in a fifth of the time from across
-     the arena — and it costs 25% MORE stamina to do it. The gun is the worst
-     damage-per-stamina in the kit that is not the water wave. It buys reach
-     and burst; it never buys efficiency, so closing to melee is still the way
-     you actually kill things when you can afford to be there.
-     Against the fist §29 deleted it is not close, and that is the argument for
-     deleting it: hammer_fist asked 26 stamina to stand inside his sword for a
-     number the gun beats for 10 at 22 metres.
-
-     THE MAGAZINE IS THE GATE, NOT THE STAMINA. 10 stamina is cheap enough to
-     mash — the level-5 pool is 40 + 3*4 = 52, so a full bar is five trigger
-     pulls in a second and a half. `charges: 6` sets the burst at six, which is
-     one more than the pool can pay for: you cannot empty a full magazine from
-     a full stamina bar. Whichever runs out first, you are then standing there
-     with no evade (22 sta) for 3.2 seconds. That is the price and it is the
-     whole tension — the reload lands when you chose badly, not on a timer.
-
-     A HALF-EMPTY MAGAZINE NEVER TOPS ITSELF UP. `magazine: true` reloads only
-     from empty (combat3.tick), so two rounds left are two rounds left until
-     you spend them. That is deliberate: it means the reload is something you
-     TRIGGER by dumping the mag, at a moment of your choosing, instead of a
-     background timer that quietly forgives you.
-
-     RANGE 22m, and 14 of it is free. Full power to 14m — the Ring's own radius
-     (§24: bodies clamp at r=14) — so anywhere in the church, and most of the
-     Ring, a hit is a hit at face value. From 14 to 22 it falls linearly to
-     0.6x, and past 22 the ray simply stops: a knight hugging the far kerb
-     while you hug yours (28m apart) is out of the fight, which is the thing
-     that stops the gun trivialising the biggest floor in the game. */
-  gun_9mm: {
-    id: 'gun_9mm', name: '9mm', icon: '🔫', type: 'physical',
-    desc: 'A pistol. It hits where the crosshair is, as far as you can see, and it holds six.',
-    /* §31: 18 is the ROW-1 price and 10 is what level 5 buys it down to
-       (data/skilltree.js row 5, `costMod`). §29 authored the 10 for a gun that
-       arrived at level 5; the player moved it to level 1, so the gate moved
-       from WHEN you get it to WHAT IT COSTS while you are new. */
-    cost: { sta: 18 },
-    /* Almost no wind-up: the trigger IS the cast. 90ms is one frame of arm
-       before the flash so the shot has a moment to belong to, and 130ms of
-       recover so a full magazine is a stutter of six rather than one press.
-       The 280ms cooldown is the FIRE RATE and it is the thing that actually
-       limits the burst (220ms of lock < 280ms), which is where a fire rate
-       belongs — in one number, not smeared across the lock. */
-    castMs: 90, recoverMs: 130, cooldownMs: 280,
-    /* Six up the pipe, and 3.2s to put six more in. See the block above for
-       why 6 is one more than the stamina bar can pay for. */
-    charges: 6, magazine: true, rechargeMs: 3200,
-    hitscan: true,
-    range: 22.0, arc: 0, rayRadius: 0.55,
-    /* Full damage inside one Ring radius, then a linear slide to `min` at
-       `max`. Stated as three numbers rather than a curve because the engine
-       hands the result straight to combat3.hitEnemy as its `mult`, the same
-       argument the §22 stagger bonus rides on — so distance and footing are
-       priced by one multiplication and neither can hide inside the other. */
-    falloff: { full: 14.0, max: 22.0, min: 0.6 },
-    power: 115, usesMag: false,
-    hits: 1, hitAtMs: [90],
-    vfx: 'gunshot',
-    /* §29: IT LIVES ON THE MOUSE, WHICH IS WHY THE LADDER CAN AFFORD IT.
-       §27B put mouseL/mouseR outside the nine number keys, so this ability
-       costs the hotbar nothing — its ladder row (data/skilltree.js level 5)
-       grants no `slot`, and the arithmetic there is recounted for it.
-       `mouseR` first so mouseL keeps the hands: in the ROOM the mouse still
-       opens and closes them and grabs (§16), and left is the one the player's
-       muscle memory has already spent on that. The list is a PREFERENCE, in
-       order — engine/combat3.js takes the first free one, falls through to a
-       number key if the player has filled both, and never evicts anything. */
-    bindsTo: { mouse: ['mouseR', 'mouseL'] },
     grantedBy: 'tree'
   },
   /* §29: the surviving fist. This is `hollow_breaker` renamed — id AND label —

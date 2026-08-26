@@ -2429,6 +2429,17 @@ CHLOE.engine = CHLOE.engine || {};
     out.dist = bestT;
     out.mult = gunFalloff(ab, bestT);
     out.end = { x: m.x + dx * bestT, y: m.y + dy * bestT, z: m.z + dz * bestT };
+    /* Headshot: if the ray hits the top 35% of the knight's body, double the
+       damage. The height check already computed `hy` — the y-coordinate of the
+       intersection — so we compare against the top threshold. Only for
+       abilities flagged with `headshot: true` in data. */
+    if (ab.headshot) {
+      var headMin = top * 0.65;
+      if (hy >= headMin) {
+        out.mult *= 2;
+        out.headshot = true;
+      }
+    }
     return out;
   };
 

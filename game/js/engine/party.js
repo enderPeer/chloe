@@ -181,7 +181,8 @@ CHLOE.engine.party = (function(){
      deletes, and a seed that silently produces nothing is worse than one
      that never ran. */
   var OPENING_MOUSE = [
-    { slot: 'mouseL',    entry: 'punch',              kind: 'ability' },
+    { slot: 'mouseL',    entry: 'gun_9mm',            kind: 'ability' },
+    { slot: 'mouseR',    entry: 'gun_9mm',            kind: 'ability' },
     { slot: 'wheelUp',   entry: 'item:bandage',       kind: 'item' },
     { slot: 'wheelDown', entry: 'item:energy_drink',  kind: 'item' }
   ];
