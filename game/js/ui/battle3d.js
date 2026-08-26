@@ -2003,6 +2003,12 @@ CHLOE.ui.battle3d = (function () {
 
       ui.show('battle3d');
       if (!inited3d) { a3d.init(els.canvas); inited3d = true; }
+
+      /* Apply the church stage (default) so the arena has its ring, lighting
+         and floor.  Without this the clone fight loads into a black void. */
+      var stage = applyStage(resolveStage(round));
+      curStage = stage;
+
       a3d.reset();
       a3d.resize();
 
