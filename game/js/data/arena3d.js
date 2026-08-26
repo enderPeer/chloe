@@ -399,6 +399,59 @@ CHLOE.data.arena3d = {
       radius: 4.2,            // be OUTSIDE this at the strike frame, measured from his feet
       evade: 'backoff',
       power: 190, weight: 2
+    },
+
+    /* ---- clone patterns: mirror the player's abilities ----
+       Each maps to a player ability in cloneai.js PATTERN_MAP.  Range,
+       timing and power match the ability's own numbers expressed as a
+       knight-style pattern the telegraph/strike pipeline can drive. */
+
+    clone_punch: {
+      id: 'clone_punch', name: 'Fist', hint: 'EVADE!',
+      telegraphMs: 260, recoverMs: 240,
+      reach: 2.6, evade: 'crouch',
+      power: 45, weight: 4,
+      hits: [
+        { atMs: 260, power: 45 },
+        { atMs: 500, power: 45 },
+        { atMs: 740, power: 45 }
+      ],
+      totalMs: 740, feint: { chance: 0, holdMs: 0 }
+    },
+    clone_gun: {
+      id: 'clone_gun', name: '9mm', hint: 'SIDESTEP!',
+      telegraphMs: 90, recoverMs: 130,
+      length: 22.0, width: 1.1, evade: 'sidestep',
+      power: 115, weight: 3
+    },
+    clone_tornado: {
+      id: 'clone_tornado', name: 'Fire Tornado', hint: 'GET BACK!',
+      telegraphMs: 1250, recoverMs: 520,
+      radius: 7.5, evade: 'backoff',
+      power: 210, weight: 2
+    },
+    clone_asteroid: {
+      id: 'clone_asteroid', name: 'Asteroid', hint: 'MOVE!',
+      telegraphMs: 900, recoverMs: 460,
+      radius: 5.0, evade: 'backoff',
+      power: 165, weight: 2
+    },
+    clone_wave: {
+      id: 'clone_wave', name: 'Water Wave', hint: 'DODGE!',
+      telegraphMs: 420, recoverMs: 240,
+      length: 6.0, width: 3.0, evade: 'sidestep',
+      power: 40, weight: 1
+    },
+    clone_killer: {
+      id: 'clone_killer', name: 'Killer Fist', hint: 'EVADE!',
+      telegraphMs: 520, recoverMs: 380,
+      reach: 3.0, evade: 'crouch',
+      power: 165, weight: 2,
+      hits: [
+        { atMs: 520, power: 165 },
+        { atMs: 760, power: 165 }
+      ],
+      totalMs: 760
     }
   }
 };

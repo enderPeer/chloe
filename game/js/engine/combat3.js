@@ -1633,10 +1633,35 @@ CHLOE.engine.combat3 = (function () {
     };
   }
 
+  /* The clone fight needs the player's raw damage output for an ability
+     without routing through hitEnemy (which requires a knight index). Used by
+     battle3d.js resolveStrike in clone mode to feed damage into cloneai. */
+  function playerDamage(ab) {
+    if (!ab) return 0;
+    var p = party();
+    var m = p.get(st.charId);
+    if (!m) return 0;
+    var eff = p.effStats(m);
+    var base = ab.usesMag ? eff.mag : eff.atk;
+    var chart = types().multiplier(ab.type, 'fire');
+    var rand = 0.9 + Math.random() * 0.2;
+    return Math.max(1, Math.round(base * ((ab.power || 50) / 100) * chart * rand));
+  }
+
+  /* Mirror fight: tell combat3 the fight is over with a result, without
+     running the normal victory/defeat bookkeeping (no knights to count, no
+     trophies to hang). The clone's own xp/shards are handled in battle3d. */
+  function cloneEnd(result) {
+    if (!st || st.over) return;
+    st.over = true;
+    st.result = result || 'victory';
+  }
+
   return {
     start: start, get: get, isOver: isOver, tick: tick,
     press: press, evade: evade, spendSprint: spendSprint,
     hitEnemy: hitEnemy, takeHit: takeHit, invulnerable: invulnerable,
+    playerDamage: playerDamage, cloneEnd: cloneEnd,
     aliveCount: aliveCount, allDown: allDown,
     flee: flee, snapshot: snapshot,
     knownAbilities: knownAbilities, slotCount: slotCount, binds: binds, bind: bind,

@@ -108,6 +108,10 @@ CHLOE.engine = CHLOE.engine || {};
   var ceilLight = null, ceilBase = 1, ceilTarget = 1, ceilTimer = 0;
   var raycaster = null, ndc = null;
   var listeners = []; // [target, type, fn]
+  /* The south wall door — interactive for the mirror fight. `mesh` is the
+     raycast target; `hovered` is true when the crosshair is on it. */
+  var door = { mesh: null, hovered: false };
+  var doorCb = null;
 
   // section 14: env map + models + hands state
   var envMapOk = false;
@@ -739,6 +743,7 @@ CHLOE.engine = CHLOE.engine || {};
         mesh = new THREE.Mesh(new THREE.PlaneGeometry(f.w, f.h), m);
         mesh.position.y = f.h / 2;
         g.add(mesh);
+        door.mesh = mesh;
         break;
 
       case 'lamp':
@@ -1385,6 +1390,7 @@ CHLOE.engine = CHLOE.engine || {};
       else if (tvHovered) toggleTv();
       else if (stageBoard.hover) stepStage(stageBoard.hover);
       else if (giftHover) openShop();  // §27D: the box under the crosshair
+      else if (door.hovered && doorCb) doorCb();   // mirror fight
       return;
     }
     // unlocked: allow direct clicks via raycast from the click point —
@@ -1414,6 +1420,12 @@ CHLOE.engine = CHLOE.engine || {};
         gift.group.updateMatrixWorld();
         var gih = raycaster.intersectObjects(gift.targets, false);
         if (gih.length && gih[0].distance <= GIFT_DIST) { openShop(); return; }
+      }
+      // Door: mirror fight
+      if (door.mesh) {
+        door.mesh.updateMatrixWorld();
+        var ddh = raycaster.intersectObject(door.mesh, false);
+        if (ddh.length && ddh[0].distance <= 3.5 && doorCb) { doorCb(); return; }
       }
     }
     try {
@@ -1674,9 +1686,18 @@ CHLOE.engine = CHLOE.engine || {};
     if (giftHoverCb && !!giftHover !== !!wasGift) {
       try { giftHoverCb(!!giftHover, giftHover ? giftHover.dist : Infinity); } catch (e) {}
     }
+    /* Door hover — behind enemy, TV and giftbox.  The door is on the south
+       wall, so it only matters when the player has turned around from the
+       enemy billboard. */
+    door.hovered = false;
+    if (!hovered && !tvHovered && !giftHover && door.mesh) {
+      door.mesh.updateMatrixWorld();
+      var dh = raycaster.intersectObject(door.mesh, false);
+      if (dh.length && dh[0].distance <= 3.5) door.hovered = true;
+    }
     if (hoverCb && (hovered !== was || tvHovered !== wasTv ||
         (hovered && Math.abs(enemyDist - wasDist) > 0.05))) {
-      try { hoverCb(hovered, enemyDist, tvHovered); } catch (e) {}
+      try { hoverCb(hovered, enemyDist, tvHovered, door.hovered); } catch (e) {}
     }
     /* §26 the board's arrows — behind the enemy and the TV, ahead of the
        pickups: a poster on the wall and an item on the floor can both be
@@ -1793,6 +1814,7 @@ CHLOE.engine = CHLOE.engine || {};
   };
 
   W.onEngage = function (cb) { engageCb = typeof cb === 'function' ? cb : null; };
+  W.onDoor = function (cb) { doorCb = typeof cb === 'function' ? cb : null; };
 
   // Fired when a hand finishes taking an item: cb(itemId, label).
   W.onPickup = function (cb) { onPickupCb = typeof cb === 'function' ? cb : null; };
@@ -1912,6 +1934,7 @@ CHLOE.engine = CHLOE.engine || {};
          ('inert', i.e. engine/records.js was not in the build), and null when
          the prop is not in data/room3d.js at all. */
       giftHover: giftHover,
+      doorHover: door.hovered,
       shopReady: !!(CHLOE.ui && CHLOE.ui.shop && typeof CHLOE.ui.shop.open === 'function'),
       recordBoard: recBoard.mat ? (recBoard.live ? 'live' : 'inert') : null,
       pickupsLeft: pickups.filter(function (p) { return !p.taken; }).length,

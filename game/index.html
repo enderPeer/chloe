@@ -70,6 +70,10 @@
 <script src="js/engine/battle.js"></script>
 <script src="js/engine/arena.js"></script>
 <script src="js/engine/combat3.js"></script>
+<!-- Mirror fight AI: the clone's independent decision loop and ability
+     mapping.  After combat3.js (reads knownAbilities at runtime) and before
+     world3d.js (which publishes the onDoor hook it drives). -->
+<script src="js/engine/cloneai.js"></script>
 <script src="js/engine/world3d.js"></script>
 <!-- §28 C: the pose driver. Before arena3d.js, which calls into it at every
      phase boundary and at knight load. A module with no script tag is a whole

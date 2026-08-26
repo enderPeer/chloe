@@ -140,18 +140,18 @@ CHLOE.ui.room3d = (function(){
     return a.name ? (mark + ' ' + String(a.name).toUpperCase())
                   : (mark + ' ANOTHER FLOOR');
   }
-  function setHint(kind, label){ // 'enemy' | 'tv' | 'item' | 'stage' | 'gift' | null
+  function setHint(kind, label){ // 'enemy' | 'tv' | 'item' | 'stage' | 'gift' | 'door' | null
     if (els.crosshair) {
       els.crosshair.classList.toggle('in-range', kind === 'enemy' || kind === 'item');
       /* §26/§27D: the board's arrows and the giftbox borrow the TV's white
          crosshair — all three are things you PRESS, none is something you
          fight, and the red reticle is reserved for what you can attack. */
       els.crosshair.classList.toggle('tv-range',
-        kind === 'tv' || kind === 'stage' || kind === 'gift');
+        kind === 'tv' || kind === 'stage' || kind === 'gift' || kind === 'door');
     }
     if (els.hint) {
       els.hint.classList.toggle('hidden', !kind);
-      els.hint.classList.toggle('tv', kind === 'tv' || kind === 'stage' || kind === 'gift');
+      els.hint.classList.toggle('tv', kind === 'tv' || kind === 'stage' || kind === 'gift' || kind === 'door');
       if (kind) {
         /* §27D names the ACTION, not the object: "the giftbox" alone leaves
            you to guess whether it opens, is taken, or is kicked — and the box
@@ -161,7 +161,8 @@ CHLOE.ui.room3d = (function(){
                  : (kind === 'item' ? ('take the ' + (label || 'item'))
                  : (kind === 'stage' ? (label || 'change the floor')
                  : (kind === 'gift' ? 'open ' + (label || 'the giftbox') + ' — the shop'
-                 : 'CLICK TO ENGAGE')));
+                 : (kind === 'door' ? 'Open the door — face your reflection'
+                 : 'CLICK TO ENGAGE'))));
         if (els.hint.textContent !== text) els.hint.textContent = text;
       }
     }
@@ -192,9 +193,11 @@ CHLOE.ui.room3d = (function(){
     var gift = (!enemyHover && !tvHovered(d) && !arrow && d) ? d.giftHover : null;
     // §16: a glinting item under the crosshair — enemy, TV, board and box first
     var pk = (!enemyHover && !tvHovered(d) && !arrow && !gift && d) ? d.pickupHover : null;
+    var doorH = (!enemyHover && !tvHovered(d) && !arrow && !gift && !pk && d && d.doorHover);
     setHint(enemyHover ? 'enemy'
           : (tvHovered(d) ? 'tv'
-          : (arrow ? 'stage' : (gift ? 'gift' : (pk ? 'item' : null)))),
+          : (doorH ? 'door'
+          : (arrow ? 'stage' : (gift ? 'gift' : (pk ? 'item' : null))))),
             arrow ? stageArrowLabel(arrow) : (gift ? gift.label : (pk && pk.label)));
     if (els.overlay) els.overlay.classList.toggle('hidden', isLocked());
     refreshHud();
@@ -216,6 +219,7 @@ CHLOE.ui.room3d = (function(){
         w.init(els.canvas);
         if (typeof w.onEngage === 'function') w.onEngage(engage);
         if (typeof w.onHover === 'function') w.onHover(onWorldHover);
+        if (typeof w.onDoor === 'function') w.onDoor(onDoorOpen);
         /* §27D: the box publishes its own hover edge rather than joining
            onHover's (enemy, dist, tv) signature. Nothing is stored from it —
            poll() still reads debug().giftHover, the single source — this only
@@ -350,6 +354,20 @@ CHLOE.ui.room3d = (function(){
       CHLOE.ui.battle3d.begin(id);
     } else {
       CHLOE.ui.battle.begin(id, { boss: false });
+    }
+  }
+
+  /* The south wall door: opens the mirror fight. */
+  function onDoorOpen(){
+    if (inBattle) return;
+    inBattle = true;
+    pause();
+    if (CHLOE.ui.battle3d && typeof CHLOE.ui.battle3d.beginClone === 'function') {
+      CHLOE.ui.battle3d.beginClone();
+    } else {
+      /* Fallback: fight the room enemy instead. */
+      inBattle = false;
+      engage();
     }
   }
 

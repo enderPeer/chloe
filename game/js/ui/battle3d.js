@@ -23,6 +23,8 @@ CHLOE.ui.battle3d = (function () {
   var ui, party, C3, a3d;
   var els = {};
   var built = false, inited3d = false, active = false;
+  var cloneFight = false;          // mirror-fight mode
+  var cloneTimer = null, nextCloneSwingAt = 0;
   /* §24: the stage THIS fight is being fought on, kept because the result card
      is written after `stage` has gone out of startFight's scope and a card that
      names the church over a body lying in the Ring is the same lie the loading
@@ -907,6 +909,23 @@ CHLOE.ui.battle3d = (function () {
      number and the impact are the same moment rather than the number arriving
      while the rock is still in the air. */
   function resolveStrike(ab, e) {
+    /* Clone fight: ALL player ability hits land on the single clone, not the
+       knight squad. The damage pipeline bypasses combat3.hitEnemy entirely and
+       goes straight to cloneai.takeDamage, so no knight needs to exist. */
+    if (cloneFight && ab) {
+      var cloneai = CHLOE.engine.cloneai;
+      var cs = cloneai && cloneai.state();
+      if (cs && cs.alive) {
+        var dmg = C3.playerDamage ? C3.playerDamage(ab) : 0;
+        if (dmg > 0) {
+          var killed = cloneai.takeDamage(dmg);
+          splash('-' + dmg, 'dmg');
+          log(ab.name + ': ' + dmg + '.');
+          if (killed) { if (C3.cloneEnd) C3.cloneEnd('victory'); finish(); }
+        }
+      }
+      return;
+    }
     /* §29 FIRST, because a hitscan shares nothing with the paths below. It has
        no cone, no splash, no travel time and no ability to be dodged by
        walking out of an arc — the ray was solved and answered in one call, and
@@ -1324,6 +1343,24 @@ CHLOE.ui.battle3d = (function () {
       enemySwing();
     }
 
+    /* Clone fight: tick the AI and swing on its own cadence. */
+    if (cloneFight && !C3.isOver()) {
+      var cloneai = CHLOE.engine.cloneai;
+      if (cloneai) {
+        cloneai.tick(dt);
+        var cs = cloneai.state();
+        if (cs && cs.alive && now >= nextCloneSwingAt) {
+          scheduleCloneSwing(now);
+          cloneSwing();
+        }
+        /* The clone is a single enemy — end the fight if the player kills it. */
+        if (cs && !cs.alive && !C3.isOver()) {
+          if (C3.cloneEnd) C3.cloneEnd('victory');
+          finish();
+        }
+      }
+    }
+
     refresh();
     if (C3.isOver()) { finish(); return; }
   }
@@ -1573,6 +1610,7 @@ CHLOE.ui.battle3d = (function () {
     if (!active) return;
     var snap = C3.snapshot();
     active = false;
+    if (cloneFight) finishClone();
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     a3d.stopAbility();
     /* §21: the fight is over, so put the player in cursor mode BEFORE the
@@ -1758,6 +1796,85 @@ CHLOE.ui.battle3d = (function () {
     CHLOE.ui.scene.onBattleEnd(result);
   }
 
+  /* ---------- clone fight ---------- */
+  function startCloneFight() {
+    if (!active) return;
+    a3d.start();
+    a3d.stopAbility();
+
+    buildHotbar(C3.snapshot());
+    refresh();
+    log('You face your reflection.');
+    log('Keys 1-9 to strike, SPACE to evade.');
+    var snap0 = C3.snapshot();
+    prompt('YOUR REFLECTION', 'banner', 2200);
+
+    wireKeys();
+    lastT = performance.now();
+    nextCloneSwingAt = lastT + 1500;
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function cloneSwing() {
+    if (!active || C3.isOver()) return;
+    var cloneai = CHLOE.engine.cloneai;
+    if (!cloneai) return;
+    var cs = cloneai.state();
+    if (!cs || !cs.alive) return;
+
+    var snap = C3.snapshot();
+    var dist = (snap && snap.enemy && snap.enemy.dist) || 4;
+    var abId = cloneai.pickAbility(dist);
+    if (!abId) return;
+
+    var patternId = cloneai.abilityToPattern(abId);
+    var allPats = (CHLOE.data.arena3d && CHLOE.data.arena3d.patterns) || {};
+    var pattern = allPats[patternId];
+    if (!pattern) return;
+
+    cloneai.spend(abId);
+    var ab = (CHLOE.data.abilities || {})[abId];
+    var abName = (ab && ab.name) || abId;
+
+    var windows = hitWindows(pattern);
+    var landed = 0;
+    var warn = warnSwing(pattern, 0, windows);
+    a3d.telegraph(pattern, function (res) {
+      dropPrompt(warn);
+      if (!active || C3.isOver()) return;
+      landed++;
+      var out = res.hit ? C3.takeHit(windowPattern(pattern, res), -1) : null;
+      if (!res.hit || (out && (out.evaded || out.missed))) {
+        splash(res.hit ? 'EVADED!' : 'DODGED!', 'evade');
+        log('The reflection splits empty air.');
+      } else if (out) {
+        splash('-' + out.dmg, 'hurt');
+        flashHurt();
+        log(abName + ' lands: ' + out.dmg + '.' +
+            (windows > 1 ? '  (' + landed + '/' + windows + ')' : ''));
+        if (out.revived) {
+          prompt('ADRENALINE', 'banner', 1600);
+          splash('+' + out.revived.hp, 'evade');
+          refresh();
+        }
+      }
+      if (landed < windows) warn = warnSwing(pattern, landed, windows);
+      refresh();
+      if (C3.isOver()) { finish(); return; }
+    }, -1);
+  }
+
+  function scheduleCloneSwing(now) {
+    nextCloneSwingAt = now + 1200 + Math.random() * 800;
+  }
+
+  function finishClone() {
+    cloneFight = false;
+    var cloneai = CHLOE.engine.cloneai;
+    if (cloneai) cloneai.reset();
+    cloneTimer = null;
+  }
+
   return {
     begin: begin,
     /* test hooks */
@@ -1847,6 +1964,63 @@ CHLOE.ui.battle3d = (function () {
     /* The resolve path only runs off rAF, which is frozen whenever the tab
        is not compositing — so without this the victory/defeat card and the
        mode switch that goes with it cannot be tested headlessly at all. */
-    _finish: finish
+    _finish: finish,
+
+    /* ---------- mirror fight API ---------- */
+    beginClone: function () {
+      ui = CHLOE.ui; party = CHLOE.engine.party;
+      C3 = CHLOE.engine.combat3; a3d = CHLOE.engine.arena3d;
+      var cloneai = CHLOE.engine.cloneai;
+      if (!cloneai) { console.warn('[battle3d] cloneai.js not loaded'); return; }
+
+      /* Snapshot the player's current stats and loadout so the clone
+         mirrors exactly what the player has right now. */
+      var mem = party && party.activeMember && party.activeMember();
+      var eff = (party && party.effStats) ? party.effStats(mem) : null;
+      var stats = {
+        hp:   (eff && eff.life) || 62,
+        mana: (eff && eff.magic) || 20,
+        sta:  (eff && eff.stamina) || 40,
+        atk:  (eff && eff.atk) || 12,
+        mag:  (eff && eff.mag) || 11,
+        def:  (eff && eff.def) || 8,
+        type: (eff && eff.type) || 'fire'
+      };
+      var abilities = [];
+      if (C3 && typeof C3.knownAbilities === 'function' && mem) {
+        abilities = C3.knownAbilities(mem);
+      }
+      cloneai.init(stats, abilities);
+
+      /* Start the fight with the clone entry. */
+      var cloneId = 'clone';
+      var round = 1;
+      var s = C3.start(cloneId, round);
+      if (!s) { console.warn('[battle3d] cannot start clone fight'); cloneai.reset(); return; }
+      if (!built) build();
+      active = true;
+      cloneFight = true;
+
+      ui.show('battle3d');
+      if (!inited3d) { a3d.init(els.canvas); inited3d = true; }
+      a3d.reset();
+      a3d.resize();
+
+      /* Load the arena scene (same gate as a normal fight). */
+      var load = CHLOE.ui.loading;
+      if (load && a3d.assetsReady && !a3d.assetsReady()) {
+        load.show('Opening the mirror…');
+        load.waitFor(
+          function () { return a3d.assetsReady(); },
+          function (setProgress) {
+            var pr = a3d.assetProgress ? a3d.assetProgress() : null;
+            if (pr) setProgress(pr.done, pr.total + 1, pr.done >= pr.total ? 'Lighting the candles…' : 'Opening the mirror…');
+          },
+          function () { load.hide(); startCloneFight(); }
+        );
+        return;
+      }
+      startCloneFight();
+    }
   };
 })();

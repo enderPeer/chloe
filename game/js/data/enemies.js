@@ -93,5 +93,18 @@ CHLOE.data.enemies = {
     ai: 'phased',
     rewards: { xp: 90, shards: 120, drops: [ { itemId: 'adrenaline_shot', chance: 1.0 } ] },
     desc: 'He books the acts. He keeps the encores. Forever.'
+  },
+  /* The mirror fight: a clone of the player, spawned from the dressing-room
+     door.  Stats are overwritten at runtime by cloneai.init() from the
+     active character's actual effStats, so these base numbers are fallbacks. */
+  clone: {
+    id: 'clone', name: 'Your Reflection', image: 'assets/gen/enemy-hollow-sprite.jpg',
+    type: 'fire', element: 'fire', level: 1, boss: false,
+    stats: { life: 62, stamina: 40, magic: 20, faith: 3, atk: 12, def: 8, spd: 9, mag: 11 },
+    resists: {},
+    moveset: [],
+    ai: 'clone',
+    rewards: { xp: 25, shards: 20, drops: [] },
+    desc: 'It knows everything you know. It wants what you want.'
   }
 };
