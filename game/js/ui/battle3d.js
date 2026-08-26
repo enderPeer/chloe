@@ -2012,15 +2012,29 @@ CHLOE.ui.battle3d = (function () {
       a3d.reset();
       a3d.resize();
 
-      /* Load the arena scene (same gate as a normal fight). */
+      /* Always show a loading gate for the clone fight — even when the GLBs
+         are cached from the room, the arena needs time to bake the stage
+         geometry and compile shaders.  Without the gate the player sees a
+         black screen while the render loop races ahead of initialization. */
       var load = CHLOE.ui.loading;
-      if (load && a3d.assetsReady && !a3d.assetsReady()) {
+      if (load) {
         load.show('Opening the mirror…');
+        var gateStart = performance.now();
+        var MIN_WAIT = 1800;
         load.waitFor(
-          function () { return a3d.assetsReady(); },
+          function () {
+            var assetsOK = !a3d.assetsReady || a3d.assetsReady();
+            var elapsed = performance.now() - gateStart;
+            return assetsOK && elapsed >= MIN_WAIT;
+          },
           function (setProgress) {
             var pr = a3d.assetProgress ? a3d.assetProgress() : null;
-            if (pr) setProgress(pr.done, pr.total + 1, pr.done >= pr.total ? 'Lighting the candles…' : 'Opening the mirror…');
+            var elapsed = performance.now() - gateStart;
+            var pct = pr ? Math.min(1, (pr.done / Math.max(1, pr.total + 1))) : 0;
+            var timePct = Math.min(1, elapsed / MIN_WAIT);
+            var p = Math.max(pct, timePct);
+            setProgress(Math.round(p * 100), 100,
+              p >= 1 ? 'Lighting the candles…' : 'Opening the mirror…');
           },
           function () { load.hide(); startCloneFight(); }
         );
