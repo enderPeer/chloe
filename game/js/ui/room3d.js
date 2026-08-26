@@ -466,6 +466,11 @@ CHLOE.ui.room3d = (function(){
     wire();
     party.state.scene = 'room3d';
     ui.show('room3d'); // onShow -> resume()
+    /* Pre-fetch the tornado / asteroid / hand-sign GLBs while the player
+       walks the room. By the time they pick a floor the browser cache is
+       warm and the loading gate skips the network round-trip. */
+    var a3d = CHLOE.engine && CHLOE.engine.arena3d;
+    if (a3d && typeof a3d.preloadVfx === 'function') a3d.preloadVfx();
   }
 
   return {

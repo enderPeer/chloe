@@ -489,12 +489,63 @@ CHLOE.engine = CHLOE.engine || {};
     scene.traverse(function (o) {
       if (o.visible === false) { hidden.push(o); o.visible = true; }
     });
+
+    /* The tornado tubes and asteroid motes sit at opacity 0 until cast. Additive
+       blending on fully-transparent fragments lets the GPU skip the fragment
+       shader entirely, so the program is never compiled — the first cast then
+       pays the full compile cost mid-fight. Temporarily boost their opacities
+       so the warmup frame actually exercises the fragment path. */
+    var _savedOp = [];
+    var _i, _m, _mats;
+    for (_i = 0; _i < tornado.tubes.length; _i++) {
+      _mats = Array.isArray(tornado.tubes[_i].material)
+        ? tornado.tubes[_i].material : [tornado.tubes[_i].material];
+      for (_m = 0; _m < _mats.length; _m++) {
+        if (_mats[_m] && _mats[_m].opacity === 0) {
+          _savedOp.push(_mats[_m]);
+          _mats[_m].opacity = 0.5;
+        }
+      }
+    }
+    for (_i = 0; _i < rock.motes.length; _i++) {
+      _m = rock.motes[_i].mesh.material;
+      if (_m && _m.opacity === 0) { _savedOp.push(_m); _m.opacity = 0.5; }
+    }
+    if (rock.ring && rock.ring.material && rock.ring.material.opacity === 0) {
+      _savedOp.push(rock.ring.material); rock.ring.material.opacity = 0.5;
+    }
+
     try { renderer.render(scene, camera); } catch (e) { renderFailed = true; }
+
+    for (_i = 0; _i < _savedOp.length; _i++) _savedOp[_i].opacity = 0;
+
     for (var h = 0; h < hidden.length; h++) hidden[h].visible = false;
     try { renderer.render(scene, camera); } catch (e) { renderFailed = true; }
 
     assets.warm = true;
   }
+
+  /* Pre-fetch the VFX-only GLBs (tornado, asteroid, hand sign) so their
+     downloads are in-flight or complete by the time A.init() fires the
+     full loader batch.  Called from room3d.enter() while the player walks
+     the room — the idle seconds hide the network latency.  We only issue
+     the XHRs; GLTFLoader.load() in each asset loader will pick up the
+     browser-cached response and pay zero extra parse time. */
+  var _vfxPrefetched = false;
+  A.preloadVfx = function () {
+    if (_vfxPrefetched) return;
+    _vfxPrefetched = true;
+    var models = D().models || {};
+    var keys = ['tornado', 'asteroid', 'handsign'];
+    for (var i = 0; i < keys.length; i++) {
+      if (!models[keys[i]]) continue;
+      try {
+        var x = new XMLHttpRequest();
+        x.open('GET', versioned(models[keys[i]]), true);
+        x.send();
+      } catch (e) {}
+    }
+  };
 
   function makeLoader() {
     if (typeof THREE.GLTFLoader !== 'function') return null;

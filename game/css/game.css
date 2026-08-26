@@ -159,6 +159,19 @@ h1,h2,h3,.head{
   position:absolute; bottom:1rem; left:0; right:0;
   text-align:center; color:#565059; font-size:.75rem; z-index:2;
 }
+.title-notes{
+  position:relative; z-index:2;
+  max-width:28rem; margin:0 auto 1.2rem;
+  padding:.65rem 1rem;
+  background:rgba(255,255,255,.04);
+  border:1px solid rgba(255,255,255,.06);
+  border-radius:6px;
+  font-size:.72rem; line-height:1.55;
+  color:#888088; letter-spacing:.02em;
+  text-transform:none; text-align:left;
+}
+.title-notes b{ color:#b0a0a8; text-transform:uppercase; letter-spacing:.06em; }
+.title-notes li{ margin:.15rem 0 .15rem .8rem; }
 
 /* ---------- Scene screen ---------- */
 #screen-scene{ background:#000; }

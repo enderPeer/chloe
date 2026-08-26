@@ -26,6 +26,7 @@ CHLOE.game = (function(){
      level-1 solo Chloe with nothing carried over. */
   function startNew(){
     CHLOE.engine.party.newGame();
+    try { sessionStorage.setItem('chloe.started', '1'); } catch (e) {}
     /* §27E: the run clock starts HERE, next to newGame(), because this is the
        one function both entry points go through — the title screen on load and
        "Begin again" on the defeat panel. engine/records.js falls back to

@@ -27,6 +27,23 @@ CHLOE.ui.title = (function(){
     inner.appendChild(start);
     root.appendChild(inner);
 
+    /* Patch notes: shown until the player has started at least one run, then
+       hidden for subsequent visits so the title stays clean. */
+    var started = false;
+    try { started = sessionStorage.getItem('chloe.started'); } catch (e) {}
+    if (!started) {
+      var notes = ui.el('div', 'title-notes');
+      notes.innerHTML =
+        '<b>v0.31.4 — Fluidity</b>' +
+        '<ul>' +
+        '<li>Tornado fragment shaders are now pre-compiled during the loading gate — the first cast no longer pays a GPU stall.</li>' +
+        '<li>VFX assets (tornado, asteroid, hand sign) are fetched while you walk the room, so the loading bar fills faster.</li>' +
+        '<li>Per-frame material writes are skipped when opacity has not changed.</li>' +
+        '<li>CSS compositor layers are pre-promoted for the grain overlay and screen shake.</li>' +
+        '</ul>';
+      root.appendChild(notes);
+    }
+
     var foot = ui.el('div', 'title-foot',
       'The Velvet District after midnight · ' +
       /* from data/version.js, bumped on every push by tools/hooks/pre-commit */
