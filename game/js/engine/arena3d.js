@@ -459,6 +459,45 @@ CHLOE.engine = CHLOE.engine || {};
   function warmShaders() {
     if (assets.warm || !renderer || !scene || !camera) return;
 
+    /* Force ALL objects visible FIRST, then compile.  renderer.compile()
+       traverses the scene and skips invisible nodes — if the tornado,
+       asteroid and hand sign are still hidden when compile runs, their
+       shader programs are never built, and the first cast pays the full
+       GPU compile cost mid-fight. */
+    var hidden = [];
+    scene.traverse(function (o) {
+      if (o.visible === false) { hidden.push(o); o.visible = true; }
+    });
+
+    /* The tornado tubes and asteroid motes sit at opacity 0 until cast.
+       Additive blending on fully-transparent fragments lets the GPU skip
+       the fragment shader entirely, so the program is never compiled — the
+       first cast then pays the full compile cost mid-fight.  Temporarily
+       boost their opacities so the warmup frame exercises the fragment
+       path. */
+    var _savedOp = [];
+    var _i, _m, _mats;
+    for (_i = 0; _i < tornado.tubes.length; _i++) {
+      _mats = Array.isArray(tornado.tubes[_i].material)
+        ? tornado.tubes[_i].material : [tornado.tubes[_i].material];
+      for (_m = 0; _m < _mats.length; _m++) {
+        if (_mats[_m] && _mats[_m].opacity === 0) {
+          _savedOp.push(_mats[_m]);
+          _mats[_m].opacity = 0.5;
+        }
+      }
+    }
+    for (_i = 0; _i < rock.motes.length; _i++) {
+      _m = rock.motes[_i].mesh.material;
+      if (_m && _m.opacity === 0) { _savedOp.push(_m); _m.opacity = 0.5; }
+    }
+    if (rock.ring && rock.ring.material && rock.ring.material.opacity === 0) {
+      _savedOp.push(rock.ring.material); rock.ring.material.opacity = 0.5;
+    }
+
+    /* compile() builds shader programs for every visible material.  With the
+       VFX now visible and opaque, this actually compiles the tornado and
+       asteroid fragment shaders instead of skipping them. */
     try { renderer.compile(scene, camera); } catch (e) {
       console.warn('[arena3d] shader warm-up failed', e);
     }
@@ -483,38 +522,7 @@ CHLOE.engine = CHLOE.engine || {};
       });
     }
 
-    /* One frame with the hidden VFX forced on, so their draw calls are really
-       issued once. Visibility is restored before anyone sees a frame. */
-    var hidden = [];
-    scene.traverse(function (o) {
-      if (o.visible === false) { hidden.push(o); o.visible = true; }
-    });
-
-    /* The tornado tubes and asteroid motes sit at opacity 0 until cast. Additive
-       blending on fully-transparent fragments lets the GPU skip the fragment
-       shader entirely, so the program is never compiled — the first cast then
-       pays the full compile cost mid-fight. Temporarily boost their opacities
-       so the warmup frame actually exercises the fragment path. */
-    var _savedOp = [];
-    var _i, _m, _mats;
-    for (_i = 0; _i < tornado.tubes.length; _i++) {
-      _mats = Array.isArray(tornado.tubes[_i].material)
-        ? tornado.tubes[_i].material : [tornado.tubes[_i].material];
-      for (_m = 0; _m < _mats.length; _m++) {
-        if (_mats[_m] && _mats[_m].opacity === 0) {
-          _savedOp.push(_mats[_m]);
-          _mats[_m].opacity = 0.5;
-        }
-      }
-    }
-    for (_i = 0; _i < rock.motes.length; _i++) {
-      _m = rock.motes[_i].mesh.material;
-      if (_m && _m.opacity === 0) { _savedOp.push(_m); _m.opacity = 0.5; }
-    }
-    if (rock.ring && rock.ring.material && rock.ring.material.opacity === 0) {
-      _savedOp.push(rock.ring.material); rock.ring.material.opacity = 0.5;
-    }
-
+    /* One render with everything visible, so draw calls are really issued. */
     try { renderer.render(scene, camera); } catch (e) { renderFailed = true; }
 
     for (_i = 0; _i < _savedOp.length; _i++) _savedOp[_i].opacity = 0;
@@ -3383,17 +3391,14 @@ CHLOE.engine = CHLOE.engine || {};
         clearAttack(k);        // a reeling knight drops the swing he was winding
       }
     }
-    // quick emissive flash
+    // quick emissive flash — timestamp-based instead of per-flinch setTimeout
+    // to avoid a storm of callbacks when multi-hit abilities like tornado
+    // call flinch 4× per knight in quick succession.
     for (var i = 0; i < k.mats.length; i++) {
       var m = k.mats[i];
       if (m.emissive) { m.emissive.setHex(killed ? 0xe5173f : 0x881122); m.emissiveIntensity = 1.6; }
     }
-    window.setTimeout(function () {
-      for (var j = 0; j < k.mats.length; j++) {
-        var mm = k.mats[j];
-        if (mm.emissive) { mm.emissive.setHex(0x000000); mm.emissiveIntensity = 1.0; }
-      }
-    }, killed ? 900 : 180);
+    k._emissiveResetAt = performance.now() + (killed ? 900 : 180);
   };
 
   /* §22: what a hit is worth right now. The damage sum lives in combat3, not
@@ -4217,6 +4222,15 @@ CHLOE.engine = CHLOE.engine || {};
     b.atkCd = Math.max(0, b.atkCd - dt);
     b.repCd = Math.max(0, b.repCd - dt);
     b.hitFlash = Math.max(0, b.hitFlash - dt);
+    // batched emissive reset: flinch() sets a deadline on the knight, we clear
+    // it here once per frame instead of paying one setTimeout per hit.
+    if (k._emissiveResetAt && performance.now() >= k._emissiveResetAt) {
+      k._emissiveResetAt = 0;
+      for (var _ei = 0; _ei < k.mats.length; _ei++) {
+        var _em = k.mats[_ei];
+        if (_em.emissive) { _em.emissive.setHex(0x000000); _em.emissiveIntensity = 1.0; }
+      }
+    }
     /* Chip damage must never bank into a stagger, or the punish window stops
        being something you EARN with a heavy hit and becomes a metronome. */
     if (k.staggerMeter > 0) k.staggerMeter = Math.max(0, k.staggerMeter - t.staggerDecay * dt);
