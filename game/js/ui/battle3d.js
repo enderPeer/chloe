@@ -13,7 +13,13 @@
    with the room board that promised the player that stage.
    §25 fixes the miss: a swing the 3D layer says did NOT connect never reaches
    combat3 at all (see enemySwing), and the Water Wave throws what its cone
-   catches sideways instead of back — see shovePlan()/applyShove(). */
+   catches sideways instead of back — see shovePlan()/applyShove().
+   §32 adds the deathmatch: beginPvp() opens the Ring the way beginClone()
+   opens the mirror — a second kind of fight out of the same room, reusing the
+   arena, the hotbar and the HUD, with no knight squad and no victory/defeat
+   bookkeeping. See the §32 block near the bottom; every call into
+   engine/pvp.js is guarded, so a build with the multiplayer files deleted
+   still boots and plays exactly as it does today. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -34,6 +40,19 @@ CHLOE.ui.battle3d = (function () {
   var enemyTimer = null, nextSwingAt = 0;
   var slotEls = [];
   var timers = [];
+  /* §32 deathmatch state. `pvpFight` is this screen's own flag and means
+     exactly "a PvP match is being fought on this canvas" — it is never asked
+     to mean anything else, for the same reason ui/room3d.js needs a flag of
+     its own rather than reusing `inBattle`. `pvpOver` is set the instant we
+     start leaving, so a death and a match-over arriving in the same drain
+     cannot both route to the hub. */
+  var pvpFight = false, pvpOver = false;
+  var pvpSeat = 0, pvpBodies = 0;
+  var pvpQueue = [];        // wire events, queued by the listeners, drained on the frame
+  var pvpOff = [];          // [[evt, fn], …] so the unwire is exact
+  var pvpEpoch = 0;         // which match a listener belongs to — see wirePvpEvents
+  var pvpSeen = {};         // victim id -> already in the feed (one life, one row)
+  var boardSig = null, boardRows = [];
 
   function later(fn, ms) { var t = window.setTimeout(fn, ms); timers.push(t); return t; }
   function clearTimers() {
@@ -259,7 +278,59 @@ CHLOE.ui.battle3d = (function () {
       try { a3d.resize(); } catch (e) {}
     });
 
+    // §32: the three readouts a deathmatch owes the player, built once and
+    // hidden until beginPvp() shows them. A PvE round never knows they exist.
+    buildPvpHud(r);
+
     built = true;
+  }
+
+  /* ------------------------------------------------------ §32 the PvP HUD
+     Who is left, who is who, and who just died. Built ONCE here — build()
+     runs once per page, begin() runs once per fight, and a HUD rebuilt per
+     match is eight rows of garbage per lobby — and written only from
+     refresh() (the single per-frame writer) and from frame()'s event drain.
+
+     Styled inline for the reason §29's hit marker is: the CSS for this screen
+     is another session's file, and a HUD that depends on a rule somebody else
+     has to add first is a HUD that ships invisible. The class names ride on
+     the nodes anyway, so a later stylesheet has something to take over.
+
+     Positions are chosen against the existing furniture rather than guessed:
+     the enemy plate owns the top centre, .b3d-res the bottom left from 5.6rem
+     up, .b3d-evade and .b3d-controls the bottom right, .b3d-log the centre
+     above the hotbar. That leaves the top right (counter, then feed under it)
+     and the upper left flank (the board) genuinely free at eight rows. */
+  function buildPvpHud(r) {
+    /* One wrapper so the whole HUD shows and hides on a single write. It is a
+       plain static block — the children are absolutely positioned and resolve
+       against #screen-battle3d exactly as every other .b3d-* node does — and
+       display:none on it still takes them all off screen. */
+    els.pvp = ui.el('div', 'b3d-pvp');
+    els.pvp.style.display = 'none';
+
+    els.pvpAlive = ui.el('div', 'b3d-pvp-alive', '');
+    els.pvpAlive.style.cssText = 'position:absolute;right:.9rem;' +
+      'top:calc(.8rem + env(safe-area-inset-top));z-index:6;pointer-events:none;' +
+      'padding:.3rem .65rem;border:1px solid #2a2630;border-top:2px solid var(--red);' +
+      'border-radius:8px;background:rgba(10,10,12,.72);font-family:var(--font-head);' +
+      'letter-spacing:.14em;font-size:.9rem;color:var(--text);text-shadow:0 1px 3px #000;';
+    els.pvp.appendChild(els.pvpAlive);
+
+    els.pvpFeed = ui.el('div', 'b3d-pvp-feed');
+    els.pvpFeed.style.cssText = 'position:absolute;right:.9rem;' +
+      'top:calc(3.3rem + env(safe-area-inset-top));z-index:6;pointer-events:none;' +
+      'display:flex;flex-direction:column;align-items:flex-end;gap:.25rem;' +
+      'width:min(320px,54vw);';
+    els.pvp.appendChild(els.pvpFeed);
+
+    els.pvpBoard = ui.el('div', 'b3d-pvp-board');
+    els.pvpBoard.style.cssText = 'position:absolute;left:.9rem;top:20%;z-index:6;' +
+      'pointer-events:none;display:flex;flex-direction:column;gap:.25rem;' +
+      'width:min(230px,38vw);';
+    els.pvp.appendChild(els.pvpBoard);
+
+    r.appendChild(els.pvp);
   }
 
   function resBar(parent, cls, label) {
@@ -416,6 +487,29 @@ CHLOE.ui.battle3d = (function () {
     setRes(els.hpBar, snap.hp, snap.max.hp);
     setRes(els.manaBar, snap.mana, snap.max.mana);
     setRes(els.staBar, snap.sta, snap.max.sta);
+    /* §32: the top plate and the PvP board answer the same question — who am
+       I fighting and how much of them is left — so exactly one of them speaks.
+       Split out rather than branched inside, so the PvE path below is the
+       same code it has always been. */
+    if (pvpFight) refreshPvp(snap); else refreshEnemyPlate(snap);
+    refreshHotbar(snap);
+
+    els.evade.classList.toggle('ready', snap.evade.ready);
+    els.evade.classList.toggle('iframe', snap.iframe);
+
+    if (snap.casting) {
+      els.castWrap.classList.remove('hidden');
+      els.castFill.style.width = Math.round(snap.casting.pct * 100) + '%';
+    } else {
+      els.castWrap.classList.add('hidden');
+    }
+
+    // crosshair turns hot when the knight is in reach of slot 1
+    var d = a3d.debug ? a3d.debug() : null;
+    els.cross.classList.toggle('in-reach', !!(d && d.knightDist <= 2.8));
+  }
+
+  function refreshEnemyPlate(snap) {
     ui.setBar(els.enemyBar, snap.enemy.life, snap.enemy.max);
     /* §21: name it with the level it actually is, and how many. The plate
        is the only place the fight tells you he has grown. */
@@ -451,21 +545,6 @@ CHLOE.ui.battle3d = (function () {
                : ('  ·  Lv ' + (lo === hi ? lo : lo + '-' + hi));
     els.enemyName.textContent = snap.enemy.name + lvText +
       (snap.enemy.count > 1 ? '  ·  ' + snap.enemy.alive + '/' + snap.enemy.count : '');
-    refreshHotbar(snap);
-
-    els.evade.classList.toggle('ready', snap.evade.ready);
-    els.evade.classList.toggle('iframe', snap.iframe);
-
-    if (snap.casting) {
-      els.castWrap.classList.remove('hidden');
-      els.castFill.style.width = Math.round(snap.casting.pct * 100) + '%';
-    } else {
-      els.castWrap.classList.add('hidden');
-    }
-
-    // crosshair turns hot when the knight is in reach of slot 1
-    var d = a3d.debug ? a3d.debug() : null;
-    els.cross.classList.toggle('in-reach', !!(d && d.knightDist <= 2.8));
   }
 
   function log(t) { els.log.textContent = t || ''; }
@@ -721,6 +800,12 @@ CHLOE.ui.battle3d = (function () {
     } else {
       a3d.playAbility(a.id, a.anim, a.animSpeed, total + (a.recoverMs || 0));
     }
+    /* §32: the other clients play this swing on my body. It goes out from
+       HERE — the one place that knows a press actually became a cast — and it
+       carries the knight PATTERN the ability maps to, because a remote player
+       is a knight rig. The mirror fight already owns that translation, so it
+       is asked for rather than written a second time. */
+    if (pvpFight) declareSwing(a);
     log(a.name);
     /* §29: the round that empties the magazine starts the reload, and the
        reload is 3.2 seconds you have to be told about — the hotbar dial shows
@@ -1064,6 +1149,16 @@ CHLOE.ui.battle3d = (function () {
       var mult = stag * (extraMult > 0 ? extraMult : 1);
       var res = C3.hitEnemy(abilityId, mult, ti);
       if (!res) return;
+      /* §32 THE HIT DECLARATION. This is the only place in the game that holds
+         all four facts at once — which ability, which body, what multiplier it
+         was priced at, and the damage that came back — so it is where the wire
+         is told. The attacker owns "my swing connected with you for N of type
+         T" precisely so a hit never waits a round trip to be felt; sending a
+         number we re-derived on the other side would be two clocks by another
+         road. Sent AFTER hitEnemy, never instead of it: the number on the wire
+         is the number that was rolled here, or the picture and the damage
+         disagree the way §21 spent a fight learning they must not. */
+      if (pvpFight) declareHit(abilityId, ti, res);
       if (res.killed) shotKilled = true;
       a3d.flinch(res.dmg, res.killed, ti);
       if (!shown++) {
@@ -1080,7 +1175,12 @@ CHLOE.ui.battle3d = (function () {
         if (res.stunMs > 0) stunShown = res.stunMs / 1000;
         floatStun(ti, stunned++);
       }
-      if (res.killed) log('A Hollow Knight falls. ' + C3.aliveCount() + ' left.');
+      /* §32: in the Ring the attacker does NOT get to announce a death. The
+         victim owns "I died, and X killed me" — exactly one peer ever says it,
+         and that is what makes every client pay the same +1 level to the same
+         player — so a local `killed` here is a prediction, not a result. The
+         kill feed speaks when the claim arrives. */
+      if (res.killed && !pvpFight) log('A Hollow Knight falls. ' + C3.aliveCount() + ' left.');
     });
     if (tag && targets.length > 1) log(tag + ' — ' + targets.length + ' caught in it.');
     /* The stun line owns the log last, on purpose: it is the only one that
@@ -1338,7 +1438,10 @@ CHLOE.ui.battle3d = (function () {
       }
     }
 
-    if (!C3.isOver() && now >= nextSwingAt) {
+    /* §32: no knight ever swings in a deathmatch. The scheduler is skipped
+       rather than starved of targets, because enemySwing() rolls a pattern off
+       the knighttree and telegraphs it on a body that belongs to a player. */
+    if (!pvpFight && !C3.isOver() && now >= nextSwingAt) {
       scheduleSwing(now);
       enemySwing();
     }
@@ -1360,6 +1463,13 @@ CHLOE.ui.battle3d = (function () {
         }
       }
     }
+
+    /* §32: the deathmatch's per-frame duties, in the order they have to
+       happen — drain what the wire said (kills, the match ending), hand the
+       arena every other player's latest transform, then let engine/pvp.js send
+       mine. tickSend() rate-limits internally to data.pvp.sendHz, so calling
+       it once per frame is the contract rather than a leak. */
+    if (pvpFight) pumpPvp();
 
     refresh();
     if (C3.isOver()) { finish(); return; }
@@ -1611,6 +1721,11 @@ CHLOE.ui.battle3d = (function () {
     var snap = C3.snapshot();
     active = false;
     if (cloneFight) finishClone();
+    /* §32: a deathmatch never reaches the result cards below. combat3 ends a
+       PvP fight exactly one way — the local player died — and showDefeat() is
+       a run-ending panel whose button funnels into end('defeat'), which is the
+       one call this mode must never make. eliminated() owns that exit. */
+    if (pvpFight) { eliminated(null); return; }
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     a3d.stopAbility();
     /* §21: the fight is over, so put the player in cursor mode BEFORE the
@@ -1788,6 +1903,11 @@ CHLOE.ui.battle3d = (function () {
 
   function end(result) {
     active = false;
+    /* §32: nothing routes a deathmatch through here — eliminated() does — but
+       if some future path ever does, the match state must not survive it into
+       the next PvE round, where a stale pvpFight would silently hide the enemy
+       plate and skip every knight swing. */
+    if (pvpFight) { pvpFight = false; pvpOver = true; unwirePvpEvents(); showPvpHud(false); }
     clearTimers();
     unwireKeys();
     hidePrompt();
@@ -1873,6 +1993,645 @@ CHLOE.ui.battle3d = (function () {
     var cloneai = CHLOE.engine.cloneai;
     if (cloneai) cloneai.reset();
     cloneTimer = null;
+  }
+
+  /* ================================================================ §32 PvP
+     THE RING — eight players, one life apiece, last one standing.
+
+     The mirror fight above is the precedent and this follows it deliberately:
+     a SECOND kind of fight launched from the same room, reusing the arena, the
+     hotbar and this whole HUD, spawning no knight squad, and ending without
+     the victory()/defeat() bookkeeping that owns a PvE round.
+
+     What this screen owns of the mode:
+       getting in      beginPvp()      — force the Ring, seat the player, spawn
+                                         the other bodies, no spawnSquad
+       telling the net declareHit()/declareSwing()/tickSend()
+       drawing it      the alive counter, the board, the kill feed
+       getting out     eliminated() / matchOver()
+     Everything about the network itself is engine/pvp.js's, and every call
+     into it is guarded: with the multiplayer files deleted this file still
+     loads and every PvE path through it is the code it was before. */
+
+  function pvp() { return CHLOE.engine.pvp || null; }
+
+  /* The result string an eliminated player goes home with. It is deliberately
+     NOT 'defeat'. 'defeat' funnels through CHLOE.ui.scene.onBattleEnd, which
+     ui/room3d.js wraps, and that branch calls CHLOE.game.startNew() ->
+     party.newGame(): members, levels, the tree, skill points, all five bind
+     stores, shards, flags and runStats, gone. Correct for a PvE run, and it
+     would destroy the very levels this mode is built around on the one event
+     the mode is built around.
+     ui/room3d.js carries the matching branch. A room3d that has not grown one
+     yet still lands safely, because its onBattleEnd falls past every branch it
+     does know into backToRoom() — which is exactly where a dead player goes. */
+  var PVP_RESULT = 'pvpOut';
+
+  /* data/pvp.js holds this mode's numbers (AGENTS.md rule 7 — an engine or a
+     screen typing a tuning constant is a defect). The fallbacks are the same
+     courtesy itemCooldownMs() pays above: a build whose data file predates a
+     key still runs, it just runs on the floor value. */
+  function PV(key, dflt) {
+    var d = CHLOE.data.pvp;
+    var v = d ? d[key] : undefined;
+    return (typeof v === 'number' && isFinite(v)) ? v : dflt;
+  }
+  /* Per-seat body tint as CSS. data/pvp.js states the colours as 0x… numbers
+     because arena3d wants them that way; the board wants the same eight hues
+     so a name in the list and a body on the floor are obviously the same
+     player. One source, two spellings, converted here. */
+  function seatColor(seat) {
+    var list = (CHLOE.data.pvp && CHLOE.data.pvp.colors) || null;
+    var c = list ? list[seat] : null;
+    if (typeof c !== 'number') return '#8d8794';
+    var s = (c >>> 0).toString(16);
+    while (s.length < 6) s = '0' + s;
+    return '#' + s.slice(-6);
+  }
+
+  /* ---------------------------------------------------- seat <-> body index
+     arena3d's knights[0] is structurally special: it is aliased as `knight`,
+     keeps the source GLB's own materials rather than a clone, and feeds
+     debug(). Tinting it would repaint every body in the scene, so remote
+     players start at index 1 and index 0 stays unused for the whole match.
+     That leaves indices 1..n-1 for the n-1 other seats, and this is the
+     bijection: seats below mine shift up by one, seats above mine keep their
+     number. It is fixed for the match on purpose — the array index IS the
+     body's identity in arena3d (every command is A.thing(..., index) and the
+     attack timers capture the body itself), so a seat that changed index
+     mid-match would silently re-target every in-flight timer aimed at it.
+     engine/pvp.js freezes that book at match start and is the AUTHORITY on it,
+     so it is asked rather than second-guessed: it numbers bodies down the
+     seats that are actually occupied, and against a sparse roster — nobody
+     ever took seat 2 — a rule derived from seat numbers alone would hand back
+     a different index for every seat above the gap. The arithmetic below is
+     the floor for a build whose pvp module has no book yet, not a second
+     opinion about one that has.
+     -1 is "no such body" and "no such seat", which is engine/pvp.js's own
+     spelling — one convention, so a caller never has to test for two. */
+  function bodyOfSeat(seat) {
+    var P = pvp(), b;
+    if (P && typeof P.bodyOf === 'function') {
+      b = P.bodyOf(seat);
+      return (typeof b === 'number' && b > 0) ? b : -1;
+    }
+    if (typeof seat !== 'number' || seat === pvpSeat) return -1;
+    return seat < pvpSeat ? seat + 1 : seat;
+  }
+  function seatOfBody(i) {
+    var P = pvp(), s;
+    if (P && typeof P.seatOfBody === 'function') {
+      s = P.seatOfBody(i);
+      return (typeof s === 'number' && s >= 0) ? s : -1;
+    }
+    if (!(i > 0)) return -1;
+    return i <= pvpSeat ? i - 1 : i;
+  }
+
+  /* ---------- reading the match, always defensively ----------
+     engine/pvp.js is contracted never to throw, but this screen is on the
+     frame path and a net layer having a bad day must not take the fight with
+     it. Every read below answers something usable when the module is missing,
+     half-built, or mid-reconnect. */
+  function roster() {
+    var P = pvp();
+    if (!P || typeof P.roster !== 'function') return [];
+    var list = null;
+    try { list = P.roster(); } catch (e) { list = null; }
+    return (list && list.length) ? list : [];
+  }
+  function meId() {
+    var P = pvp();
+    if (!P || typeof P.me !== 'function') return null;
+    try { var m = P.me(); return m ? m.id : null; } catch (e) { return null; }
+  }
+  function isMe(id) { var m = meId(); return !!(id && m && id === m); }
+  function nameOf(id) {
+    var list = roster();
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i].name || id;
+    return id || 'someone';
+  }
+
+  /* ---------- what this screen sends ---------- */
+
+  /* {ability, target, multiplier, damage} -> the wire. The target is named by
+     SEAT, never by body index: the index is this client's private arrangement
+     of the arena's array, and the seat is the thing every peer agrees on. */
+  function declareHit(abilityId, bodyIndex, res) {
+    var P = pvp();
+    if (!P || typeof P.declareHit !== 'function' || !res) return;
+    var seat = seatOfBody(bodyIndex);
+    /* -1 is a body no seat owns — knights[0], or a target index from an arena
+       that is not running this match. Declaring a hit on it would put a
+       nonexistent seat on the wire for every peer to look up and discard. */
+    if (!(seat >= 0)) return;
+    var ab = (CHLOE.data.abilities || {})[abilityId] || {};
+    try { P.declareHit(seat, res.dmg, ab.type || null, abilityId); } catch (e) {}
+  }
+
+  /* My swing, so it plays on my body on their screens. A remote player is a
+     knight rig, so what goes out is a knight PATTERN id; the mirror fight
+     already owns the ability -> pattern translation and is asked for it rather
+     than a second copy being written here. No cloneai, no map, no message —
+     the fight is unharmed, my body simply does not wind up on their screen. */
+  function declareSwing(a) {
+    var P = pvp();
+    if (!P || typeof P.declareSwing !== 'function' || !a) return;
+    var ca = CHLOE.engine.cloneai;
+    var pat = (ca && typeof ca.abilityToPattern === 'function') ? ca.abilityToPattern(a.id) : null;
+    if (!pat) return;
+    try { P.declareSwing(pat); } catch (e) {}
+  }
+
+  /* ---------- the frame's three duties ---------- */
+  function pumpPvp() {
+    var P = pvp();
+    if (!P) return;
+    /* Three separate try blocks, not one: a throw in the drain must not cost
+       the frame its transforms, and neither must cost it the send. */
+    try { drainPvp(); } catch (e) {}
+    try { pushRemotes(P); } catch (e) {}
+    try { if (typeof P.tickSend === 'function') P.tickSend(); } catch (e) {}
+  }
+
+  /* The wire's picture of every other player, handed to the arena once per
+     frame. engine/pvp.js owns the peer registry and arena3d owns the bodies;
+     this screen is the one place that holds a seat and a body index at the
+     same time, so it is where they meet. setRemote records a TARGET the arena
+     eases toward over data.pvp.interpMs, so a frame that writes the same
+     values twice — engine/pvp.js may push them too — costs nothing and cannot
+     contradict itself. */
+  function pushRemotes(P) {
+    if (typeof P.remoteOf !== 'function' || typeof a3d.setRemote !== 'function') return;
+    for (var seat = 0; seat < pvpBodies; seat++) {
+      if (seat === pvpSeat) continue;
+      var i = bodyOfSeat(seat);
+      if (!(i > 0)) continue;
+      var st = P.remoteOf(seat);
+      if (st) a3d.setRemote(i, st);
+    }
+  }
+
+  /* ---------- the kill feed, event-driven ----------
+     Never diffed out of refresh(). A feed built by comparing this frame's
+     roster with the last one MISSES a death (two in one frame collapse to one
+     row) and INVENTS one (a roster resend redraws what already scrolled by).
+     The wire says it once, the listener queues it, and the frame drains it —
+     which also keeps every DOM write on the frame, where the rest of this
+     screen's writes live. */
+  function wirePvpEvents() {
+    var P = pvp();
+    if (!P || typeof P.on !== 'function') return;
+    unwirePvpEvents();
+    pvpEpoch++;
+    var epoch = pvpEpoch;
+    ['kill', 'died', 'over', 'error'].forEach(function (evt) {
+      var fn = function (msg) {
+        /* Belt as well as braces. pvp.off() takes a listener back off, but a
+           build without one would leave last lobby's handler registered, and
+           two lobbies of handlers draw every kill twice. The epoch it closed
+           over retires it either way. */
+        if (epoch !== pvpEpoch || !pvpFight) return;
+        pvpQueue.push({ evt: evt, msg: msg || {} });
+      };
+      try { P.on(evt, fn); pvpOff.push([evt, fn]); } catch (e) {}
+    });
+  }
+  function unwirePvpEvents() {
+    var P = pvp();
+    for (var i = 0; i < pvpOff.length; i++) {
+      if (P && typeof P.off === 'function') {
+        try { P.off(pvpOff[i][0], pvpOff[i][1]); } catch (e) {}
+      }
+    }
+    pvpOff.length = 0;
+    pvpEpoch++;
+    pvpQueue.length = 0;
+  }
+
+  function drainPvp() {
+    while (pvpQueue.length) {
+      var e = pvpQueue.shift();
+      if (e.evt === 'error') { log(e.msg.message || 'The connection stumbled.'); continue; }
+      if (e.evt === 'over') { matchOver(e.msg.winner); continue; }
+      onPvpDeath(e.msg);
+    }
+  }
+
+  /* One life, one row. The victim is the only peer that ever says "I died,
+     and X killed me" — the whole point of the ownership split, and what makes
+     every client pay the same +1 level to the same player — so a death is
+     keyed on the VICTIM, and a second event naming the same victim is a
+     resend or the derived 'kill' twin of a 'died', not a second death. */
+  function onPvpDeath(msg) {
+    var victim = msg.victim || msg.id || null;
+    if (!victim || pvpSeen[victim]) return;
+    pvpSeen[victim] = true;
+    var killer = msg.killer || msg.by || null;
+    var vn = nameOf(victim);
+    var kn = (killer && killer !== victim) ? nameOf(killer) : null;
+    var mine = !!(killer && isMe(killer));
+    feed(kn ? (kn + '  ▸  ' + vn) : (vn + ' is out'), mine);
+    if (mine) onMyKill(msg);
+    if (isMe(victim)) eliminated(kn);
+  }
+
+  /* A kill raises the killer one level, immediately and mid-match. The grant
+     itself belongs to engine/progression.js; what this screen owes the player
+     is the two halves of it that are otherwise invisible:
+       - ONE line. A level-up normally toasts once per learnset move — the
+         first kill alone fires three — and per-kill toast spam is not what a
+         deathmatch should be looking at. "LEVEL n", once.
+       - combat3.refreshLeaderStats(). st.max is written in exactly two places,
+         start() and the leader swap, and neither of them is a mid-fight level,
+         so without this the +life/+stamina/+magic the kill just bought buys
+         nothing until the next fight. Idempotent, so a combat3 or a pvp that
+         also calls it costs nothing.
+     Everything else about a mid-fight level is already live: binds() self-heals
+     and auto-places the new ability, readiness() lazily creates its cooldown,
+     and refreshHotbar rebuilds this strip the moment the slot signature moves. */
+  function onMyKill(msg) {
+    if (C3 && typeof C3.refreshLeaderStats === 'function') {
+      try { C3.refreshLeaderStats(); } catch (e) {}
+    }
+    var lv = msg.level;
+    if (typeof lv !== 'number') {
+      var m = (party && party.active) ? party.active() : null;
+      lv = m ? m.level : null;
+    }
+    if (typeof lv === 'number') prompt('LEVEL ' + lv, 'banner', 1500);
+  }
+
+  function feed(text, mine) {
+    if (!els.pvpFeed) return;
+    var row = ui.el('div', 'b3d-pvp-kill' + (mine ? ' mine' : ''), text);
+    row.style.cssText = 'padding:.2rem .5rem;border-radius:7px;' +
+      'background:rgba(10,10,12,.72);border:1px solid #2a2630;' +
+      'border-right:3px solid ' + (mine ? 'var(--red)' : '#4a4550') + ';' +
+      'font-family:var(--font-head);letter-spacing:.08em;font-size:.74rem;' +
+      'color:' + (mine ? 'var(--text)' : 'var(--dim)') + ';text-shadow:0 1px 3px #000;';
+    els.pvpFeed.insertBefore(row, els.pvpFeed.firstChild || null);
+    while (els.pvpFeed.childNodes.length > PV('feedRows', 5)) {
+      els.pvpFeed.removeChild(els.pvpFeed.lastChild);
+    }
+    later(function () { if (row.parentNode) row.parentNode.removeChild(row); },
+          PV('feedMs', 6500));
+  }
+
+  /* ---------- the board ----------
+     refreshHotbar's discipline, for exactly its reason: this runs every frame.
+     The SHAPE of the roster — who is in it and in which seat — rebuilds the
+     DOM; everything that merely CHANGES (life, kills, level, still standing)
+     is a textContent write or a class toggle on nodes that already exist. */
+  function boardSignature(list) {
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      out.push(list[i].seat + ':' + (list[i].id || '-') + ':' + (list[i].name || ''));
+    }
+    return out.join('|');
+  }
+
+  function buildBoard(list) {
+    ui.clear(els.pvpBoard);
+    boardRows = [];
+    boardSig = boardSignature(list);
+    for (var i = 0; i < list.length; i++) {
+      var r = list[i];
+      var node = ui.el('div', 'b3d-pvp-row' + (r.isMe ? ' me' : ''));
+      node.style.cssText = 'display:flex;align-items:baseline;gap:.4rem;' +
+        'padding:.22rem .45rem;border:1px solid #2a2630;border-left:3px solid ' +
+        seatColor(r.seat) + ';border-radius:7px;background:rgba(10,10,12,.72);' +
+        'font-size:.76rem;letter-spacing:.04em;text-shadow:0 1px 3px #000;';
+      var nm = ui.el('span', 'nm', r.name || ('Seat ' + r.seat));
+      nm.style.cssText = 'flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;' +
+        'white-space:nowrap;font-family:var(--font-head);letter-spacing:.08em;' +
+        'color:' + (r.isMe ? 'var(--text)' : '#b9b2bd') + ';';
+      var lv = ui.el('span', 'lv', '');
+      lv.style.cssText = 'flex:0 0 auto;color:var(--dim);font-size:.68rem;';
+      var kills = ui.el('span', 'kills', '');
+      kills.style.cssText = 'flex:0 0 auto;color:#e8cd7f;font-size:.68rem;';
+      var hp = ui.el('span', 'hp', '');
+      hp.style.cssText = 'flex:0 0 auto;color:var(--dim);font-size:.68rem;min-width:2.2em;text-align:right;';
+      node.appendChild(nm); node.appendChild(lv); node.appendChild(kills); node.appendChild(hp);
+      els.pvpBoard.appendChild(node);
+      boardRows.push({ node: node, nm: nm, lv: lv, kills: kills, hp: hp,
+                       id: r.id, seat: r.seat, down: null });
+    }
+  }
+
+  /* This player's life, from whoever actually owns the number: mine is
+     combat3's (I own it), everyone else's is whatever their last state packet
+     said (they own theirs). null when nobody has said yet — a dash, never a
+     zero, because a zero reads as "dead" and would call the match early on
+     screen. */
+  function lifeOf(r, snap) {
+    if (r.isMe || isMe(r.id)) return snap ? Math.round(snap.hp) : null;
+    var P = pvp();
+    if (P && typeof P.remoteOf === 'function') {
+      var st = null;
+      try { st = P.remoteOf(r.seat); } catch (e) { st = null; }
+      if (st && typeof st.hp === 'number') return Math.round(st.hp);
+    }
+    return (typeof r.hp === 'number') ? Math.round(r.hp) : null;
+  }
+
+  function refreshBoard(list, snap) {
+    if (boardSignature(list) !== boardSig) buildBoard(list);
+    for (var i = 0; i < boardRows.length && i < list.length; i++) {
+      var row = boardRows[i], r = list[i];
+      var down = (r.alive === false);
+      row.lv.textContent = 'Lv ' + (r.level || 1);
+      row.kills.textContent = (r.kills > 0) ? ('⚔' + r.kills) : '';
+      var hp = lifeOf(r, snap);
+      row.hp.textContent = down ? '—' : (hp == null ? '' : String(hp));
+      row.node.classList.toggle('down', down);
+      /* The only per-frame STYLE write in this screen, and it is fenced behind
+         a cached flip so it happens once per death rather than sixty times a
+         second. The class is on the node too — a stylesheet that later takes
+         these rows over gets `.down` and needs no JS change. */
+      if (row.down !== down) {
+        row.down = down;
+        row.node.style.opacity = down ? '.4' : '1';
+        row.node.style.filter = down ? 'grayscale(.8)' : 'none';
+      }
+    }
+  }
+
+  function refreshPvp(snap) {
+    var P = pvp();
+    var list = roster();
+    var alive = null;
+    if (P && typeof P.alive === 'function') {
+      try { alive = P.alive(); } catch (e) { alive = null; }
+    }
+    if (typeof alive !== 'number') {
+      alive = 0;
+      for (var i = 0; i < list.length; i++) if (list[i].alive !== false) alive++;
+    }
+    var total = Math.max(alive, list.length || pvpBodies);
+    els.pvpAlive.textContent = alive + ' / ' + total + ' ALIVE';
+    refreshBoard(list, snap);
+  }
+
+  function showPvpHud(on) {
+    if (!built) return;
+    if (els.pvp) els.pvp.style.display = on ? 'block' : 'none';
+    /* The enemy plate names the Hollow Black Knight and counts a squad that
+       is not on the floor. Hidden rather than repurposed: the alive counter
+       answers the same question in the mode's own words, and a plate rewritten
+       to mean something else is a plate two modes have to keep in step. */
+    if (els.enemyPlate) els.enemyPlate.style.display = on ? 'none' : '';
+    /* Emptied on BOTH transitions, not just on the way in. A feed row left
+       behind is last lobby's kill waiting to reappear the moment the next one
+       opens, and the board's rows are last match's roster — which the next
+       match does not necessarily overwrite, because it may be smaller. */
+    if (els.pvpFeed) ui.clear(els.pvpFeed);
+    if (els.pvpBoard) ui.clear(els.pvpBoard);
+    boardRows = []; boardSig = null;
+  }
+
+  /* ---------- getting in ---------- */
+
+  /* combat3.start() needs an enemy DEFINITION to build a fight state from, and
+     a deathmatch has no NPC to name. The mirror fight has the same problem and
+     answers it with data/enemies.js's 'clone' entry — a stand-in whose stats
+     are overwritten at runtime — so this reuses it rather than minting a
+     second one. A data file that grows a 'pvp' entry wins automatically. */
+  function pvpEnemyId(opts) {
+    var e = CHLOE.data.enemies || {};
+    if (opts && opts.enemyId && e[opts.enemyId]) return opts.enemyId;
+    if (e.pvp) return 'pvp';
+    if (e.clone) return 'clone';
+    for (var k in e) { if (e.hasOwnProperty(k)) return k; }
+    return 'clone';
+  }
+
+  function ringStage() {
+    return ((CHLOE.data && CHLOE.data.stages) || {}).ring || null;
+  }
+
+  /* How many SEATS this match has. Not the head count: seats are handed out by
+     the host and a player who left still owns his for the whole match (see the
+     seat/index note above), so the arrangement is sized by the highest seat in
+     play, never by how many are currently standing. */
+  function seatCount(list, opts) {
+    var n = Math.max(pvpSeat + 1, (opts && opts.players) || 0, list.length);
+    for (var i = 0; i < list.length; i++) {
+      if (typeof list[i].seat === 'number' && list[i].seat + 1 > n) n = list[i].seat + 1;
+    }
+    return Math.max(2, Math.min(n, PV('maxPlayers', 8)));
+  }
+
+  function beginPvp(opts) {
+    opts = opts || {};
+    ui = CHLOE.ui; party = CHLOE.engine.party;
+    C3 = CHLOE.engine.combat3; a3d = CHLOE.engine.arena3d;
+    var P = pvp();
+    if (!P) { console.warn('[battle3d] engine/pvp.js is not loaded — no deathmatch'); return false; }
+
+    var list = roster();
+    var me = null;
+    try { me = (typeof P.me === 'function') ? P.me() : null; } catch (e) { me = null; }
+    pvpSeat = (typeof opts.seat === 'number') ? opts.seat
+            : ((me && typeof me.seat === 'number') ? me.seat : 0);
+    var seats = seatCount(list, opts);
+    pvpBodies = seats;
+
+    /* Nothing in this game heals between fights — party.fullHeal has exactly
+       one caller, and it is in the dead 2D flow — so a player walking out of a
+       round-six knight fight would arrive in the Ring on whatever life the
+       knights left him, against seven people on full. BEFORE C3.start, which
+       reads m.hp straight off the member. */
+    if (party && typeof party.fullHeal === 'function') party.fullHeal();
+
+    /* combat3 still needs one enemy row per BODY INDEX: applyHits prices every
+       hit through hitEnemy(abilityId, mult, index), and an index with no entry
+       comes back null — no damage, and so no declaration to send either. The
+       count here is therefore the seat count, and no knight is ever spawned
+       against it. */
+    var s = C3.start(pvpEnemyId(opts), seats);
+    if (!s) { console.warn('[battle3d] cannot start the deathmatch'); return false; }
+    if (!built) build();
+    active = true;
+    pvpFight = true; pvpOver = false;
+    pvpSeen = {}; boardSig = null;
+
+    /* §24's rule, and the reason it is a rule: force the floor BEFORE the
+       arena builds, then READ IT BACK — applyStage verifies against
+       debug().stage rather than trusting setStage's return, which is what the
+       keep-in-step warnings in three separate files are about. A board must
+       never promise a floor you do not land on, and here it is load-bearing
+       twice over: the eight seats are authored on the Ring entry, so a match
+       that quietly opened in the church would stack every player on one spawn
+       point, inside the separation push, on frame one. */
+    var stage = applyStage(ringStage());
+    curStage = stage;
+    if (!stage) {
+      console.warn('[battle3d] the Ring did not take — seats fall back to the stage spawn');
+    }
+
+    /* Seat the local player before anything places him: cfgSpawn is read by
+       A.reset() and by the stage-switch path, so the seat has to be on record
+       before either of them runs. */
+    if (typeof a3d.setSeat === 'function') a3d.setSeat(pvpSeat);
+
+    ui.show('battle3d');
+    if (!inited3d) { a3d.init(els.canvas); inited3d = true; }
+    a3d.reset();
+    /* NO spawnSquad. There are no knights in a deathmatch — every other body
+       on the floor is a player, and every one of them is driven from the wire
+       rather than by a brain. */
+    if (typeof a3d.spawnRemotes === 'function') a3d.spawnRemotes(Math.max(0, seats - 1));
+    a3d.resize();
+    showPvpHud(true);
+
+    /* The same loading gate begin() holds the fight behind, for the same two
+       reasons: knight.glb may not have arrived (a riggless body is a totem,
+       and eight of them is not a match), and the gate is what warms the
+       shaders that would otherwise hitch on the first ability. */
+    var load = CHLOE.ui.loading;
+    if (load && a3d.assetsReady && !a3d.assetsReady()) {
+      load.show('Opening the Ring…');
+      load.waitFor(
+        function () { return a3d.assetsReady(); },
+        function (setProgress) {
+          var pr = a3d.assetProgress ? a3d.assetProgress() : null;
+          if (pr) {
+            setProgress(pr.done, pr.total + 1,
+              pr.done >= pr.total ? 'Lighting the rim…' : 'Opening the Ring…');
+          }
+        },
+        function () { load.hide(); startPvpFight(seats); }
+      );
+      return true;
+    }
+    startPvpFight(seats);
+    return true;
+  }
+
+  /* Everything that must not happen until the Ring is actually on screen. */
+  function startPvpFight(seats) {
+    if (!active) return;
+    a3d.start();
+    a3d.stopAbility();
+    tintRemotes(seats);
+
+    buildHotbar(C3.snapshot());
+    refresh();
+    log('The Ring is open. One life each — 1-9 to strike, SPACE to evade.');
+    prompt('THE RING — ' + seats + ' IN, ONE OUT', 'banner', 2400);
+
+    /* The opening grace (§32). Every fighter starts inside full-damage pistol
+       range of both neighbours on a floor with no cover, so without this the
+       match is decided in its first second by whoever clicked first — see the
+       arithmetic on data/pvp.js spawnGraceMs. Each client grants its OWN,
+       which needs no agreement between them: a declared hit is refused by the
+       victim's invulnerable() check, the same guard that refuses one mid-dodge,
+       and the victim is the only authority on its own life anyway. */
+    var graceMs = PV('spawnGraceMs', 3000);
+    if (graceMs > 0 && typeof C3.grantIframes === 'function') {
+      C3.grantIframes(graceMs);
+      log('No blood for ' + Math.round(graceMs / 1000) + 's — find your ground.');
+    }
+
+    wireKeys();
+    wirePvpEvents();
+    lastT = performance.now();
+    /* No scheduleSwing: nothing on this floor swings unless a player does. */
+    rafId = requestAnimationFrame(frame);
+  }
+
+  /* Identity is the TINT, and it has to be the material colour. Emissive is
+     triple-booked in the arena — the hit flash, the kill flash and the
+     level-up tell all write it and all reset it unconditionally to black — so
+     an emissive identity marker is stomped the first time its owner is hit.
+     arena3d owns that distinction; this only says which colour belongs to
+     which seat, so every client paints the same player the same. */
+  function tintRemotes(seats) {
+    if (typeof a3d.tintRemote !== 'function') return;
+    var colors = (CHLOE.data.pvp && CHLOE.data.pvp.colors) || [];
+    for (var seat = 0; seat < seats; seat++) {
+      var i = bodyOfSeat(seat);
+      if (!(i > 0) || typeof colors[seat] !== 'number') continue;
+      try { a3d.tintRemote(i, colors[seat]); } catch (e) {}
+    }
+  }
+
+  /* ---------- getting out ----------
+     THE LOCAL PLAYER'S DEATH, and the one thing it must not do.
+
+     Not end('defeat'). end() funnels through CHLOE.ui.scene.onBattleEnd, which
+     ui/room3d.js wraps, and its 'defeat' branch calls CHLOE.game.startNew() ->
+     party.newGame(): members, levels, the tree, skill points, all five bind
+     stores, shards, flags and runStats. That is right for a PvE run and
+     catastrophic here — dying is the ordinary event of this mode, and it would
+     wipe the ladder the mode exists to climb, every single time.
+
+     So this does end()'s teardown by hand — timers, keys, prompts, the rAF —
+     and then calls a3d.releaseLock() where end() calls a3d.stop(). The
+     difference is the whole reason for the hand copy: releaseLock hands back
+     the cursor and the keyboard while the arena's own render loop keeps
+     running, which is what a spectator beat wants; stop() would freeze the
+     Ring on the frame you died on and hand the player a still photograph. */
+  function eliminated(killerName) {
+    /* SAY IT BEFORE TEARING ANYTHING DOWN. The victim owns the death claim,
+       and engine/pvp.js's own backstop for it lives in tickSend() — which this
+       function is about to stop calling, because it cancels the rAF. Announced
+       from here, the claim cannot be lost to that ordering; announced only by
+       the backstop, a death that combat3 resolved between two frames would
+       leave every other player fighting a corpse that never fell.
+       declareDeath is idempotent by contract, so the ordinary case — the wire
+       told us we died, and pvp already knows — costs nothing. The killer is
+       deliberately not named here: pvp knows who last hit us and this screen
+       does not. */
+    var P = pvp();
+    if (P && typeof P.declareDeath === 'function') {
+      try { P.declareDeath(); } catch (e) {}
+    }
+    leaveRing(
+      killerName ? ('ELIMINATED — ' + String(killerName).toUpperCase()) : 'ELIMINATED',
+      killerName ? (killerName + ' puts you down. The Ring goes on without you.')
+                 : 'You are out. The Ring goes on without you.');
+  }
+
+  /* The match itself ended — the host says who is left standing. Routed the
+     same way an elimination is, and for the same reason: victory() bumps
+     runStats.round, hangs a trophy on the dressing-room wall and pays XP to
+     every party member, none of which a deathmatch has any business doing. */
+  function matchOver(winner) {
+    var mine = winner && isMe(winner);
+    leaveRing(mine ? 'LAST ONE STANDING' : 'THE RING CLOSES',
+      mine ? 'You are the last one standing.'
+           : ((winner ? nameOf(winner) : 'Nobody') + ' takes the Ring.'));
+  }
+
+  function leaveRing(banner, line) {
+    if (!pvpFight || pvpOver) return;
+    pvpOver = true;
+    active = false;
+    clearTimers();
+    unwireKeys();
+    hidePrompt();
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+    unwirePvpEvents();
+    if (a3d && a3d.releaseLock) a3d.releaseLock();   // NOT a3d.stop()
+    prompt(banner, 'banner', 0);                     // no ms: the hub retires it
+    log(line);
+    /* A beat before the hub takes a dead player — long enough to read the
+       banner and see who is still standing, short enough not to be a wait. */
+    later(toHub, PV('respawnToHubMs', 1200));
+  }
+
+  function toHub() {
+    hidePrompt();          // or the banner outlives the match into the next fight
+    showPvpHud(false);
+    pvpFight = false;
+    curStage = null;
+    /* engine/pvp.js keeps the session. A dead player still belongs to the
+       match — his peers are still fighting and the 'over' that ends it is
+       still coming — so leaving the Ring is not leaving the lobby, and this
+       never calls pvp.leave(). Whoever opened the lobby closes it. */
+    CHLOE.ui.scene.onBattleEnd(PVP_RESULT);
   }
 
   return {
@@ -2041,6 +2800,44 @@ CHLOE.ui.battle3d = (function () {
         return;
       }
       startCloneFight();
+    },
+
+    /* ---------- §32 deathmatch API ---------- */
+    beginPvp: beginPvp,
+    /* The result string an eliminated player carries to the hub. Published
+       rather than duplicated so ui/room3d.js's branch and this exit can never
+       drift into two spellings of the same event. */
+    PVP_RESULT: PVP_RESULT,
+    /* Test hooks, for the same reason every other `_` export here exists: the
+       only route into these is the rAF loop, which is frozen in a tab that is
+       not compositing.
+         _pvpActive  is a match being fought on this canvas
+         _pvpFeed    the kill feed as RENDERED, newest first — so "the victim's
+                     claim draws exactly one row, and a resend draws none" is a
+                     measurement rather than an opinion
+         _pvpBoard   the scoreboard as RENDERED, in seat order
+         _pvpEvent   push one wire event through the same drain frame() uses
+         _eliminated the local death, without having to be killed for it
+         _pvpSeat    the seat <-> body index bijection, both ways */
+    _pvpActive: function () { return pvpFight; },
+    _pvpFeed: function () {
+      if (!els.pvpFeed) return [];
+      var out = [], n = els.pvpFeed.childNodes;
+      for (var i = 0; i < n.length; i++) out.push(n[i].textContent);
+      return out;
+    },
+    _pvpBoard: function () {
+      return boardRows.map(function (r) {
+        return { seat: r.seat, id: r.id, name: r.nm.textContent,
+                 lv: r.lv.textContent, kills: r.kills.textContent,
+                 hp: r.hp.textContent, down: !!r.down };
+      });
+    },
+    _pvpAlive: function () { return els.pvpAlive ? els.pvpAlive.textContent : ''; },
+    _pvpEvent: function (evt, msg) { pvpQueue.push({ evt: evt, msg: msg || {} }); drainPvp(); },
+    _eliminated: eliminated,
+    _pvpSeat: function (seat, body) {
+      return { body: bodyOfSeat(seat), seat: seatOfBody(body) };
     }
   };
 })();

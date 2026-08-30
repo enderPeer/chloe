@@ -110,6 +110,74 @@ CHLOE.data.stages = {
     playerSpawn: { x: -6.5, z: 0, yaw: -Math.PI / 2 },
     knightSpawn: { x: 6.5, z: 0 },
 
+    /* ---- §32: the eight seats of a deathmatch ----------------------------
+       Eight players at 45° on a circle of radius 10.5m, each facing the
+       centre. Only the Ring has these, and that is the reason §32 is a Ring
+       mode: the Ring's containment is a RADIUS over an empty disc, so a seat
+       is legal if the arithmetic below says it is. The church's is a baked
+       navgrid threaded between pillars (§22), where legality is a flood-fill
+       question asked per cell — eight seats there would have to be verified
+       one at a time against the grid, the way §22 verified its two. Do not
+       add a `spawns` array to the church without doing that work.
+
+       THE YAW, DERIVED AND THEN CHECKED. Per the convention at the top of this
+       file, camera forward is (-sin yaw, -cos yaw). A seat must look at the
+       centre, so forward has to be (-x, -z)/r, giving sin yaw = x/r and
+       cos yaw = z/r — that is, yaw = atan2(x, z). The check is this file's own
+       playerSpawn, authored by hand in §24 and untouched since:
+       atan2(-6.5, 0) is exactly -PI/2, which is the yaw sitting on the line
+       above. The formula reproduces the authored number to the last bit, so
+       seat 0 is deliberately parked on -X too — the same view down +X at the
+       lit pylon that opens a PvE round, 4m further out.
+
+       WHY 10.5. The Ring clamps a player at arena.radius - the body radius,
+       14 - 0.35 = 13.65m (see arena.radius below), so a seat at 10.5 stands
+       3.15m off the wall: enough that your first step in any direction is a
+       step and not a slide along the kerb. Neighbours are one chord apart,
+       2 * 10.5 * sin(22.5°) = 8.04m — six times arena.knightMinDist (1.3) and
+       four and a half times the brain's crowdDist (1.8), so nobody opens
+       inside anyone's separation push and nobody opens in melee. Across the
+       circle is 21.0m, a long look but a legible one: fog.near is 18, so the
+       far seat is hazed by only ~9% toward the void colour and a body's seat
+       tint still reads across the whole disc.
+
+       THE DIAGONALS ARE 7.42, not 7.4246 (= 10.5 * cos45°). Rounding to the
+       centimetre the wire rounds to anyway (data/pvp.js posDecimals) costs
+       6.5mm of radius, which is nothing to a 2.15m body — and because the two
+       magnitudes stay EQUAL, atan2 still returns an exact multiple of PI/4.
+       An asymmetric rounding would have bought a yaw that no longer points at
+       the centre in exchange for the same 6.5mm.
+
+       INDEX ORDER WALKS THE CIRCLE: seat i and i+1 are neighbours, seat i and
+       i+4 are opposite. No seat is better than another — the disc is empty and
+       radially symmetric — but it is not perfectly uniform either: the four
+       LIT pylons stand on the cardinals (build.pylons: 12 posts, litEvery 3,
+       litPhase 0), so seats 0/2/4/6 have an orange post behind them and the
+       diagonal seats sit between two. That is left alone rather than rotated
+       22.5° off, because being backlit is a gift to everyone LOOKING at you,
+       and because keeping seat 0 on -X is what makes the yaw check above
+       something a reader can verify instead of trust.
+
+       Do NOT hand this job to arena3d's spawnSquad fan: that is a line, not a
+       circle, it is computed relative to the local player, and at n=8 it puts
+       every body on one half of the disc at 1.6m spacing — inside crowdDist,
+       so the separation push fires on frame one.
+
+       Two restatements, and both are promises to change the other copy too:
+       the radius is `seatRadius` in data/pvp.js, and `spawns` must be added to
+       arena3d's mergeStage allow-list — it names the keys a stage may override
+       one by one, so a new stage field it does not list is silently dropped. */
+    spawns: [
+      { x: -10.50, z:   0.00, yaw: -Math.PI / 2 },      // 0  -X, the §24 view
+      { x:  -7.42, z:  -7.42, yaw: -3 * Math.PI / 4 },  // 1
+      { x:   0.00, z: -10.50, yaw: Math.PI },           // 2
+      { x:   7.42, z:  -7.42, yaw: 3 * Math.PI / 4 },   // 3
+      { x:  10.50, z:   0.00, yaw: Math.PI / 2 },       // 4  +X, his PvE side
+      { x:   7.42, z:   7.42, yaw: Math.PI / 4 },       // 5
+      { x:   0.00, z:  10.50, yaw: 0 },                 // 6
+      { x:  -7.42, z:   7.42, yaw: -Math.PI / 4 }       // 7
+    ],
+
     /* radius 14 is the clamp on BODY CENTRES, and the kerb's inner face sits
        at 14.4 (see build.kerb), so you stop with roughly a body radius (0.35)
        of air between your shoulder and the wall instead of standing in it.

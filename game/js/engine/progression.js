@@ -71,6 +71,18 @@ CHLOE.engine.progression = (function(){
     } catch(e){}
   }
 
+  /* §32: is a PvP match running? Asked of combat3, which owns the single
+     predicate for the whole engine, so the question is never answered two
+     different ways in two files. Guarded to false: a build with the
+     multiplayer files deleted has no combat3.pvpActive and levels up exactly
+     as it always did. */
+  function pvpActive(){
+    try {
+      var c = CHLOE.engine.combat3;
+      return !!(c && typeof c.pvpActive === 'function' && c.pvpActive());
+    } catch(e){ return false; }
+  }
+
   /* ---------- stats ---------- */
   // v3 pools with silent v2 fallbacks: life <- hp, magic <- mp; characters
   // without stamina/faith bases get playable defaults (spec §12 migration).
@@ -260,6 +272,14 @@ CHLOE.engine.progression = (function(){
     var charDef = CHLOE.data.characters && CHLOE.data.characters[member.id];
     if (!charDef || !(xp > 0)) return res;
     if (member.level >= cap()) return res;
+    /* §32: IN THE RING A LEVEL IS A KILL, NOT AN EVENT. The toasts below are
+       written for the two or three level-ups a whole night of PvE hands you —
+       one line for the skill point, one line per move learned, so the very
+       first kill alone would put three of them on screen while somebody is
+       shooting at you. Read ONCE here rather than per notify, so a single
+       grantXp call cannot decide differently halfway through (a match that
+       ends between two toasts would otherwise say half of each). */
+    var quiet = pvpActive();
 
     var before = movesAt(charDef, member.level);
     member.xp += Math.round(xp);
@@ -280,13 +300,25 @@ CHLOE.engine.progression = (function(){
     if (wasDown) member.hp = 0;
 
     /* §19: the shared ladder can hand you a party member at a level (Ash at
-       3). Check on every level-up so they arrive the moment it is earned. */
+       3). Check on every level-up so they arrive the moment it is earned.
+       §32: the call is UNCHANGED and still made — party.ensureAllies is where
+       a running match refuses the ally, because alliesAt() is read from that
+       one place and a gate in the choke point cannot be walked around by a
+       future caller. See the comment there for what it prevents. */
     if (res.levelsGained.length) {
       try {
         var pty = CHLOE.engine.party;
         if (pty && typeof pty.ensureAllies === 'function') pty.ensureAllies(false);
       } catch (e) {}
     }
+    /* §32: the one line the Ring gets instead of the three below. It says the
+       LEVEL and nothing else, because that is the only part of a mid-match
+       level-up you can act on while the match is running — the skill point is
+       unspendable until you are back in the dressing room, and the new move
+       has already put itself on the new key (combat3's binds() self-heals,
+       §27A). Said once per grantXp, naming where you ended up, so a double
+       level from a lucky kill is one line and not two. */
+    if (quiet && res.levelsGained.length) notify('LEVEL ' + member.level);
     if (member.level >= cap()) member.xp = 0;
 
     // §12: each level grants +1 skill point (spent in the skill tree screen)
@@ -300,7 +332,9 @@ CHLOE.engine.progression = (function(){
           pst.skillPoints[member.id] = (pst.skillPoints[member.id] || 0) + pts;
         }
       } catch(e){}
-      notify((charDef.name || member.id) + ' gained ' + (pts === 1 ? 'a skill point!' : pts + ' skill points!'));
+      // §32: the point is still MINTED in the Ring, only unannounced — it is
+      // yours to spend the moment you are back in the dressing room.
+      if (!quiet) notify((charDef.name || member.id) + ' gained ' + (pts === 1 ? 'a skill point!' : pts + ' skill points!'));
     }
 
     if (res.levelsGained.length) {
@@ -318,8 +352,14 @@ CHLOE.engine.progression = (function(){
         var eq = loadouts ? autoEquip(loadouts, member.id, id) : { equipped: [], unequipped: true };
         res.learnedIds.push(id);
         res.learned.push({ id: id, name: name, equipped: eq.equipped, unequipped: eq.unequipped });
-        notify((charDef.name || member.id) + ' learned ' + name + '!' +
-               (eq.unequipped ? ' (loadout full — not equipped)' : ''));
+        /* §32: still LEARNED in the Ring, and still auto-equipped — only the
+           line about it is held back. `res.learned` is untouched, so a caller
+           that wants to draw the move (a level-up card, a kill feed) still
+           has everything it needs. */
+        if (!quiet) {
+          notify((charDef.name || member.id) + ' learned ' + name + '!' +
+                 (eq.unequipped ? ' (loadout full — not equipped)' : ''));
+        }
       }
       // clamp to new maxima (tree-aware: tree stat grants raise the caps)
       var tree = CHLOE.engine.tree;

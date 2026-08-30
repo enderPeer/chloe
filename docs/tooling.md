@@ -486,7 +486,7 @@ an optional records endpoint; cloud-saving progress stays dead"* — and both
 [worker/README.md](../worker/README.md) and [worker/worker.js](../worker/worker.js) have been rewritten to
 match.
 
-The accurate status, in three parts:
+§32 reopened it a second time, for the PvP relay. The accurate status, in four parts:
 
 1. **The record board endpoints are live code** (§27E). `GET /records[?limit=N]` and `POST /records
    {name, round, timeMs, patch}`, matched from their own `REC_ROUTES` table
@@ -524,9 +524,24 @@ The accurate status, in three parts:
    > ([game/js/data/config.js:4](../game/js/data/config.js:4) onward). The code is the truth; §9 is a
    > pre-roguelike leftover.
 
-Turning it on is a **one-time deploy only the repo owner can do**, because step 2 opens a browser and
-approves access to their Cloudflare account: `npm i -g wrangler` → `wrangler login` → `wrangler kv
-namespace create CHLOE_KV` → paste the 32-hex id over `REPLACE_ME` in
+4. **§32 added a PvP relay, and it is optional in exactly the same way.** `GET /pvp` lives in
+   `REC_ROUTES` rather than `ROUTES` — those handlers receive `(env, body)` because the top-level
+   `fetch` has already drained the request, so an `Upgrade` header would be invisible to them — and
+   it hands the socket to a `PvpRoom` **Durable Object**, one per room code, bound as `PVP_ROOM` in
+   [worker/wrangler.toml](../worker/wrangler.toml) with a `new_sqlite_classes` migration (see the
+   correction below: that is the free-plan class). The room uses the **Hibernation API**
+   (`state.acceptWebSocket`) rather than `server.accept()`, which stops duration billing while a
+   room idles — the difference that matters on the free tier. Its 101 response deliberately
+   **bypasses `json()`**: a handshake needs a null body and the `webSocket` ResponseInit field, and
+   must not carry CORS headers (CORS is inert on a WebSocket handshake — browsers do not preflight
+   `new WebSocket()`). Room throttling is an in-memory counter in the DO, **not** `rateLimited()`,
+   which costs a KV write per call against the 1,000/day budget. The game reads
+   `CHLOE.data.config.netUrl`, which is **absent by default**: with no relay, §32's deathmatch runs
+   across browser tabs on `BroadcastChannel` and needs no worker at all.
+
+Turning the record board on is a **one-time deploy only the repo owner can do**, because step 2 opens
+a browser and approves access to their Cloudflare account: `npm i -g wrangler` → `wrangler login` →
+`wrangler kv namespace create CHLOE_KV` → paste the 32-hex id over `REPLACE_ME` in
 [worker/wrangler.toml](../worker/wrangler.toml:6) → `wrangler deploy` → curl-check → add
 `apiUrl: 'https://chloe-api.<subdomain>.workers.dev'` (**no trailing slash**) to `config.js`. Rolling
 back is deleting that one line. The full steps, with expected output at each, are in
@@ -540,9 +555,20 @@ rather than `fetch` on purpose — §1 bans ES-module/async syntax, nothing else
 Promise, and XHR gives a real timeout in one property.
 
 Two limits the worker's own docs are honest about: `POST /records` is a read-modify-write against a
-single KV key with no compare-and-set, so two records landing in the same instant can lose one (the
-fix is a Durable Object, which is not on the free plan); and free-tier KV allows **1,000 writes/day**,
-which is why reads are unmetered and writes are rate-limited.
+single KV key with no compare-and-set, so two records landing in the same instant can lose one; and
+free-tier KV allows **1,000 writes/day**, which is why reads are unmetered and writes are
+rate-limited.
+
+> **Correction — a Durable Object *is* on the free plan (§32).** Older notes in this repo say the
+> fix for that lost-record race "is a Durable Object, which is not on the free plan this game is
+> hosted from". That stopped being true in **April 2025**, when Cloudflare opened **SQLite-backed**
+> Durable Objects to the **Workers Free** plan. The migration type is the load-bearing detail: a
+> class declared with **`new_sqlite_classes`** deploys on the free plan, while the legacy KV-backed
+> **`new_classes`** remains paid-only and a free-plan deploy of it is refused. §32 ships a DO on
+> exactly those terms (`PvpRoom`), so the claim is now contradicted by the repo's own
+> `wrangler.toml` — do not reinstate it. What has *not* changed is the decision about the record
+> board: moving it off KV is still a separate piece of work nobody has asked for, and a rare lost
+> record on a hobby board is still the cheaper failure.
 
 ---
 
@@ -580,16 +606,17 @@ which repaired §27's giftbox after §27 had already shipped).
 
 Three things about the numbering you will notice and should not try to reconcile:
 
-- **`GAME_SPEC.md` has no §29.** Its section headings run … 27, 28, **30**
-  ([GAME_SPEC.md:679](../GAME_SPEC.md:679) is the last one). `version.js` sits at `minor: 30`, which is
-  correct for the last section that landed.
+- **The section numbers are contiguous — an older note here said `GAME_SPEC.md` "has no §29", and
+  that is out of date.** §29 landed ("The 9mm, and three fists become one"), and the headings now
+  run unbroken to §32. Read the headings out of the file rather than trusting any list of them,
+  including this one: `grep -n '^## ' GAME_SPEC.md`.
 - **A spec section does not open at `.0`.** `--minor N` sets `build = 0` (§2 above), but the drop
   commit is itself a commit, so the hook's plain bump lands on top of it in the same commit: §30's
   drop `585dee8` wrote `minor: 30, build: 1` — up from `minor: 28, build: 0`, label `'The Grip'` →
   `'Seniority'` — and the follow-up `b66f07c` then took it to `build: 2` while leaving `minor`
-  alone. `version.js` on `main` therefore reads `v0.30.2`
-  ([game/js/data/version.js:20](../game/js/data/version.js:20)). The build number counts commits,
-  not drops.
+  alone. So `minor` names the spec section and `build` counts commits since it, which means the
+  live number is whatever [`game/js/data/version.js`](../game/js/data/version.js) currently says and
+  is stale in any doc that writes it down — including this one.
 - **`ROADMAP.md` skips P5.17 and P5.18** — it jumps from *P5.16 — Ring first* straight to *P5.19 — A
   knight levels for every round*, so the §27 (shop/records/hotbar) and §28 (real skeleton) drops have
   no roadmap entry even though both shipped. The roadmap is history and is incomplete; `GAME_SPEC.md`

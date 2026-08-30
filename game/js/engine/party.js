@@ -239,11 +239,46 @@ CHLOE.engine.party = (function(){
     return true;
   }
 
+  /* §32: is a PvP match running? Asked of combat3, which owns the one
+     predicate (it folds engine/pvp.js's match state together with "the fight
+     on screen is a Ring fight"), so the question is never answered two
+     different ways in two files. Guarded to false: a build with the
+     multiplayer files deleted has no combat3.pvpActive and behaves as it
+     always did. */
+  function pvpActive(){
+    try {
+      var c = CHLOE.engine.combat3;
+      return !!(c && typeof c.pvpActive === 'function' && c.pvpActive());
+    } catch(e){ return false; }
+  }
+
   // §11 hook: if the Room is cleared and Ash is missing, she joins.
   /* §19: allies are earned by LEVEL now, not by clearing the room. The shared
      ladder says who joins when (Ash at 3); they arrive at level 1 and level
      up on their own from there. Idempotent — safe to call every level-up. */
+  /* §32: AND NOT WHILE A DEATHMATCH IS RUNNING. This is the whole of the ally
+     suppression, and it is here because engine/skilltree.js's alliesAt() is
+     read from exactly ONE place — this function — so one line closes every
+     door at once.
+
+     WHAT IT PREVENTS. progression.grantXp calls us on every level-up, and
+     ladder row 4 carries `ally:'ash'`. In the Ring a kill is a level, so a
+     player's THIRD kill seats an AI ally in a party that is supposed to be one
+     body — and combat3.takeHit's death branch then finds her through
+     firstAliveOther() and swaps the player into her INSTEAD of killing them.
+     From the third kill onward "exactly one life" is quietly false: a second
+     life, a different level, a different hotbar, and nothing on screen says so.
+     (combat3 bypasses that swap in PvP as well. Both, not either: this keeps
+     the party honest, that one keeps the rule true even if this is bypassed.)
+
+     DEFERRED, NEVER CANCELLED. ensureAllies is idempotent and is called again
+     on every level-up and on every entry to the 'stage' scene, so the ally the
+     match refused arrives at the next honest opportunity once the match is
+     over. Row 4 is untouched — §25 overloaded that row deliberately rather
+     than renumbering, because the 1-9 ladder is referenced by level number all
+     over the spec. */
   function ensureAllies(silent){
+    if (pvpActive()) return false;
     var sk = CHLOE.engine.skilltree;
     if (!sk || typeof sk.alliesAt !== 'function') return false;
     var lead = active() || state.members[0];

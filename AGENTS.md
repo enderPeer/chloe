@@ -16,11 +16,17 @@ knights hunts you across the floor.
 
 It is a **roguelike**: one run per page load, no accounts, no saves, permadeath.
 
+Since §32 there is a **second kind of fight** beside that ladder: a deathmatch on the Ring for up to
+eight players, one life each, where a kill raises the killer a level. It is peer-to-peer with no
+server simulation, it runs across browser tabs on `BroadcastChannel` when no relay is configured,
+and **every path it adds is additive and guarded** — delete the multiplayer files and the game
+boots and plays exactly as it does today. That last property is a rule, not a nice-to-have.
+
 Three points of texture, because they change how you write code here:
 
 - **Zero build.** No npm install, no bundler, no transpiler. Plain `<script>` tags, ES5-flavoured
   vanilla JS, one global namespace `window.CHLOE`. Start a static server, refresh, done.
-- **The spec is binding.** [`GAME_SPEC.md`](GAME_SPEC.md) is a numbered contract (§1 … §30) where
+- **The spec is binding.** [`GAME_SPEC.md`](GAME_SPEC.md) is a numbered contract (§1 … §32) where
   **later sections supersede earlier ones**. A drop = one new spec section plus the code for it.
 - **The comments are the design docs.** This codebase explains *why* in unusual depth, often
   including the bug that motivated a line. Read them before changing anything near them.
@@ -61,8 +67,8 @@ game/js/ui/              screens and DOM only             (what you SEE)
 game/vendor/             three.js r128 + GLTF/DRACO/RGBE loaders, vendored
 game/assets/             3d/ glb · hdri/ · models/ · chloe/ photos · gen/ generated art
 tools/                   dev server, version bumper, rig builder, image gen, manifests
-worker/                  legacy Cloudflare Worker (see docs/tooling.md for its real status)
-GAME_SPEC.md             the binding contract, §1 … §30
+worker/                  optional Cloudflare Worker: record board + §32 PvP relay (docs/tooling.md)
+GAME_SPEC.md             the binding contract, §1 … §32
 ROADMAP.md               history plus the "don't re-litigate" decisions
 docs/                    the wiki — start at docs/README.md
 ```
@@ -106,6 +112,8 @@ This repo has verification *contracts*, not vibes. Before you call something don
    CHLOE.engine.knighttree.spawnLevel('cautious', 5)   // pure — no fight needed
    CHLOE.engine.arena3d.debug()       // knightLevels / knightSeniority / roundSpeed / knightBrain
    CHLOE.engine.combat3.snapshot()    // resources, cooldowns, per-knight enemy levels
+   CHLOE.engine.pvp.debug()           // §32 — match state, roster, seats, who owns what
+   CHLOE.engine.net.stats()           // §32 — {sent, recv, rttMs, transport, open}
    ```
    Modules like `knighttree`, `skilltree` and `progression` are pure functions of a level, so you
    can exercise an entire balance change without entering a battle. The other two need a live
@@ -164,6 +172,11 @@ node tools/bump-version.js --minor 31 --label "Your Drop Name"
 | The room freezes after closing the shop | Something tidied away `ui/room3d.js`'s `_resume` export. It is load-bearing (§28 D) |
 | A "harmless" cleanup broke the hotbar | The five bind stores only mean anything together — reset them through `party.resetBinds()` (§27 A) |
 | A round feels wrong after a balance edit | You turned a contract, not a knob. Squad count (§20) and `levelPerRound` are not tuning dials |
+| A screen's own `onShow` handler stopped firing once you added yours | `ui._onShow` is a **one-slot registry** — one handler per screen name, and registering a second silently *unregisters* the first (§32) |
+| "Exactly one life" quietly stops being true from the third kill | `grantXp` → `party.ensureAllies()`, and ladder row 4 carries `ally:'ash'`. `takeHit`'s death branch then finds `firstAliveOther` and **swaps the dead player into Ash instead of killing them** (§32) |
+| A new stage field is ignored, silently | `arena3d.mergeStage` is an explicit **allow-list**, key by key (six of them before §32 added `spawns`, seven now). A key it does not name never reaches the stage, and nothing warns |
+| Timers, callbacks and HUD labels re-target the wrong body | Something spliced `knights[]`. The array **index is the only body identity** — every command is `A.thing(…, index)` and `debug()`'s arrays are positional. Mark a body dead in place; never splice (§32) |
+| A mid-fight level buys no life/stamina/magic | `combat3.st.max` is captured in `start()` and rewritten **only** on a leader swap, so the new maximums never reach the bars. Call `refreshLeaderStats()` (§32) |
 
 ---
 
@@ -178,3 +191,14 @@ node tools/bump-version.js --minor 31 --label "Your Drop Name"
 - [Difficulty Scaling](docs/difficulty-scaling.md) — count, level and speed
 - [Data Reference](docs/data-reference.md) — every schema, plus "how do I add a…" cookbooks
 - [Debugging & Verification](docs/debugging.md) — the hooks, and the traps above in detail
+
+**One page is known stale: [`docs/progression.md`](docs/progression.md).** It still documents the
+pre-§29/§31 ladder — `hammer_fist` / `ember_jab` / `hollow_breaker` on rows 6/8/9, `slotsSoFar` at
+**7**, and the generated *Wider Grip* gate described as permanently closed. **The code wins**, and
+the live data says: `slotsSoFar` **6**, `keyCap` **7**, the gate **OPEN**, exactly one generated
+*Wider Grip* — at **level 12**, granting key **7** — and `slotCount` by level running
+Lv1 = 3, Lv2 = 4, Lv4 = 6, Lv6 = 7, Lv9 = 8, Lv12 = 9 (ability keys plus the two pockets). Read off
+[`data/skilltree.js`](game/js/data/skilltree.js) with `maxSlots: 9` / `baseSlots: 1`
+([`data/abilities.js`](game/js/data/abilities.js)) and `pocketSlots: 2`
+([`data/config.js`](game/js/data/config.js)). Do not take a progression number off that page without
+re-deriving it from the data files.

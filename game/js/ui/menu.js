@@ -36,13 +36,33 @@ CHLOE.ui.menu = (function(){
     var card = ui.el('div', 'menu-card');
 
     var tabs = ui.el('div', 'menu-tabs');
-    [['party','Party'], ['inventory','Inventory'], ['moves','Moves'], ['help','How to play'], ['close','✕']]
-      .forEach(function(t){
+    var strip = [['party','Party'], ['inventory','Inventory'], ['moves','Moves'], ['help','How to play']];
+    /* §32: a COMMAND, not a panel — it hands the player to another screen the
+       way '✕' hands them back, rather than rendering into menu-body. It sits
+       here as well as on the room's top bar because M/Tab is the one control
+       that is reachable from anywhere in the room, including with a match
+       already running and the player watching from the hub. Present only when
+       ui/lobby.js shipped, so a build without the multiplayer files keeps the
+       four tabs it has today. */
+    if (CHLOE.ui.lobby && typeof CHLOE.ui.lobby.open === 'function') {
+      strip.push(['ring', '⚔ The Ring']);
+    }
+    strip.push(['close','✕']);
+    strip.forEach(function(t){
         var b = ui.el('button', tab === t[0] ? 'on' : '', t[1]);
         b.addEventListener('click', function(){
           // NOTE: go through the public export — ui/room3d.js wraps
           // CHLOE.ui.menu.close() to resume the 3D world on close.
           if (t[0] === 'close') { CHLOE.ui.menu.close(); return; }
+          /* Close FIRST, and through the export for the same reason: the
+             wrapper is what resumes the world and releases the overlay, and
+             lobby.open() then pauses it again on its own terms. Skipping the
+             close would leave #overlay-menu sitting over the lobby screen. */
+          if (t[0] === 'ring') {
+            CHLOE.ui.menu.close();
+            try { CHLOE.ui.lobby.open({ focus: 'join' }); } catch (e) {}
+            return;
+          }
           tab = t[0]; pickingItem = null; sheetChar = null; render();
         });
         tabs.appendChild(b);
