@@ -2315,3 +2315,16 @@ button:disabled .cost-chip{ opacity:.7; }
   .r3d-standing{ font-size:.72rem; }
   .r3d-ring{ font-size:.8rem; }
 }
+
+/* The title screen's second door (§32). Quieter than .title-start on
+   purpose: starting a run is the primary act and keeps the pulse, while this
+   one is for the player who already has a code and knows what they came for. */
+.title-join{
+  margin-top:.7rem;
+  font-family:var(--font-head);
+  font-size:clamp(.85rem,2vw,1rem);
+  letter-spacing:.18em;
+  padding:.45em 1.3em;
+  opacity:.86;
+}
+.title-join:hover{ opacity:1; }

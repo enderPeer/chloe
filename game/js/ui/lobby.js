@@ -756,10 +756,15 @@ CHLOE.ui.lobby = (function(){
   }
 
   /* ---------- open / close ---------- */
-  function open(){
+  /* `opts.focus === 'join'` opens with the CODE field under the cursor rather
+     than the name field. It is the difference between "I want to play" and "a
+     friend just sent me four letters", and the second one wants to type them
+     immediately — every caller that already has a code in hand passes it. */
+  function open(opts){
     ui = CHLOE.ui;
     if (!ui) return;
     if (opened) return;
+    var wantJoin = !!(opts && opts.focus === 'join');
     if (!built) build();
     wire();
     subscribe();
@@ -793,7 +798,13 @@ CHLOE.ui.lobby = (function(){
     render();
     ui.show('lobby');
     if (!paintTimer) paintTimer = window.setInterval(paint, PAINT_MS);
-    try { if (els.nameIn) els.nameIn.focus(); } catch (e) {}
+    /* The code field only exists while the form is on screen — once a lobby is
+       actually open the panel is the roster instead — so fall back to the name
+       field rather than assuming the caller's ask can be honoured. */
+    try {
+      var target = (wantJoin && els.codeIn) ? els.codeIn : els.nameIn;
+      if (target) target.focus();
+    } catch (e) {}
   }
 
   /* The player walking away: leave the room, then hand the router back. */

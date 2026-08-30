@@ -25,6 +25,32 @@ CHLOE.ui.title = (function(){
       CHLOE.game.startNew();
     });
     inner.appendChild(start);
+
+    /* §32: the second door, and it exists because of how a deathmatch actually
+       begins — somebody sends you four letters. Without this, answering them
+       means Press Start, waiting out the dressing room's loading gate, finding
+       the top bar and only then typing the code, by which point the ring you
+       were invited to may already be fighting.
+
+       It still starts a run first. The lobby needs a character to seat: the
+       roster carries a level, beginPvp calls party.fullHeal() and combat3
+       reads the member straight off party.state, and none of that exists until
+       newGame() has run. So this is Press Start with the code field already
+       under the cursor, not a way around the run. The room loads behind the
+       lobby exactly as it would anyway, which is also where leaving the lobby
+       correctly puts you.
+
+       Appended only when ui/lobby.js shipped — with the multiplayer files
+       removed the title keeps the single button it has today. */
+    if (CHLOE.ui.lobby && typeof CHLOE.ui.lobby.open === 'function') {
+      var join = ui.el('button', 'title-join', 'Join a Ring');
+      join.title = 'Someone sent you a code — go straight to the deathmatch lobby';
+      join.addEventListener('click', function(){
+        CHLOE.game.startNew();
+        try { CHLOE.ui.lobby.open({ focus: 'join' }); } catch (e) {}
+      });
+      inner.appendChild(join);
+    }
     root.appendChild(inner);
 
     /* Patch notes: shown until the player has started at least one run, then
