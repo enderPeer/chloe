@@ -2521,6 +2521,19 @@ CHLOE.ui.battle3d = (function () {
     log('The Ring is open. One life each — 1-9 to strike, SPACE to evade.');
     prompt('THE RING — ' + seats + ' IN, ONE OUT', 'banner', 2400);
 
+    /* The opening grace (§32). Every fighter starts inside full-damage pistol
+       range of both neighbours on a floor with no cover, so without this the
+       match is decided in its first second by whoever clicked first — see the
+       arithmetic on data/pvp.js spawnGraceMs. Each client grants its OWN,
+       which needs no agreement between them: a declared hit is refused by the
+       victim's invulnerable() check, the same guard that refuses one mid-dodge,
+       and the victim is the only authority on its own life anyway. */
+    var graceMs = PV('spawnGraceMs', 3000);
+    if (graceMs > 0 && typeof C3.grantIframes === 'function') {
+      C3.grantIframes(graceMs);
+      log('No blood for ' + Math.round(graceMs / 1000) + 's — find your ground.');
+    }
+
     wireKeys();
     wirePvpEvents();
     lastT = performance.now();

@@ -1175,6 +1175,22 @@ CHLOE.engine.combat3 = (function () {
 
   function invulnerable() { return !!st && st.now < st.iframeUntil; }
 
+  /* §32. Open an iframe window from outside the rules layer. `st` is private
+     and every other writer of iframeUntil is a rule of this file's own (the
+     evade above, the leader swap's breath, the revive potion's), so the
+     deathmatch's opening grace needs a door rather than a reach-in.
+
+     It EXTENDS, never shortens: a match-start grace must not be able to cut a
+     dodge's i-frames short if the two ever overlap, and "the longer of the two
+     protections wins" is the only version of that with no ordering bug in it.
+     Returns how long the window now has left, so a caller can draw it. */
+  function grantIframes(ms) {
+    if (!st) return 0;
+    var until = st.now + Math.max(0, +ms || 0);
+    if (until > st.iframeUntil) st.iframeUntil = until;
+    return Math.max(0, st.iframeUntil - st.now);
+  }
+
   /* ---------- damage ---------- */
   /* Called by the 3D layer when a cast's hit window connects with the knight.
      `mult` lets the caller pass a positional bonus (e.g. behind = more). */
@@ -1994,6 +2010,7 @@ CHLOE.engine.combat3 = (function () {
     start: start, get: get, isOver: isOver, tick: tick,
     press: press, evade: evade, spendSprint: spendSprint,
     hitEnemy: hitEnemy, takeHit: takeHit, invulnerable: invulnerable,
+    grantIframes: grantIframes,
     playerDamage: playerDamage, cloneEnd: cloneEnd,
     /* §32 PvP. `pvpActive` is the predicate the rest of the engine asks (the
        ally gate in party.js, the toast gate in progression.js) — never a flag

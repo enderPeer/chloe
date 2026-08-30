@@ -145,6 +145,25 @@ CHLOE.data.pvp = {
      the match before the rest had found each other. */
   levelsPerKill: 1,
 
+  /* How long nobody can be hurt after the Ring opens, and this one is a RULE
+     of the mode rather than a dial, because the arithmetic forces it.
+
+     Eight seats at seatRadius put ADJACENT fighters 8.03m apart (2*10.5*
+     sin(22.5deg)), and gun_9mm — which ladder row 1 seeds onto BOTH mouse
+     buttons, so it is what everyone opens with — does FULL damage out to 14m
+     and still reaches 22m at 0.6x. Opposite seats are 21.0m apart. So at the
+     first frame every fighter is already inside full-damage range of both
+     neighbours and in range of literally everyone else, on a floor whose
+     entire design is that it has no cover.
+
+     Geometry cannot fix it: an 8.03m chord only reaches 14m at a seat ring of
+     r > 18.3m, and the player clamp is 13.65m. So the answer is temporal. The
+     grace is what turns "whoever clicked first wins" into a fight that starts
+     with eight people moving. combat3 already owns the primitive — the same
+     iframe window evade and the revive potion use — so a declared hit is
+     refused by the same guard that refuses one during a dodge. */
+  spawnGraceMs: 3000,
+
   /* The level a fighter is entered on the board at, and the floor a match can
      never go below — the ladder is 1-based, so there is no level 0 to fall to
      when a `roster` has not yet said what a peer really is. */
