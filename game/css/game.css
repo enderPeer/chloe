@@ -2086,3 +2086,232 @@ button:disabled .cost-chip{ opacity:.7; }
   #overlay-shop{ animation:none; }
   .shop-row.bought{ animation:none; }
 }
+
+/* ============================================================
+   The Ring — deathmatch lobby + the hub's score line, spec §32
+   ============================================================
+   Built ON TOP of the menu overlay's rules, exactly the way §27D's shop is:
+   .lobby-card carries .menu-card and .lobby-body carries .menu-body, so the
+   card frame, the max-height and the scroll behaviour are the SAME rules —
+   not a second copy that drifts a border-radius away over time. Only what a
+   lobby needs and a menu does not (a transport line, a selectable room code,
+   eight seats with ready ticks) is new below. */
+
+/* .screen.active is display:BLOCK only, so any screen that wants to centre a
+   card has to say so itself — #screen-title has carried this same pair since
+   §8. Without it the lobby renders anchored to the top-left corner. */
+#screen-lobby{
+  background:var(--bg);
+  display:none;
+  align-items:center; justify-content:center;
+  padding:1rem;
+}
+#screen-lobby.active{ display:flex; }
+.lobby-card{ width:min(560px,94vw); }
+
+/* ---------- head: the title and the transport sentence ---------- */
+.lobby-head{
+  display:flex; align-items:flex-start; gap:.8rem;
+  padding:.6rem .7rem .65rem 1.1rem;
+  border-bottom:1px solid #2b2731;
+  background:#100f13;        /* matches .menu-tabs / .shop-head — one header band */
+}
+.lobby-titles{ flex:1; min-width:0; }
+.lobby-title{
+  font-family:var(--font-head); letter-spacing:.14em;
+  font-size:1.25rem; color:var(--text);
+}
+/* "8 players" means something completely different on each transport, so the
+   line that says which one is running sits in the header where it cannot
+   scroll away — and it is coloured by ANSWER, not by severity: local is a
+   working mode, not a warning. Only a browser with neither transport gets
+   the red. */
+.lobby-transport{ font-size:.74rem; letter-spacing:.04em; color:var(--dim); }
+.lobby-transport.relay{ color:var(--ok); }
+.lobby-transport.local{ color:var(--mp); }
+.lobby-transport.none{ color:var(--red); }
+.lobby-close{
+  border:none; background:none; color:var(--dim);
+  font-size:1.1rem; padding:.35em .6em; border-radius:6px;
+}
+.lobby-close:hover:not(:disabled){ background:#1a161d; color:var(--red); box-shadow:none; }
+
+/* ---------- body ---------- */
+.lobby-body{ padding:.9rem 1.1rem 1.1rem; }
+.lobby-note{ color:var(--dim); font-size:.86rem; margin-bottom:.9rem; }
+.lobby-hint{ color:var(--dim); font-size:.72rem; margin-top:.35rem; }
+
+.lobby-field{ margin-bottom:.9rem; }
+.lobby-field label{
+  display:block; margin-bottom:.3rem;
+  font-family:var(--font-head); letter-spacing:.12em;
+  font-size:.8rem; color:var(--dim);
+}
+
+/* Host on the left, join on the right, "or" between them: the two ways in are
+   a choice, and stacking them would make the second look like a step. */
+.lobby-split{ display:flex; align-items:flex-start; gap:.8rem; }
+.lobby-half{ flex:1; min-width:0; }
+.lobby-half button{ width:100%; }
+.lobby-or{
+  flex:0 0 auto; align-self:center;
+  font-family:var(--font-head); letter-spacing:.1em;
+  color:var(--dim); font-size:.8rem;
+}
+.lobby-joinrow{ display:flex; gap:.4rem; }
+.lobby-codein{
+  flex:1; min-width:0;
+  font-family:var(--font-head); letter-spacing:.28em;
+  text-align:center; text-transform:uppercase;
+}
+.lobby-join{ flex:0 0 auto; }
+
+/* ---------- the room code ---------- */
+.lobby-code-row{
+  display:flex; align-items:center; gap:.7rem;
+  background:var(--panel-2);
+  border:1px solid #2b2731;
+  border-radius:8px;
+  padding:.55rem .7rem;
+  margin-bottom:.8rem;
+}
+.lobby-code-label{
+  font-family:var(--font-head); letter-spacing:.12em;
+  font-size:.78rem; color:var(--dim);
+  white-space:nowrap;
+}
+/* THE RULE THIS SCREEN CANNOT SHIP WITHOUT.
+   body{user-select:none} is global (top of this file). Without the override
+   here a player physically cannot drag over the room code — and a room code
+   nobody can copy is a multiplayer mode nobody can be invited to. The Copy
+   button beside it works through document.execCommand('copy'), which needs a
+   REAL selection to copy, so this rule is load-bearing on both routes, not
+   just the manual one. */
+.lobby-code{
+  -webkit-user-select:text;
+  user-select:text;
+  cursor:text;
+  flex:1; min-width:0;
+  font-family:var(--font-head);
+  font-size:1.5rem; letter-spacing:.36em;
+  text-align:center;
+  color:var(--text);
+  text-shadow:0 0 12px rgba(229,23,63,.28);
+}
+.lobby-code::selection{ background:var(--deep-red); color:#fff; }
+.lobby-copy{ flex:0 0 auto; padding:.35em .9em; font-size:.85rem; }
+
+/* The score on the card, when the lobby is opened over a match this client is
+   already out of. Same reading as .r3d-standing in the top bar — one fact,
+   stated the same way in both places. */
+.lobby-standing{
+  font-family:var(--font-head);
+  font-size:1.6rem; letter-spacing:.14em;
+  text-align:center;
+  color:var(--red);
+  text-shadow:0 0 14px rgba(229,23,63,.35);
+  font-variant-numeric:tabular-nums;
+}
+
+/* ---------- the eight seats ----------
+   The empty seats are DRAWN, not omitted: five dim rows under three lit ones
+   is the same fact as "3 of 8" and you can read it without counting. */
+.lobby-roster{ display:flex; flex-direction:column; gap:.35rem; }
+.lobby-seat{
+  display:flex; align-items:center; gap:.6rem;
+  background:var(--panel-2);
+  border:1px solid #2b2731;
+  border-radius:8px;
+  padding:.42rem .7rem;
+  transition:border-color .15s ease, background .15s ease;
+}
+/* Identity is the seat TINT — the same colour data/pvp.js hands the body in
+   the arena, so the name you read here is the body you are looking at there.
+   The dot's colour is set inline from that data; this only shapes it. */
+.seat-dot{
+  flex:0 0 auto;
+  width:.7rem; height:.7rem;
+  border-radius:50%;
+  background:#3a3540;
+  box-shadow:0 0 8px rgba(0,0,0,.6);
+}
+.lobby-seat .nm{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lobby-seat .tag{
+  flex:0 0 auto;
+  font-family:var(--font-head); font-size:.66rem; letter-spacing:.14em;
+  padding:.05em .5em; border-radius:999px;
+  border:1px solid var(--deep-red); color:var(--red);
+}
+.lobby-seat .tag.you{ border-color:#3a3540; color:var(--dim); }
+.lobby-seat .lv{
+  flex:0 0 auto;
+  color:var(--gold); font-size:.75rem;
+  font-variant-numeric:tabular-nums;   /* levels move mid-match; stop the row twitching */
+}
+/* Always present, lit or dim. A tick that appears and disappears makes the
+   row jump, and a row that jumps while people are readying up is the one
+   thing a lobby must not do. */
+.lobby-seat .tick{
+  flex:0 0 auto; width:1.1em; text-align:center;
+  color:#3a3540; font-size:.95rem;
+}
+.lobby-seat.ready{ border-color:rgba(61,220,132,.35); }
+.lobby-seat.ready .tick{ color:var(--ok); }
+.lobby-seat.me{ border-color:var(--red); box-shadow:0 0 14px rgba(229,23,63,.18); }
+.lobby-seat.empty{ opacity:.42; border-style:dashed; }
+.lobby-seat.empty .nm{ color:var(--dim); font-style:italic; }
+.lobby-seat.out{ opacity:.5; }
+.lobby-seat.out .nm{ text-decoration:line-through; }
+
+/* ---------- foot: the status line and the three buttons ---------- */
+.lobby-foot{
+  padding:.55rem 1.1rem .8rem;
+  border-top:1px solid #2b2731;
+}
+/* Inline, not a toast: "type the code you were given" is something the player
+   acts on in the field two inches above it, not a notification to dismiss.
+   Reserved height so the buttons never jump when a message comes and goes. */
+.lobby-msg{
+  min-height:1.2em;
+  color:var(--dim); font-size:.78rem; letter-spacing:.03em;
+  margin-bottom:.5rem;
+}
+.lobby-msg.good{ color:var(--ok); }
+.lobby-msg.bad{ color:var(--red); }
+.lobby-btns{ display:flex; gap:.5rem; }
+.lobby-btns button{ flex:1; }
+.lobby-ready.on{ border-color:var(--ok); color:var(--ok); }
+.lobby-ready.on:hover:not(:disabled){ background:var(--ok); color:var(--bg); border-color:var(--ok); box-shadow:none; }
+/* The only loud button on the card: pressing it drops eight people onto the
+   Ring, and it is lit only while pvp.canStart() agrees. */
+.lobby-start{ border-color:var(--red); background:#25101a; }
+.lobby-leave{ flex:0 0 auto; color:var(--dim); }
+
+/* ---------- the hub's score line (ui/room3d.js top bar) ----------
+   Same pill lineage as .r3d-level, so the top bar stays one row of facts
+   rather than growing a badge someone bolted on. Red rather than dim because
+   it is a fight in progress you are watching, not a stat you own. */
+.r3d-standing{
+  align-self:center;
+  font-family:var(--font-head);
+  font-size:.95rem; letter-spacing:.12em;
+  color:var(--red);
+  padding:.2em .7em;
+  border:1px solid rgba(229,23,63,.45);
+  border-radius:999px;
+  background:rgba(20,19,23,.55);
+  text-shadow:0 0 10px rgba(229,23,63,.3);
+  white-space:nowrap;
+}
+.r3d-ring{ letter-spacing:.06em; }
+
+/* Narrow: the two ways in stack, and the "or" reads as a divider between
+   them rather than a squeezed column. */
+@media (max-width:560px){
+  .lobby-split{ flex-direction:column; align-items:stretch; }
+  .lobby-or{ align-self:center; }
+  .lobby-code{ font-size:1.2rem; letter-spacing:.28em; }
+  .lobby-btns{ flex-wrap:wrap; }
+  .r3d-standing{ font-size:.72rem; }
+  .r3d-ring{ font-size:.8rem; }
+}

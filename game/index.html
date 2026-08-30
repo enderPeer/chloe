@@ -18,6 +18,10 @@
   <div id="screen-room3d" class="screen"></div>
   <div id="screen-battle3d" class="screen"></div>
   <div id="screen-battle" class="screen"></div>
+  <!-- §32 the deathmatch lobby. ui/lobby.js self-creates this div if it is
+       missing, the way ui/battle3d.js does, but it is declared here so the
+       router finds it on the first show() rather than on the second. -->
+  <div id="screen-lobby" class="screen"></div>
   <div id="dialog-layer" class="hidden" aria-live="polite"></div>
   <div id="overlay-menu" class="hidden"></div>
   <div id="toast-layer"></div>
@@ -28,6 +32,9 @@
 <script src="vendor/DRACOLoader.js"></script>
 <script src="vendor/RGBELoader.js"></script>
 <script src="js/data/config.js"></script>
+<!-- §32 PvP tuning. Pure numbers, read lazily by everything, so its only real
+     ordering rule is the one every data file has: after config.js. -->
+<script src="js/data/pvp.js"></script>
 <script src="js/data/version.js"></script>
 <script src="js/data/elements.js"></script>
 <script src="js/data/portraits.js"></script>
@@ -67,6 +74,12 @@
      load-bearing as the code they pull in. -->
 <script src="js/engine/shop.js"></script>
 <script src="js/engine/records.js"></script>
+<!-- §32 the transport, and it belongs in this same group for the same reason:
+     it reads the config gate, so it loads after every data file, and the lobby
+     and the match layer both call it, so it loads before them. records.js is
+     its nearest sibling in kind — the only other module here that talks to a
+     server, and the one whose "the network is decoration" law it inherits. -->
+<script src="js/engine/net.js"></script>
 <script src="js/engine/battle.js"></script>
 <script src="js/engine/arena.js"></script>
 <script src="js/engine/combat3.js"></script>
@@ -74,6 +87,11 @@
      mapping.  After combat3.js (reads knownAbilities at runtime) and before
      world3d.js (which publishes the onDoor hook it drives). -->
 <script src="js/engine/cloneai.js"></script>
+<!-- §32 the match layer: the roster, the seats, kill attribution and the
+     level-on-kill rule. Exactly cloneai's slot, and for exactly cloneai's two
+     reasons — it reads combat3's API at runtime, and world3d/battle3d call
+     into it. It owns no DOM; every pixel of the lobby is in ui/lobby.js. -->
+<script src="js/engine/pvp.js"></script>
 <script src="js/engine/world3d.js"></script>
 <!-- §28 C: the pose driver. Before arena3d.js, which calls into it at every
      phase boundary and at knight load. A module with no script tag is a whole
@@ -102,6 +120,10 @@
 <!-- the shop overlay: after ui/ui.js (it assigns onto CHLOE.ui and draws with
      ui.el) and after engine/shop.js, whose rules it renders. -->
 <script src="js/ui/shop.js"></script>
+<!-- §32 the lobby screen: after ui/ui.js (it assigns onto CHLOE.ui and draws
+     with ui.el) and after engine/net.js and engine/pvp.js, whose transport and
+     roster it renders. Same shape as the shop tag above it. -->
+<script src="js/ui/lobby.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>

@@ -6,6 +6,12 @@
  *   POST /records  {name, round, timeMs, patch}
  *                                          -> 200 {ok:true, record, records:[...]}
  *
+ * THE OTHER LIVE PART — the PvP relay (GAME_SPEC.md §32):
+ *   GET  /pvp?room=CODE  (Upgrade: websocket)
+ *                                          -> 101, joined to one PvpRoom
+ * Dumb fan-out, not a simulation: the room hands every frame to the other
+ * sockets and knows nothing about the match. Authority lives on the clients.
+ *
  * THE MOTHBALLED PART — cloud saves, kept intact for reference. CHLOE became a
  * roguelike in §15 (no accounts, no saves) and nothing in the game calls these
  * any more. They are left standing rather than deleted because the record board
@@ -22,6 +28,9 @@
  *   'records:v1'              {v:1, rows:[...]}          (the board)
  *   'rl:<ip>'                 {n, until}                 (rate limiter)
  * pinHash is never echoed back.
+ *
+ * Plus Durable Object binding PVP_ROOM (class PvpRoom, SQLite-backed): one
+ * object per room code, holding live sockets and persisting nothing at all.
  */
 
 const MAX_NAME_LEN = 16;
@@ -44,6 +53,29 @@ const REC_BODY_BYTES = 2 * 1024;       // a record is tiny — refuse anything b
    (1,000 writes/day) than the abuse it prevents. */
 const RL_WINDOW_MS = 60 * 1000;
 const RL_MAX_WRITES = 5;               // 5 submitted records per IP per minute
+
+/* ---- the PvP relay (§32) ----
+   Every limit below is enforced inside the Durable Object, in memory. None of
+   it goes through rateLimited(): that costs a KV write per call against a
+   1,000-writes/day budget, and one full room carries ~120 messages a second. */
+const ROOM_MAX_SOCKETS = 8;            // §32: eight players, one Ring, one life
+const ROOM_CODE_MIN = 3;               // the client mints 4 (data/pvp.js roomCodeLen);
+const ROOM_CODE_MAX = 8;               // both bounds are loose so changing that
+                                       // length never needs a redeploy here
+const PVP_MSG_CHARS = 2 * 1024;        // a `state` frame is ~120 chars. Characters,
+                                       // not bytes: the cheap check is the right
+                                       // one 120 times a second, and the cap is far
+                                       // above anything the protocol sends
+const PVP_ID_MAX = 40;                 // peer ids are minted client-side; bound them
+                                       // before one is echoed back to seven browsers
+const PVP_RL_WINDOW_MS = 1000;
+const PVP_RL_MAX_MSGS = 60;            // 15 Hz of `state` (data/pvp.js sendHz) is the
+                                       // hot path; 60/s leaves four times that for
+                                       // swings, hits and roster chatter
+const PVP_RL_KILL_MSGS = 600;          // 10x over budget for a whole second is a send
+                                       // loop, not a lag spike — that one gets closed
+const PVP_CLOSE_FULL = 4001;           // WebSocket application close codes must sit
+const PVP_CLOSE_FLOOD = 4002;          // in 4000-4999; anything else is refused
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -341,8 +373,13 @@ async function handlePostRecord(env, request, url) {
   }
 
   // Read-modify-write. KV offers no compare-and-set, so two records landing in
-  // the same instant can lose one. Accepted deliberately: the alternative is a
-  // Durable Object, which is not on the free plan this game is hosted from.
+  // the same instant can lose one. Still accepted deliberately, but the reason
+  // written here has expired: it used to say the alternative was a Durable
+  // Object, "which is not on the free plan this game is hosted from". That
+  // stopped being true in April 2025, when Cloudflare opened SQLite-backed
+  // Durable Objects to the Workers Free plan — PvpRoom below is one, on this
+  // very deploy. Moving the board onto a DO is now merely a migration nobody
+  // has needed: a rare lost record on a hobby board is cheaper than the churn.
   const rows = await readRecords(env);
   rows.push(rec);
   await writeRecords(env, rows);
@@ -355,11 +392,253 @@ async function handlePostRecord(env, request, url) {
   });
 }
 
+/* =======================================================================
+   THE PvP RELAY (§32)
+   `GET /pvp?room=CODE` upgrades to a WebSocket served by one Durable Object
+   per room code. The object does not simulate the match — it fans each frame
+   out to the other sockets in the room and nothing else. Authority lives on
+   the clients (§32 ownership table), which is the same friendly-not-tamper-
+   proof trade the record board above makes: a modified client can lie about
+   damage or refuse to die, because an authoritative simulation cannot run on
+   the free static hosting this game is built for. Written down in
+   worker/README.md so nobody is surprised by it.
+   ===================================================================== */
+
+/** Room codes get read off one screen and typed into another, so fold case and
+ *  drop everything that is not a letter or a digit before the string is used
+ *  as a Durable Object name — `abcd`, `AB-CD` and `abcd ` must all be the same
+ *  room. Same shape as cleanRecName: scrub, then bound. Server-side because a
+ *  client is never a validator, and this string decides which object a player
+ *  lands in. */
+function cleanRoomCode(raw) {
+  if (typeof raw !== 'string') return '';
+  const code = raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, ROOM_CODE_MAX);
+  return code.length >= ROOM_CODE_MIN ? code : '';
+}
+
+/** Scrub every display name in a message, in place. Returns true if anything
+ *  changed, so the caller can forward the original frame verbatim when nothing
+ *  did — a `state` message carries no name at all, and proving that with a
+ *  stringify 120 times a second is not worth the CPU.
+ *
+ *  A PvP name lands on a canvas in seven other browsers, which is exactly the
+ *  path `patch` and a record name take, so it gets exactly the same scrub:
+ *  cleanRecName itself, deliberately not a copy of it. A fix to one of these
+ *  must not be able to miss the other. Note the host's `roster` is scrubbed
+ *  too — the host is a client, and a client is never a validator. */
+function scrubPvpNames(msg) {
+  let changed = false;
+  if (typeof msg.name === 'string') {           // `hello`
+    const clean = cleanRecName(msg.name);
+    if (clean !== msg.name) { msg.name = clean; changed = true; }
+  }
+  if (Array.isArray(msg.players)) {             // `roster`, minted by the host
+    for (const p of msg.players) {
+      if (!p || typeof p.name !== 'string') continue;
+      const clean = cleanRecName(p.name);
+      if (clean !== p.name) { p.name = clean; changed = true; }
+    }
+  }
+  return changed;
+}
+
+/** GET /pvp — validate, then hand the untouched Request to the room object so
+ *  the WebSocket handshake completes inside it. */
+async function handlePvpUpgrade(env, request, url) {
+  // This route lives in REC_ROUTES, and it has to: a ROUTES handler is called
+  // as (env, body) *after* readBody() has drained the request, and the Upgrade
+  // header would have gone with it.
+  if ((request.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
+    return json(426, { ok: false, error: 'GET /pvp is a WebSocket endpoint (Upgrade: websocket)' });
+  }
+
+  // Three spellings of the same parameter. The relay does not care which one a
+  // client picked, and a disagreement here is a room nobody can ever join.
+  const code = cleanRoomCode(url.searchParams.get('room')
+    || url.searchParams.get('code')
+    || url.searchParams.get('r'));
+  if (!code) {
+    return json(400, {
+      ok: false,
+      error: 'Invalid room code (' + ROOM_CODE_MIN + '-' + ROOM_CODE_MAX + ' letters or digits)',
+    });
+  }
+
+  // No binding means this Worker was deployed from a wrangler.toml without the
+  // durable_objects block. Say so plainly instead of letting the top-level
+  // catch turn a missing binding into an opaque 500.
+  if (!env.PVP_ROOM) {
+    return json(503, { ok: false, error: 'PvP relay is not deployed on this Worker' });
+  }
+
+  // idFromName is the entire matchmaker: everybody who types the same code
+  // resolves to the same object, from anywhere in the world.
+  const stub = env.PVP_ROOM.get(env.PVP_ROOM.idFromName(code));
+  return stub.fetch(request);
+}
+
+/** One room. Holds up to ROOM_MAX_SOCKETS live sockets and no durable state
+ *  whatsoever: when the last player leaves, there is nothing left to forget. */
+export class PvpRoom {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    // Per-socket send budget, in memory. rateLimited() above is the wrong tool
+    // here — one KV write per message against a 1,000/day budget — and this
+    // counter is both free and exactly consistent, because there is only ever
+    // one object per room code. It is lost when the room hibernates, which is
+    // correct: a room quiet enough to hibernate has nothing to throttle.
+    this.budget = new Map();
+  }
+
+  async fetch(request) {
+    const [client, server] = Object.values(new WebSocketPair());
+
+    if (this.state.getWebSockets().length >= ROOM_MAX_SOCKETS) {
+      // The ninth joiner is refused with a close CODE, not an HTTP status. A
+      // handshake that never reaches 101 arrives in the browser as a bare 1006
+      // with no reason attached, so the lobby could not tell "room full" from
+      // "relay offline" — and those want very different words on screen.
+      // Plain accept() rather than acceptWebSocket(): this socket is closed in
+      // the same tick and never needs to hibernate.
+      server.accept();
+      server.close(PVP_CLOSE_FULL, 'Room full');
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    // Hibernation, not server.accept(). A held socket bills Durable Object
+    // duration for as long as it is open, so a ten-minute match — or worse, a
+    // lobby forgotten in a background tab — would keep the object awake and
+    // billing throughout. acceptWebSocket() hands the socket to the runtime,
+    // which evicts the object between messages and wakes it into
+    // webSocketMessage() below. On the free tier that is the whole difference;
+    // worker/README.md carries the arithmetic.
+    this.state.acceptWebSocket(server);
+
+    // This response deliberately BYPASSES json() — the only one in the file
+    // that does. It needs a null body and the Cloudflare-specific `webSocket`
+    // ResponseInit field, and it must not carry CORS headers: browsers do not
+    // preflight `new WebSocket()`, so CORS is inert on a handshake, and extra
+    // headers on a 101 are a way to make one fail. Do not "fix" this back.
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /* ---- the hibernation handlers ---- */
+
+  webSocketMessage(ws, message) {
+    // Nothing may throw out of here. An exception in a socket handler resets
+    // the object and takes the other seven players' match down with it, so
+    // every failure below is a dropped frame instead.
+    try {
+      // Budget FIRST, ahead of every shape check. What costs the room is being
+      // woken, and a junk frame wakes it exactly as hard as a good one — meter
+      // the size check and a peer could hold the object awake all match with
+      // oversized rubbish and never once be closed for it.
+      const over = this.spend(ws);
+      if (over === 'flood') {
+        try { ws.close(PVP_CLOSE_FLOOD, 'Too many messages'); } catch { /* already gone */ }
+        this.dropped(ws);
+        return;
+      }
+      // Merely over budget: drop the frame, keep the socket. A burst is far
+      // more often a lag spike catching up than an attack, and closing on one
+      // would eject a player for their own bad wifi.
+      if (over) return;
+
+      if (typeof message !== 'string') return;      // the protocol is JSON text
+      if (message.length > PVP_MSG_CHARS) return;
+
+      let msg;
+      try { msg = JSON.parse(message); } catch { return; }
+      if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
+      if (typeof msg.t !== 'string') return;        // unknown shapes go nowhere
+
+      if (msg.t === 'hello') this.remember(ws, msg);
+
+      // Forward the original bytes when the scrub changed nothing, which is
+      // every `state` frame — the hot path pays no stringify.
+      this.fanOut(ws, scrubPvpNames(msg) ? JSON.stringify(msg) : message);
+    } catch {
+      /* a malformed frame is dropped, never fatal */
+    }
+  }
+
+  webSocketClose(ws) { this.dropped(ws); }
+
+  webSocketError(ws) { this.dropped(ws); }
+
+  /* ---- internals ---- */
+
+  /** Per-socket budget over a one-second window. Returns '' within budget,
+   *  'drop' over it, 'flood' when the socket is so far over that it is holding
+   *  the room awake on purpose. Per SOCKET rather than per room deliberately:
+   *  a single room-wide counter would let one loud peer throttle the other
+   *  seven, and eight sockets at PVP_RL_MAX_MSGS already bounds the room. */
+  spend(ws) {
+    const nowMs = Date.now();
+    let b = this.budget.get(ws);
+    if (!b || b.until < nowMs) {
+      b = { n: 0, until: nowMs + PVP_RL_WINDOW_MS };
+      this.budget.set(ws, b);
+    }
+    b.n += 1;
+    if (b.n > PVP_RL_KILL_MSGS) return 'flood';
+    return b.n > PVP_RL_MAX_MSGS ? 'drop' : '';
+  }
+
+  /** Note who a socket belongs to, off its `hello`. serializeAttachment is the
+   *  only per-socket memory that survives hibernation — a plain property on
+   *  `ws` would be gone the first time the room is evicted. The peer's own `v`
+   *  is stored alongside its id so the relay never has to invent a protocol
+   *  version for the `bye` it may have to mint in dropped(). */
+  remember(ws, msg) {
+    if (typeof msg.id !== 'string' || !msg.id || msg.id.length > PVP_ID_MAX) return;
+    if (typeof msg.v !== 'number') return;
+    try {
+      ws.serializeAttachment({ id: msg.id, v: msg.v });
+    } catch {
+      /* the attachment is a nicety; peerTimeoutMs still covers the peer */
+    }
+  }
+
+  /** A socket left, cleanly or otherwise. This is the ONE place the relay
+   *  speaks on its own behalf rather than fanning out what it was given: a tab
+   *  that crashes never sends `bye`, and without this every other client
+   *  carries a ghost body until peerTimeoutMs (data/pvp.js) expires. What goes
+   *  out is byte-for-byte the `bye` that peer would have sent, so no client
+   *  needs a special case for it. */
+  dropped(ws) {
+    this.budget.delete(ws);
+    let att = null;
+    try { att = ws.deserializeAttachment(); } catch { att = null; }
+    // Clear it first: a socket we closed ourselves reaches here twice (once on
+    // the close call, once when the handshake completes) and the room must be
+    // told it left exactly once.
+    try { ws.serializeAttachment(null); } catch { /* closing; nothing to clear */ }
+    if (!att || typeof att.id !== 'string' || typeof att.v !== 'number') return;
+    this.fanOut(ws, JSON.stringify({ v: att.v, t: 'bye', id: att.id }));
+  }
+
+  /** Every socket in the room except the one it came from — the sender already
+   *  knows what it said, and echoing would double the hot path. Each send is
+   *  wrapped on its own: a socket that died between getWebSockets() and here
+   *  must not stop the other six from hearing. */
+  fanOut(from, frame) {
+    for (const s of this.state.getWebSockets()) {
+      if (s === from) continue;
+      try { s.send(frame); } catch { /* dead socket; webSocketClose will tidy */ }
+    }
+  }
+}
+
 /** method + path -> handler, for the routes that are not the POST-only,
- *  name+pinHash-shaped cloud-save ones. */
+ *  name+pinHash-shaped cloud-save ones. These handlers take the raw
+ *  (env, request, url) — which is why `GET /pvp` has to live here and cannot
+ *  live in ROUTES: a ROUTES handler only ever sees an already-drained body. */
 const REC_ROUTES = {
   'GET /records': handleGetRecords,
   'POST /records': handlePostRecord,
+  'GET /pvp': handlePvpUpgrade,
 };
 
 export default {
@@ -373,8 +652,11 @@ export default {
     const path = url.pathname.replace(/\/+$/, '') || '/';
 
     try {
-      // The record board first: it has its own body shape (no pinHash) and its
-      // own methods, so it is routed before the cloud-save envelope is applied.
+      // The record board and the PvP relay first: they have their own body
+      // shapes (no pinHash) and their own methods, so they are routed before
+      // the cloud-save envelope is applied. For /pvp that ordering is load-
+      // bearing rather than tidy — readBody() below would consume the request
+      // the WebSocket handshake needs.
       const recHandler = REC_ROUTES[request.method + ' ' + path];
       if (recHandler) return await recHandler(env, request, url);
 

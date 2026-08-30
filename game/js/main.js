@@ -60,6 +60,13 @@ CHLOE.game = (function(){
     if (!d.dialogs)   warn('data/story.js dialogs not loaded yet (STORY agent) — dialogs will be skipped.');
     if (!d.story)     warn('data/story.js not loaded yet (STORY agent) — using fallback start.');
     if (!d.portraits) warn('data/portraits.js not loaded yet (STORY agent) — using initial-letter avatars.');
+    /* §32. The one boot-time defence against this codebase's worst failure
+       mode: a module with no <script> tag ships dead and SILENT, and §24 did
+       exactly that. The multiplayer files degrade quietly by design, so
+       without this line a missing tag looks identical to "nobody opened a
+       lobby". Checking the data file is enough — it is the first of the four
+       tags, so if it is here the others were added in the same edit. */
+    if (!d.pvp)       warn('data/pvp.js not loaded — check the §32 script tags in index.html; the deathmatch will not open.');
 
     // cross-reference checks (help catch typos across agents)
     var id, i;

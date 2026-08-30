@@ -16,6 +16,10 @@
      hitscan(ability),                            // §29 the 9mm's straight ray
      gunShot(info), gunDry(),                     // ...and its flash + tracer
      waveTargets(ability), spawnWave(ability),    // §25 who it catches, and it
+     setSeat(i),                                  // §32 PvP: which seat I hold
+     spawnRemotes(n), setRemote(i, st),           // ...and the wire-driven
+     remoteSwing(i, pattern), tintRemote(i, hex), //    bodies of the other
+     remoteCount(),                               //    players (indices 1..n)
      debug(), _teleport(x, z), _setCrouch(bool)   // test hooks (§13 spirit)
    }
    Also publishes CHLOE.engine.stages (§24 stage selection) — see the block
@@ -34,6 +38,13 @@ CHLOE.engine = CHLOE.engine || {};
     return { x: 0, z: 0, yaw: 0, pitch: 0, crouch: false, eye: 0, knightDist: 0,
              mode: 'dead', churchLoaded: false, knightLoaded: false,
              locked: false, squad: 0, squadAlive: 0,
+             /* §32: the PvP surface answers before init as well. A consumer
+                reading debug().remotes on a machine with no WebGL — or before
+                the arena is built — must get 0 and an empty list, not
+                undefined; same rule `stage` below is here for. `seat` is the
+                one live fact of the three: setSeat records on the dead API
+                too, exactly as setStage does. */
+             seat: seatIndex, remotes: 0, remoteState: [],
              /* §24: a caller reading debug().stage must not have to branch on
                 whether WebGL exists, or on whether init() has run yet — answer
                 the stage we WOULD build, out of its own data. Hardcoding
@@ -76,6 +87,18 @@ CHLOE.engine = CHLOE.engine || {};
     A.asteroidPoint = function () { return { x: 0, z: 0 }; };
     A.asteroidActive = function () { return false; };
     A.spawnSquad = noop; A.squadSize = function () { return 1; };
+    /* §32 PvP bodies. Same rule as everything else in this list: ui/battle3d.js
+       calls all six on the PvP path, so a machine with no WebGL must answer
+       rather than throw its way through a match. `setSeat` still RECORDS the
+       seat for the same reason `setStage` below still records the stage — the
+       lobby and the HUD read it back, and a seat that answers null on a
+       degraded machine is a player nobody can place. */
+    A.setSeat = function (i) { seatIndex = (i == null || i < 0) ? null : (i | 0); return seatIndex; };
+    A.spawnRemotes = function () { return 0; };
+    A.setRemote = function () { return false; };
+    A.remoteSwing = function () { return false; };
+    A.tintRemote = function () { return false; };
+    A.remoteCount = function () { return 0; };
     A.abilityTargets = function () { return [0]; };   // headless: always connect
     A.abilityHits = function () { return true; };
     A.nearestKnightDist = function () { return 2; };
@@ -158,6 +181,13 @@ CHLOE.engine = CHLOE.engine || {};
      paints from data long before anyone loads a renderer. */
   var stageId = null;    // id of the stage the arena is standing in (or will build)
   var stageDef = null;   // its resolved data object; null = no data/stages.js, legacy church
+
+  /* §32 PvP seating: which of the stage's own `spawns` this client stands on.
+     Declared HERE, above the THREE guard, for exactly the reason stageId is —
+     a machine with no WebGL must still answer which seat it was given rather
+     than handing debug() an `undefined`, and nothing below the guard runs on
+     one. null means PvE, and every spawn falls back to `playerSpawn`. */
+  var seatIndex = null;
 
   /* ---------------------------------------------------- §24 stage selection
      WHY THIS LIVES IN arena3d.js AND NOT engine/stages.js: index.html lists
@@ -297,6 +327,13 @@ CHLOE.engine = CHLOE.engine || {};
        personality. Built lazily by brainOf() because the leader is on the
        floor and walking before spawnSquad ever runs. */
     brain: null,
+    /* §32: is this body a REMOTE PLAYER, and what did its owner last say about
+       it? `remote` is the single flag updateOneKnight branches on to excise the
+       whole brain — a PvE knight is `false` here for its entire life, which is
+       what makes every PvP path additive. `remoteState` stays null until the
+       first packet lands (the body stands on its seat until then) and is the
+       wire's own {x, z, yaw, pitch, cr, an, hp, lv, alive}. */
+    remote: false, remoteState: null,
     /* §28 A: HIS OWN LEVEL. `levelT` is seconds alive in this fight — the
        trigger data/knighttree.js names — and `level` is what that is worth
        for his personality, capped against the round's baseline. `levelTell`
@@ -361,6 +398,11 @@ CHLOE.engine = CHLOE.engine || {};
     var out = {}, k;
     for (k in base) out[k] = base[k];
     if (st.playerSpawn) out.playerSpawn = st.playerSpawn;
+    /* §32 the PvP seat ring. THIS IS AN ALLOW-LIST: a stage key with no line
+       here is dropped silently, which is precisely how a new stage field ships
+       dead. Taken by reference like `lights` — it is content, and nothing in
+       this file ever writes to it. */
+    if (st.spawns) out.spawns = st.spawns;
     if (st.arena) {
       var a = {};
       for (k in st.arena) a[k] = st.arena[k];
@@ -756,6 +798,9 @@ CHLOE.engine = CHLOE.engine || {};
       faceKnightTo(k, cfgSpawn().x, cfgSpawn().z);
       knightLoaded = true;
       if (pendingSquad > 1) { spawnSquad(pendingSquad); pendingSquad = 0; }
+      /* §32: the same replay for a deathmatch's bodies. spawnRemotes clears
+         pendingRemotes itself, so this cannot loop. */
+      if (pendingRemotes > 0) { A.spawnRemotes(pendingRemotes); }
     };
 
     if (!loader || !models.knight) {
@@ -966,6 +1011,46 @@ CHLOE.engine = CHLOE.engine || {};
   }
 
   var pendingSquad = 0;
+  /* §32's twin of pendingSquad, and it exists for the same reason: a spawn
+     asked for before knight.glb has landed must be remembered, not dropped.
+     0 means nothing is waiting — spawnRemotes(0) is a teardown and must never
+     be replayed as one. */
+  var pendingRemotes = 0;
+
+  /* ONE body, built in the order §21 paid for. Factored out of spawnSquad in
+     §32 because the PvP bodies need the identical recipe and a second copy of
+     it is a second chance to get the order wrong:
+
+       group -> clone the proto -> clone the materials PER MESH -> mountKnight
+       -> and only THEN does the caller move the group.
+
+     The order is the whole point. mountKnight rigs the model where it stands,
+     so a clone already parented to a group sitting at a spawn would bake that
+     offset into every bone — §21's "measured in the wrong space" bug, one line
+     of setup away from coming back. The per-mesh material clone is what makes
+     a flinch flash the one body you hit instead of the whole floor.
+
+     `shadow` is a parameter rather than a constant because §32's remote bodies
+     drop the shadow pass: a knight is 103 meshes and 44k triangles, eight of
+     them is ~824 draw calls in the colour pass and the same again in the
+     shadow pass, and a shadow under a body you are trying to shoot is not what
+     makes the fight readable. Geometry and textures stay shared by reference
+     either way, so VRAM does not multiply — only draw calls do. */
+  function makeKnightBody(k, shadow) {
+    k.group = new THREE.Group();
+    scene.add(k.group);
+    var clone = knightProto.clone(true);
+    clone.traverse(function (o) {
+      if (o.isMesh && o.material) {
+        var mats = Array.isArray(o.material) ? o.material : [o.material];
+        var copy = mats.map(function (m) { var c = m.clone(); k.mats.push(c); return c; });
+        o.material = Array.isArray(o.material) ? copy : copy[0];
+        o.castShadow = !!shadow;
+      }
+    });
+    mountKnight(k, clone);
+    return k;
+  }
 
   /* §20: put `n` knights on the floor. The first is the one that loaded; the
      rest are clones of its dressed model, each with its own rig, light and
@@ -982,23 +1067,11 @@ CHLOE.engine = CHLOE.engine || {};
     for (var i = 0; i < n; i++) {
       var k = (i === 0) ? knights[0] : makeKnightState();
       if (i > 0) {
-        k.group = new THREE.Group();
-        scene.add(k.group);
-        var clone = knightProto.clone(true);
-        // clone materials so a flinch flash is per-knight, not squad-wide
-        clone.traverse(function (o) {
-          if (o.isMesh && o.material) {
-            var mats = Array.isArray(o.material) ? o.material : [o.material];
-            var copy = mats.map(function (m) { var c = m.clone(); k.mats.push(c); return c; });
-            o.material = Array.isArray(o.material) ? copy : copy[0];
-            o.castShadow = true;
-          }
-        });
-        /* NOT `k.group.add(clone)` first: mountKnight rigs the model where it
-           stands, and a clone already parented to a group sitting at the
-           spawn would bake that offset into every bone. §21's "measured in
-           the wrong space" bug, one line of setup away from coming back. */
-        mountKnight(k, clone);
+        /* The clone, its own materials (so a flinch flash is per-knight, not
+           squad-wide) and the mount, in that order and NOT with the group
+           parented first — see makeKnightBody for why the order is the whole
+           point. A PvE knight casts a shadow. */
+        makeKnightBody(k, true);
         var lc = (D().lights || {}).knight || {};
         k.light = new THREE.PointLight(lc.color != null ? lc.color : 0xff2038,
           (lc.intensity != null ? lc.intensity : 0.55) * LIGHT_SCALE,
@@ -1058,6 +1131,232 @@ CHLOE.engine = CHLOE.engine || {};
 
   A.spawnSquad = function (n) { spawnSquad(Math.max(1, n || 1)); };
   A.squadSize = function () { return knights.length; };
+
+  /* ================================================= §32 remote bodies (PvP)
+     Bodies driven from the WIRE instead of by the §22 brain. Everything below
+     is additive: with no PvP module loaded nothing ever sets `k.remote`, and
+     every knight on the floor takes exactly the path it took yesterday.
+
+     THREE THINGS THAT ARE NOT PREFERENCES:
+
+     1. REMOTE BODIES START AT INDEX 1. knights[0] is structurally special — it
+        is aliased as the module-level `knight`, it keeps the source GLB's OWN
+        materials rather than a clone, and it is what debug() reports as
+        knightState/knightPos/knightRig. Tinting it would recolour the shared
+        source materials, i.e. every body in the scene at once.
+     2. NO PER-BODY LIGHT. Every PvE knight gets a PointLight; the Ring already
+        runs five (4 rim + 1 key) and eight more would make thirteen.
+        data/stages.js rejects twelve in writing — "twelve point lights would
+        force three r128 to recompile every material in the scene for a light
+        count that big" — and worse, the count would CHANGE as players join and
+        die, re-keying every material's shader program mid-match. Identity comes
+        from the tint instead.
+     3. NOBODY IS EVER SPLICED OUT MID-MATCH. The array index IS the body
+        identity: every command here is A.thing(..., index), atk.timers close
+        over `k` rather than over the index, and debug()'s per-knight arrays are
+        positional. Splicing renumbers everyone below it and silently re-targets
+        every in-flight timer and HUD label. A player who leaves or dies is
+        marked dead and hidden IN PLACE; the array is only ever rebuilt between
+        matches, by spawnRemotes itself. */
+
+  /* Tear down the bodies of the last match. MATERIALS ONLY, and that is not an
+     oversight: clone(true) shares geometry by reference and Material.clone()
+     shares every texture slot, so disposing either would take the source GLB's
+     own meshes and maps down with the copy — which is exactly why eight bodies
+     cost draw calls but not VRAM. The ~103 cloned material objects per body are
+     the real leak, and repeated lobbies are how you notice it.
+     Runs BETWEEN matches (spawnRemotes calls it first), never during one, so
+     rule 3 above is kept: remote bodies are always the tail of the array and
+     all of them go, so nothing surviving is renumbered. */
+  function dropRemotes() {
+    for (var i = knights.length - 1; i >= 1; i--) {
+      var k = knights[i];
+      if (!k.remote) continue;
+      if (k.group) {
+        if (k.group.parent) k.group.parent.remove(k.group);
+        for (var m = 0; m < k.mats.length; m++) {
+          try { k.mats[m].dispose(); } catch (e) {}
+        }
+      }
+      knights.splice(i, 1);
+    }
+  }
+
+  /* `n` wire-driven bodies at indices 1..n. Returns how many actually stand up,
+     which is 0 before the knight asset settles — ui/battle3d.js gates on
+     A.assetsReady() first, and answering 0 rather than throwing is what makes a
+     caller that forgot merely wrong instead of fatal. spawnRemotes(0) is the
+     match teardown.
+
+     NO initBrain, deliberately. A remote player's motion comes off the wire, and
+     initBrain also deals a personality, a seniority and a knighttree level —
+     three facts about a knight who earns them by standing on this floor, and
+     all three meaningless for a body someone else is driving. (The death
+     collapse still needs `tune.deathMs`, so brainOf mints one lazily at the
+     moment of death; that is the file's own degrade path, and updateLevel never
+     runs for a remote so the ladder it deals never moves.) */
+  A.spawnRemotes = function (n) {
+    n = Math.max(0, Math.floor(n || 0));
+    dropRemotes();
+    pendingRemotes = 0;
+    if (!n || !inited || !scene) return 0;
+
+    /* The knight GLB is what every body is cloned from, and it may not have
+       landed yet — ui/battle3d.js seats the players and spawns the bodies
+       BEFORE it holds the fight behind A.assetsReady(), so on a cold load this
+       runs with no proto and there is nothing to clone. Answering 0 and
+       forgetting would leave a match whose other seven players are invisible
+       for its whole length, which is how it actually failed the first time.
+       So remember, exactly as spawnSquad does with pendingSquad, and let the
+       loader's attach() replay it the moment the model arrives. */
+    if (!knightProto) { pendingRemotes = n; return 0; }
+
+    /* knights[0] is the PvE knight and he is not in this fight. A.reset() —
+       which battle3d calls on the way in — sets EVERY body alive, so without
+       this he spends the whole deathmatch standing at the stage's knightSpawn,
+       visible and, because every hit test filters on `alive`, hittable: a
+       stray ability would price through combat3's enemy row 0, which in a
+       deathmatch belongs to seat 0. He is parked rather than removed, because
+       index 0 is structurally special — it is the module-level `knight`, it
+       holds the source GLB's own materials rather than clones, and debug()
+       reads it — and the next PvE round's A.reset() stands him back up. */
+    if (knights[0]) {
+      knights[0].alive = false;
+      if (knights[0].group) knights[0].group.visible = false;
+    }
+
+    for (var i = 1; i <= n; i++) {
+      var k = makeKnightState();
+      k.remote = true;
+      makeKnightBody(k, false);      // no shadow pass — see makeKnightBody
+      knights.push(k);
+      k.alive = true;
+      restoreSword(k);
+      /* Stand him on the stage's own seat for this index. It is only what you
+         see for the frame before his first packet arrives — setRemote SNAPS on
+         the first state it is given — but a body that spends that frame inside
+         another one reads as a bug. navNearest walks a seat authored against
+         old geometry back onto real floor; on the Ring (no navgrid) it is the
+         identity. */
+      var sp = cfgSpawn(i);
+      var spot = navNearest(sp.x, sp.z, KNIGHT_RADIUS);
+      k.group.position.set(spot.x, 0, spot.z);
+      k.group.visible = true;
+      faceKnightTo(k, 0, 0);         // every seat faces the centre
+    }
+    return n;
+  };
+
+  A.remoteCount = function () {
+    var c = 0;
+    for (var i = 0; i < knights.length; i++) if (knights[i].remote) c++;
+    return c;
+  };
+
+  /* The one place a remote index is resolved. Index 0 can never be one (rule 1),
+     an index past the end is a peer this client never spawned a body for, and
+     both answer null rather than throwing — a `roster` message that arrives one
+     frame before `start` is a normal race, not a bug. */
+  function remoteAt(i) {
+    var k = knights[i];
+    return (k && k.remote) ? k : null;
+  }
+
+  /* The wire's own state for one body: {x, z, yaw, pitch, cr, an, hp, lv, alive}.
+     Every field is optional and a missing one leaves the last value standing —
+     a partial packet must not teleport a body to the origin.
+
+     `yaw` is the sender's PLAYER yaw, the same number A.debug().yaw reports,
+     not a body rotation: the wire carries what a player has, and what that
+     means for a knight's shoulders is this file's business (see remoteBodyYaw).
+
+     The first state SNAPS. Everything after it eases — applyRemoteTransform
+     runs the interpolation — because a body easing in from its seat across the
+     whole Ring on the first packet reads as a spawn animation nobody wrote. */
+  A.setRemote = function (i, st) {
+    var k = remoteAt(i);
+    if (!k || !st) return false;
+    var r = k.remoteState;
+    var fresh = !r;
+    if (!r) {
+      r = k.remoteState = { x: k.group ? k.group.position.x : 0,
+                            z: k.group ? k.group.position.z : 0,
+                            yaw: 0, pitch: 0, cr: false, an: 'idle',
+                            hp: 0, lv: 1, alive: true };
+    }
+    if (typeof st.x === 'number') r.x = st.x;
+    if (typeof st.z === 'number') r.z = st.z;
+    if (typeof st.yaw === 'number') r.yaw = st.yaw;
+    if (typeof st.pitch === 'number') r.pitch = st.pitch;
+    if (st.cr != null) r.cr = !!st.cr;
+    if (st.an != null) r.an = String(st.an);
+    if (typeof st.hp === 'number') r.hp = st.hp;
+    if (typeof st.lv === 'number') r.lv = st.lv;
+    if (fresh && k.group) {
+      k.group.position.x = r.x;
+      k.group.position.z = r.z;
+      k.group.rotation.y = remoteBodyYaw(r.yaw);
+      k.baseRot = k.group.rotation.y;
+    }
+    /* Death is a ONE-WAY door and it goes through the path the fight already
+       has: A.flinch(_, killed) is what arms b.state='death', clears the swing
+       timers and starts the collapse updateDeath plays out. Writing k.alive by
+       hand here would leave a body standing in its guard pose forever. Zero
+       damage, because the wire's `died` message is the victim's own word — this
+       client is not pricing it. */
+    if (st.alive === false && k.alive) { r.alive = false; A.flinch(0, true, i); }
+    return true;
+  };
+
+  /* The seat's colour, on `m.color` and never on `emissive`. Emissive is
+     triple-booked — the hit flash (flinch), the kill flash and the level-up
+     tell all write it and all reset it unconditionally to 0x000000 — so an
+     emissive identity marker is silently stomped the first time a player is
+     hit. `color` multiplies the armour texture, so the plate still reads as
+     plate. The eight hues are data/pvp.js's to author (and to author DARK: this
+     is the final albedo, not a blend, because a blend factor would be a tuning
+     constant living in an engine file). */
+  A.tintRemote = function (i, color) {
+    var k = remoteAt(i);
+    if (!k || color == null) return false;
+    for (var m = 0; m < k.mats.length; m++) {
+      var mm = k.mats[m];
+      if (mm.color) mm.color.setHex(color);
+    }
+    return true;
+  };
+
+  /* Play the swing the wire says this body threw. `pattern` may be an id (what
+     the wire carries) or the pattern object itself.
+
+     THE HIT IS NOT RESOLVED HERE. strikeNow skips hitTest for a remote body:
+     the attacker owns "my swing connected with you for N damage", and a second
+     opinion computed locally is the two-clocks bug (§21) wearing a network
+     cable. This call is the PICTURE only.
+
+     patternForKnight is bypassed for the same reason (see its own guard): it
+     substitutes a different pattern based on the body's LEVEL behind the
+     caller's back, and in PvP — where levels come from kills — a declared
+     `overhead` could play a pattern with a different schedule and a different
+     number of damage callbacks from the one the wire named. */
+  A.remoteSwing = function (i, pattern) {
+    var k = remoteAt(i);
+    if (!k || !k.alive) return false;
+    var pat = (typeof pattern === 'string') ? ((D().patterns || {})[pattern]) : pattern;
+    if (!pat) return false;
+    /* telegraph SNAPS the body round to face the LOCAL player — that is the PvE
+       aim lock, and it is wrong for a body whose facing belongs to the client
+       driving it: a peer swinging at somebody else would flick toward you on
+       every blow. Put the heading back rather than teaching telegraph about the
+       wire; the next frame's ease is measured from where its owner says it is
+       standing. Nothing reads atk.lockDir/lockYaw for a remote — the aim lock,
+       the lunges and the hit test are all excised by the branch in
+       updateOneKnight. */
+    var hold = k.group ? k.group.rotation.y : 0;
+    A.telegraph(pat, null, knights.indexOf(k));
+    if (k.group) { k.group.rotation.y = hold; k.baseRot = hold; }
+    return true;
+  };
 
   /* §28 A: what each knight on the floor currently IS. The 3D layer owns this
      because it owns the personality, the seconds alive and the moment of
@@ -1242,7 +1541,44 @@ CHLOE.engine = CHLOE.engine || {};
      intensity of two church candles that were removed three rounds ago. */
   var candleLights = [];
 
-  function cfgSpawn() { return D().playerSpawn || { x: 0, z: 4.6, yaw: 0 }; }
+  /* §32: an optional SEAT. Called with no argument — which is every PvE call
+     site, unchanged — it answers the module's own seat when one has been set
+     and the stage declares a ring of them, so A.reset() and the stage-switch
+     path both place the player on it without either of them learning anything
+     about PvP. One accessor, every entry.
+     A stage with no `spawns` (the church), a seat past the end of the ring, and
+     no seat at all all fall through to the `playerSpawn` this has always
+     returned: asking for seat 5 of a stage that declares one spawn is a crowded
+     fight, not a throw. */
+  function cfgSpawn(seat) {
+    var d = D();
+    if (seat == null) seat = seatIndex;
+    if (seat != null && d.spawns && d.spawns[seat]) return d.spawns[seat];
+    return d.playerSpawn || { x: 0, z: 4.6, yaw: 0 };
+  }
+
+  /* §32: which seat of the stage's ring this client stands on. null is PvE and
+     puts every spawn back on `playerSpawn`.
+     It RECORDS, so reset() and setStage() pick it up out of cfgSpawn() — and it
+     also APPLIES immediately when the arena is already standing, because the
+     seat is not known until the host's `start` message arrives and
+     ui/battle3d.js therefore seats the player AFTER init/reset. A seat that
+     only took effect on the next reset would drop eight players on one spot.
+     Deliberately NOT a call to A.reset(): re-facing every knight and clearing
+     every swing is not what "sit down over here" means. */
+  A.setSeat = function (i) {
+    seatIndex = (i == null || i < 0) ? null : Math.floor(i);
+    if (!inited) return seatIndex;
+    var sp = cfgSpawn();
+    pos.x = sp.x; pos.z = sp.z;
+    vel.x = 0; vel.z = 0;
+    yaw = sp.yaw != null ? sp.yaw : 0;
+    if (camera) {
+      camera.position.set(pos.x, eyeH, pos.z);
+      camera.rotation.set(pitch, yaw, 0);
+    }
+    return seatIndex;
+  };
 
   /* ================================================================ §24 stages
      THE PLACE, built and unbuilt.
@@ -3186,6 +3522,13 @@ CHLOE.engine = CHLOE.engine || {};
      rolls a pattern nobody on the floor has learned. */
   function windowsOf(p) { return (p && p.hits && p.hits.length) ? p.hits.length : 1; }
   function patternForKnight(k, pattern) {
+    /* §32: never for a wire-driven body. This substitutes a different pattern
+       based on the body's LEVEL behind the caller's back, and in PvP — where
+       levels come from kills — a declared `overhead` could come back as a
+       pattern with a different schedule and a different number of damage
+       callbacks from the one the wire actually named. Two clocks, by another
+       road. The declared pattern goes through exactly as declared. */
+    if (k.remote) return pattern;
     var kt = ktree();
     if (!kt || !pattern || !pattern.id) return pattern;
     var known = kt.patterns(k.level || 1);
@@ -3207,8 +3550,13 @@ CHLOE.engine = CHLOE.engine || {};
     /* §22: a reeling knight cannot attack — that is what the punish window IS.
        The miss goes back immediately so ui/battle3d.js retires its warning
        instead of leaving a prompt up for a swing that will never come. */
-    var bs = brainOf(k);
-    if (bs.staggerT > 0) { if (cb) cb({ hit: false, pattern: pattern, staggered: true }); return; }
+    /* §32: a wire-driven body has no brain and must not be given one here.
+       brainOf() mints one lazily, and initBrain deals a personality, a
+       seniority and a knighttree level that mean nothing for a body somebody
+       else is driving — a remote is also never staggered by local rules, since
+       its owner decides what it is doing. */
+    var bs = k.remote ? null : brainOf(k);
+    if (bs && bs.staggerT > 0) { if (cb) cb({ hit: false, pattern: pattern, staggered: true }); return; }
     /* §28 A: swap in something he actually knows BEFORE anything reads the
        pattern, so the schedule, the pose and the damage all agree about which
        swing this is. The caller is told which one it got — ui/battle3d.js
@@ -3221,7 +3569,7 @@ CHLOE.engine = CHLOE.engine || {};
     atk.pattern = pattern;
     atk.cb = cb || null;
     atk.t0 = performance.now();
-    bs.atkCd = bs.tune.attackCooldownMs / 1000;
+    if (bs) bs.atkCd = bs.tune.attackCooldownMs / 1000;
     /* §28 A2: ONE scalar for the whole swing, held back if the full
        round multiplier would take this pattern's wind-up under the
        readability floor. Everything below divides by it — swingDur, the hit
@@ -3287,7 +3635,12 @@ CHLOE.engine = CHLOE.engine || {};
     var win = atk.hits[idx] || {};
     var last = (idx >= atk.hits.length - 1);
     // hidden tab: the player physically cannot dodge (rAF frozen) — mercy miss
-    var hit = document.hidden ? false : hitTest(k, pattern);
+    /* §32: and a wire-driven body never resolves its own hit. The attacker owns
+       "my swing connected with you for N damage" and declares it over the wire;
+       re-deriving it here from a picture this client is only PLAYING BACK would
+       be a second opinion on the same fact — §21's two clocks, with a network
+       cable between them. A.remoteSwing is the picture, nothing more. */
+    var hit = (k.remote || document.hidden) ? false : hitTest(k, pattern);
     /* §22 ground_slam: the shockwave you can SEE, thrown from his boots at the
        instant the hit test measures from them. Same frame, same origin — a
        ring that lags the damage is worse than no ring at all. */
@@ -3993,7 +4346,20 @@ CHLOE.engine = CHLOE.engine || {};
     if (k.brain) return k.brain;
     var i = 0;
     for (var n = 0; n < knights.length; n++) if (knights[n] === k) i = n;
-    return initBrain(k, i);
+    var b = initBrain(k, i);
+    /* §32: a wire-driven body gets a brain from exactly one place — the death
+       collapse, which is timed off `tune.deathMs` and is the whole reason
+       spawnRemotes can skip initBrain and still let a remote player fall over
+       properly. Keep the tune; put back the LADDER it dealt on the way past.
+       A seniority, a join round and a knighttree level are facts about a knight
+       who earns them standing on this floor, and engine/combat3.js PULLS
+       A.knightLevels() every tick — so a body that died at second four of a
+       deathmatch would otherwise price itself as a level-3 veteran it never
+       was. Measured before this line: knightLevels went [1,1,1,1] ->
+       [1,3,1,1] the instant a remote died. `personality` is deliberately left
+       standing: the tune really was built from it, and saying so is honest. */
+    if (k.remote) { k.level = 1; k.seniority = 1; k.joinRound = 1; }
+    return b;
   }
 
   /* States he does not CHOOSE to be in. The frame one of them releases him he
@@ -4200,6 +4566,122 @@ CHLOE.engine = CHLOE.engine || {};
     if (f >= 1) k.group.visible = false;
   }
 
+  /* Safety net: `swinging` is cleared by clearAttack, which rides on the strike
+     timer's setTimeout. A callback path that dies — or a headless test that
+     steps dt with no timers running at all — used to leave him frozen in guard
+     forever, which is also a knight who never moves again.
+     Lifted out of updateOneKnight in §32 so the wire-driven branch runs the
+     SAME net rather than a second copy of the rule; it is still called from
+     exactly where it was, before the state cascade. */
+  function swingSafetyNet(k) {
+    var st = k.anim;
+    if (st.swinging && k.atk.mode === 'idle' && st.swingT > swingTotal(st)) {
+      st.swinging = false;
+      st.swingT = 0;
+    }
+  }
+
+  /* ---- the swing clock, and the glow that rides it ----
+     ONE clock for the picture and the damage. atk.t0 is the same
+     performance.now() stamp the strike timer counts from, so a phase measured
+     off it puts the impact frame ON the damage frame. The old code integrated
+     dt over 1.25 * telegraphMs, parking the visual hit a permanent 20% late -
+     375-475ms, roughly TWICE the whole 220ms i-frame window, so a player who
+     dodged when the blade looked like it landed was guaranteed to be hit.
+     A._tick advances `elapsed` but not the wall clock, so take whichever has
+     moved further: rAF snaps to the wall, the headless test hook scrubs by dt.
+
+     §32 lifted this out of updateOneKnight unchanged, because a wire-driven
+     body still has to advance its own swing clock — without it the pose freezes
+     at phase 0 for the whole swing — and a swing clock that exists in two
+     copies is §21's lost fight all over again. Every light line is already
+     `if (k.light)`-guarded, so a remote body (which deliberately has none)
+     simply runs the clock and skips the glow. */
+  function swingClockAndGlow(k, dt) {
+    var st = k.anim, atk = k.atk;
+    if (atk.mode === 'telegraph' && atk.pattern) {
+      var wall = (performance.now() - atk.t0) / 1000;
+      st.swingT = (wall > st.swingT) ? wall : st.swingT + dt;
+      // the glow rides the CURRENT window's phase, so a combo pulses per stab
+      var p = Math.min(1, swingLocalP(st));
+      if (k.light) k.light.intensity = (0.9 + p * 2.6) * LIGHT_SCALE;
+    } else if (st.swinging) {
+      st.swingT += dt;                 // follow-through, then the settle to guard
+      if (k.light) k.light.intensity = 3.2 * LIGHT_SCALE;
+    } else if (k.light) {
+      k.light.intensity = (0.55 + Math.sin((elapsed + st.phase) * 5.3) * 0.1) * LIGHT_SCALE;
+    }
+    /* §28 A: the level-up tell rides ON TOP of whatever the light was doing,
+       so it reads mid-swing as well as mid-stroll — and decays with its own
+       timer rather than overwriting the state the next frame restores. */
+    if (k.levelTell > 0 && k.light) {
+      var kt2 = ktree();
+      var tf = k.levelTell / Math.max(0.05, (kt2 ? kt2.tellMs() : 800) / 1000);
+      k.light.intensity += 2.6 * tf * tf * LIGHT_SCALE;
+    }
+  }
+
+  /* ------------------------------------------------- §32 the wire-driven body
+     What the brain is to a knight, `k.remoteState` is to a remote player: the
+     last thing its owner said about where it is and what it is doing. This
+     function is the whole of "drive it" — there is no decision in it anywhere,
+     which is the point.
+
+     `data.pvp.interpMs` is a first-order TIME CONSTANT, not a lerp step:
+     `alpha` is the frame-rate-correct approach the yaw ease and the sword drop
+     already run on, so a 30fps client and a 144fps one converge on the same
+     place at the same moment instead of the slower one arriving late. Missing
+     data/pvp.js falls back to 100ms rather than dividing by zero.
+
+     Survives k.rig === null throughout: if knight.glb is slow or fails the
+     arena stands fallback totems, and a totem is a body with no rig at all.
+     Nothing here touches the rig — poseKnight is the only caller that does, and
+     it returns early on one. */
+  function pvpData() { return (CHLOE.data && CHLOE.data.pvp) || {}; }
+
+  /* The wire carries a PLAYER's yaw (the number A.debug().yaw reports), because
+     a player is what is sending it. A knight body's rotation is a different
+     convention — yawTo() measures atan2(dx, dz) to what he is facing and adds
+     the model's own rotY — so the two are reconciled HERE, in the file that
+     owns what a body's rotation means, rather than out on the wire where two
+     lanes would have to agree about it. Derivation: a camera at yaw y looks
+     along (-sin y, -cos y), and atan2(-sin y, -cos y) === y + PI. */
+  function remoteBodyYaw(playerYaw) {
+    return playerYaw + Math.PI + ((D().knight && D().knight.rotY) || 0);
+  }
+
+  /* Pose names the wire may name. Anything else — including a state a future
+     client invents — falls back to idle rather than reaching poseKnight with a
+     name its library has never heard of. */
+  var REMOTE_POSES = { idle: 1, walk: 1, dash: 1, strafe: 1, backpedal: 1, turnInPlace: 1 };
+
+  function applyRemoteTransform(k, dt) {
+    var r = k.remoteState, g = k.group;
+    if (!g) return;
+    swingSafetyNet(k);                 // same net, same rule, one copy of it
+    swingClockAndGlow(k, dt);
+    /* The pose the owner says it is in. While a swing is live poseKnight reads
+       `swinging` first and ignores this entirely — same as a PvE knight, whose
+       gait also loses to his own blade. */
+    k.anim.state = (r && REMOTE_POSES[r.an]) ? r.an : 'idle';
+    if (!r) return;                    // spawned, no packet yet: it stands there
+    var tau = 1000 / Math.max(20, pvpData().interpMs || 100);
+    var a = alpha(tau, dt);
+    var nx = g.position.x + (r.x - g.position.x) * a;
+    var nz = g.position.z + (r.z - g.position.z) * a;
+    /* THROUGH containKnight, exactly like his own feet. A peer whose client
+       believes it is standing outside the Ring must not put a body outside
+       OURS, and §25 is explicit about why this is a call and not a copy: a
+       containment rule that exists in two copies is a stage contained on one
+       path and not the other. The fallback is where the body legally stood at
+       the top of the frame — the navgrid rescue above guarantees that cell. */
+    var kept = containKnight(nx, nz, g.position.x, g.position.z);
+    g.position.x = kept.x;
+    g.position.z = kept.z;
+    g.position.y = 0;                  // the body's vertical rides the rig's _root
+    easeYaw(k, remoteBodyYaw(r.yaw), dt, tau);
+  }
+
   /* §22 knight brain: the state machine above drives where he stands; the
      telegraph/strike windows still come from ui/battle3d.js, so the dodge
      rules of §16 are untouched. Facing rules are §18's: locked to the lane
@@ -4217,6 +4699,17 @@ CHLOE.engine = CHLOE.engine || {};
       k.group.position.z = fix.z;
     }
     if (!k.alive) { updateDeath(k, dt); return; }
+
+    /* §32 THE WIRE DRIVES THIS ONE. Below this line is ~280 lines of knight:
+       the brain cascade, the gait, squad separation, the min-distance push, the
+       lunges, containment and the facing rules — every one of them a DECISION,
+       and a remote player's decisions were made on another machine. So the
+       whole of it is excised for a remote body and replaced by "put it where
+       its owner says it is". Nothing above this line is AI: the navgrid rescue
+       is a rule about the floor and the death path is the collapse animation,
+       and a wire-driven body wants both. applyRemoteTransform does its own
+       containment, through the same containKnight the excised code ends on. */
+    if (k.remote) { applyRemoteTransform(k, dt); poseKnight(k, dt); return; }
 
     var st = k.anim, b = brainOf(k), t = b.tune;
     updateLevel(k, dt);               // §28 A: his own ladder, on seconds alive
@@ -4258,14 +4751,8 @@ CHLOE.engine = CHLOE.engine || {};
       if (b.shoveT <= 0) { b.shoveLeft = 0; b.shoveDur = 0; }
     }
 
-    /* Safety net: `swinging` is cleared by clearAttack, which rides on the
-       strike timer's setTimeout. A callback path that dies — or a headless
-       test that steps dt with no timers running at all — used to leave him
-       frozen in guard forever, which is also a knight who never moves again. */
-    if (st.swinging && atk.mode === 'idle' && st.swingT > swingTotal(st)) {
-      st.swinging = false;
-      st.swingT = 0;
-    }
+    // the guard-forever net (see swingSafetyNet), in the place it has always run
+    swingSafetyNet(k);
 
     // ---- which state owns him this frame ----
     var swingLive = (atk.mode === 'telegraph' || atk.mode === 'strike');
@@ -4512,36 +4999,8 @@ CHLOE.engine = CHLOE.engine || {};
     if (!travelling && !st.swinging && b.state !== 'stagger' && b.state !== 'taunt' &&
         Math.abs(yerr) > t.turnThreshold) st.state = 'turnInPlace';
 
-    /* ---- swing + glow ----
-       ONE clock for the picture and the damage. atk.t0 is the same
-       performance.now() stamp the strike timer counts from, so a phase
-       measured off it puts the impact frame ON the damage frame. The old code
-       integrated dt over 1.25 * telegraphMs, parking the visual hit a
-       permanent 20% late - 375-475ms, roughly TWICE the whole 220ms i-frame
-       window, so a player who dodged when the blade looked like it landed was
-       guaranteed to be hit. A._tick advances `elapsed` but not the wall clock,
-       so take whichever has moved further: rAF snaps to the wall, the headless
-       test hook scrubs by dt. */
-    if (atk.mode === 'telegraph' && atk.pattern) {
-      var wall = (performance.now() - atk.t0) / 1000;
-      st.swingT = (wall > st.swingT) ? wall : st.swingT + dt;
-      // the glow rides the CURRENT window's phase, so a combo pulses per stab
-      var p = Math.min(1, swingLocalP(st));
-      if (k.light) k.light.intensity = (0.9 + p * 2.6) * LIGHT_SCALE;
-    } else if (st.swinging) {
-      st.swingT += dt;                 // follow-through, then the settle to guard
-      if (k.light) k.light.intensity = 3.2 * LIGHT_SCALE;
-    } else if (k.light) {
-      k.light.intensity = (0.55 + Math.sin((elapsed + st.phase) * 5.3) * 0.1) * LIGHT_SCALE;
-    }
-    /* §28 A: the level-up tell rides ON TOP of whatever the light was doing,
-       so it reads mid-swing as well as mid-stroll — and decays with its own
-       timer rather than overwriting the state the next frame restores. */
-    if (k.levelTell > 0 && k.light) {
-      var kt2 = ktree();
-      var tf = k.levelTell / Math.max(0.05, (kt2 ? kt2.tellMs() : 800) / 1000);
-      k.light.intensity += 2.6 * tf * tf * LIGHT_SCALE;
-    }
+    // ---- swing clock + glow ---- (see swingClockAndGlow: §21's one clock)
+    swingClockAndGlow(k, dt);
 
     poseKnight(k, dt);
     /* No bob and no breathe here any more: both are `_root` offsets inside
@@ -5143,6 +5602,27 @@ CHLOE.engine = CHLOE.engine || {};
       roundSpeed: +roundSpeed().toFixed(3),
       squad: knights.length,
       squadAlive: knights.filter(function (k) { return k.alive; }).length,
+      /* §32 PvP, and the three facts a verifier cannot see from outside:
+         WHICH seat this client was placed on (null = PvE, so `seat: null` with
+         a full squad on the floor is the normal round), HOW MANY bodies on the
+         floor are wire-driven rather than thinking, and WHAT the last packet
+         said about each. `remoteState[i]` is positional over knights[], null
+         wherever that index is a real knight, so it lines up with knightLevels
+         and knightBrain the way every other per-knight array here does — and a
+         null at index 0 is the rule, not a gap: knights[0] is never remote.
+         `wire` null means the body stood up but no packet has arrived yet,
+         which is the one state that looks identical to a frozen peer. */
+      seat: seatIndex,
+      remotes: A.remoteCount(),
+      remoteState: knights.map(function (k) {
+        if (!k.remote) return null;
+        var r = k.remoteState;
+        return { alive: k.alive, pose: k.anim ? k.anim.state : null,
+                 at: k.group ? [+k.group.position.x.toFixed(2), +k.group.position.z.toFixed(2)] : null,
+                 yaw: k.group ? +k.group.rotation.y.toFixed(3) : null,
+                 wire: r ? { x: +r.x.toFixed(2), z: +r.z.toFixed(2), yaw: +r.yaw.toFixed(3),
+                             cr: !!r.cr, an: r.an, hp: r.hp, lv: r.lv } : null };
+      }),
       knightState: knight.anim ? knight.anim.state : null,
       knightDashCd: knight.anim ? +knight.anim.dashCd.toFixed(2) : null,
       knightPos: knight.group ? [+knight.group.position.x.toFixed(2), +knight.group.position.z.toFixed(2)] : null,

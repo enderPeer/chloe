@@ -14,13 +14,25 @@
      spendSprint(dt)           -> bool       (false = out of stamina)
      hitEnemy(ability, mult)   -> {dmg, killed}   called by the 3D hit test
      takeHit(pattern)          -> {dmg, dead, evaded|missed}   null = a miss, costs nothing (§25)
+     takeDeclaredHit(n, opts)  -> the same, for a hit whose NUMBER came off the
+                                  wire instead of a striker's stat block (§32)
+     refreshLeaderStats()      -> re-price st.max off the leader's level (§32)
      snapshot()                -> everything the HUD needs
 
    Events are plain objects the UI animates:
      {t:'cast'|'hit'|'miss'|'evade'|'resource'|'cooldown'|'die'|'win', ...}
      §29 adds {t:'reload', abilityId, charges} — a MAGAZINE came back whole,
      which is a different thing from 'charge' (one more use trickled in) and
-     is the event the reload tell hangs off. */
+     is the event the reload tell hangs off.
+     §32 adds {t:'level', charId, level, gained} — the fighter you are holding
+     levelled WHILE the fight ran, which only happens in the Ring.
+
+   §32 puts a second kind of fight in this file, and it is deliberately a FLAG
+   on the state rather than a fork: PvP changes exactly three rules — the
+   damage is declared instead of derived, you have exactly one life, and no
+   round bookkeeping is ever run — and shares every other line. The flag is
+   OFF unless a caller asks for it or a match is already running, so every PvE
+   path through this file behaves as it did before §32. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.engine = CHLOE.engine || {};
 
@@ -36,6 +48,71 @@ CHLOE.engine.combat3 = (function () {
   function CFG() { return CHLOE.data.abilityConfig || {}; }
   function GCFG() { return CHLOE.data.config || {}; }
   function ITEMS() { return CHLOE.data.items || {}; }
+
+  /* ---------- §32: is this fight the Ring? ----------
+
+     TWO QUESTIONS, DELIBERATELY SEPARATE, because they have different answers
+     at different moments:
+
+       pvpMode()    is the fight I am holding RIGHT NOW a PvP fight — the flag
+                    start() was given. This is what the rules below branch on.
+       pvpActive()  are PvP rules in force ANYWHERE — a lobby is open, a match
+                    is running, or this fight is one. This is the one other
+                    modules ask (party.ensureAllies, progression's toasts), and
+                    it has to be true before the fight starts and after it ends,
+                    because a level-up can land on either side of the round.
+
+     One predicate, three readers, so a mode question is never answered two
+     different ways in two files. engine/pvp.js is the real authority on
+     whether a match exists; this file is the authority on whether the fight in
+     front of the player is one, and either alone is a wrong answer.
+
+     Guarded to nothing, like every cross-module reach in here: a build with
+     the multiplayer files deleted has no CHLOE.engine.pvp, both predicates
+     answer false, and everything below is the game as it was. */
+  /* THE TWO RESULT STRINGS, AND WHY THEY BOTH START WITH 'pvp'.
+     Neither may be 'defeat': ui/room3d.js turns that into CHLOE.game.startNew()
+     -> party.newGame(), which wipes members, levels, the tree, the skill
+     points, all five bind stores, shards, flags and runStats — the levels a
+     match spends its evening paying out. Neither may be 'victory' either: that
+     card renders st.rewards, which a PvP fight never fills.
+     The SPELLING is not invented here. ui/battle3d.js publishes the same
+     string as its own PVP_RESULT and ui/room3d.js recognises a deathmatch
+     ending by exactly two tests — that string, or a result beginning 'pvp'. So
+     if a fight ever exits through the normal funnel instead of battle3d's
+     eliminated(), it still lands in the hub's PvP branch and not in the
+     branch that ends the run. */
+  var PVP_RESULT = {
+    dead: 'pvpOut',     // I fell; the match goes on without me
+    over: 'pvpOver'     // the match ended around me (the host said so)
+  };
+  /* TWO WIDTHS OF THE SAME QUESTION, and the difference is one spec rule.
+     `matchRunning()` is broad — anything but 'idle', a lobby included — and it
+     is what the ally gate and the toast gate want: a level earned with a lobby
+     open must not seat Ash, because the match she would break is seconds away.
+     `inRingFight()` is narrow — the two states in which the arena on screen IS
+     the Ring — and it is what start() may default from. Defaulting off the
+     broad one would mean a PvE floor picked while a lobby sits open silently
+     runs under PvP rules, and a knight fight that cannot reach defeat() is
+     §15 permadeath quietly switched off. */
+  var RING_STATES = ['starting', 'match'];
+  function pvpState() {
+    var v = CHLOE.engine.pvp;
+    try {
+      if (v && typeof v.state === 'function') {
+        var s = v.state();
+        return (typeof s === 'string' && s) ? s : null;
+      }
+    } catch (e) {}
+    return null;
+  }
+  function matchRunning() {
+    var s = pvpState();
+    return !!(s && s !== 'idle');
+  }
+  function inRingFight() { return RING_STATES.indexOf(pvpState()) !== -1; }
+  function pvpMode() { return !!(st && st.pvp); }
+  function pvpActive() { return matchRunning() || (pvpMode() && !st.over); }
 
   /* ---------- pockets: consumables on the hotbar (§23) ---------- */
 
@@ -690,7 +767,20 @@ CHLOE.engine.combat3 = (function () {
 
   /* ---------- lifecycle ---------- */
   /* §20: `count` knights fight you at once. Round N spawns N of them. */
-  function start(enemyId, count) {
+  /* §32: `opts.pvp` opens the Ring's three rules (see the header). It is a
+     third argument with a default, so every existing caller — begin() and
+     beginClone(), both `start(id, round)` — is untouched.
+
+     THE DEFAULT IS NOT `false`, IT IS "ASK". A caller who omits the flag while
+     the Ring is actually up gets PvP rules anyway, because the alternative
+     failure is silent and severe: a Ring fight started without the flag hands
+     the player a second life through the leader swap and ends their run on the
+     first death. It asks the NARROW question (inRingFight, not matchRunning)
+     so a PvE floor picked while a lobby merely sits open is still a PvE floor.
+     `{pvp:false}` forces it off for a caller who means it, and with no match
+     module at all the default reads exactly `false`, which is every PvE path
+     in the game. */
+  function start(enemyId, count, opts) {
     var def = (CHLOE.data.enemies || {})[enemyId];
     if (!def) return null;
     count = Math.max(1, count || 1);
@@ -743,6 +833,11 @@ CHLOE.engine.combat3 = (function () {
         return arr;
       })(),
       charId: m.id,
+      /* §32: the level st.max was priced at. tick() watches it so a level
+         that lands mid-fight re-prices the pools instead of quietly doing
+         nothing — see refreshLeaderStats. */
+      charLevel: m.level,
+      pvp: (opts && opts.pvp !== undefined) ? !!opts.pvp : inRingFight(),
       max: { hp: eff.life, mana: eff.magic, sta: eff.stamina },
       hp: Math.max(1, m.hp),
       mana: eff.magic,
@@ -1170,9 +1265,101 @@ CHLOE.engine.combat3 = (function () {
     return (i >= 0 && st.enemies[i]) ? i : -1;
   }
 
+  /* ---------- §32: a hit somebody else already priced ----------
+
+     In the Ring nobody re-derives anybody's swing. The attacker owns the fact
+     "my swing connected with you, for N of type T" (§32's ownership table),
+     because that is the only way a hit can land on the attacker's own screen
+     without waiting a round trip — so what arrives here is a NUMBER off the
+     wire, not a striker index to price a stat block from.
+
+     WHAT THE ATTACKER CANNOT OWN IS WHAT IT DOES TO ME. They hold none of my
+     stats: the wire carries my hp and my level, never my defence, my type or
+     my resist nodes. So a declared number enters the SAME defensive tail a
+     knight's swing pays — the type chart against my character, my tree resist
+     cuts, my defence — and only the attacker-side half of the formula (his
+     atk, the pattern's power, the 0.9-1.1 roll) is skipped. Nothing is counted
+     twice; those two halves were always different stat blocks. It is also what
+     makes a level worth having in here: rows 7 and 8 are defence you can feel.
+
+     `raw:true` opts out and takes the number exactly as declared, for a caller
+     that has already priced the whole thing.
+
+     The encoding lives in ONE place, like itemKey/itemIdOf: build a
+     declaration with declaredHit() (or call takeDeclaredHit) rather than
+     spelling the object out at three call sites. */
+  function declaredHit(dmg, opts) {
+    opts = opts || {};
+    return {
+      declared: true,
+      dmg: dmg,
+      /* the wire calls it `dtype` and the ability table calls it `type`;
+         same for `ability` and `abilityId`. Both spellings are accepted so a
+         caller can forward a message's own fields without renaming them —
+         engine/pvp.js hands us the message, and a rename it has to remember is
+         a rename it will one day forget. */
+      type: opts.type || opts.dtype || null,
+      abilityId: opts.abilityId || opts.ability || null,
+      by: opts.by || null,       // who swung, so the victim can name its killer
+      raw: !!opts.raw
+    };
+  }
+  function isDeclared(p) { return !!(p && p.declared === true); }
+  /* The type a declaration did not name, if we happen to know the ability it
+     came from. Falls through to null -> types.migrate() reads that as
+     'physical', which is the honest default for an unnamed swing. */
+  function declaredType(abilityId) {
+    var a = abilityId ? ABIL()[abilityId] : null;
+    return (a && a.type) || null;
+  }
+  /* TWO CALL SHAPES, ON PURPOSE — an options object, or the wire's own four
+     fields in the order the message carries them:
+       takeDeclaredHit(n, {type:'fire', ability:'gun_9mm', by:id})
+       takeDeclaredHit(n, dtype, ability, byId)
+     The positional form is the one engine/pvp.js reaches for, because it is
+     forwarding msg.dmg/msg.dtype/msg.ability/msg.id and has nothing to build
+     an object out of. Refusing it would not throw — it would quietly read a
+     string as an options bag and lose the type AND the killer's name, which is
+     the sort of failure nobody sees until the kill feed says nothing. */
+  function takeDeclaredHit(dmg, opts, ability, by) {
+    if (opts && typeof opts === 'object') return takeHit(declaredHit(dmg, opts));
+    return takeHit(declaredHit(dmg, { type: opts || null,
+                                      ability: ability || null,
+                                      by: by || null }));
+  }
+
+  /* THE ATTACKER'S HALF, so that the two halves cannot overlap.
+     What my swing is worth before anybody's defence has touched it: my atk (or
+     mag), the ability's power, the caller's positional multiplier and the one
+     0.9-1.1 roll. No type chart, no defence, no target — those are the
+     victim's, and they are applied exactly once, over there, in takeHit.
+
+     USE THIS AND NOT playerDamage() for a declaration. playerDamage charts
+     against a hardcoded 'fire' defender because the mirror fight's clone is
+     fire-typed; send its number over the wire and the victim charts it a
+     second time against their own character. One swing priced by two charts is
+     §21's two clocks wearing a different hat, and the number on the kill feed
+     would not be the number that came off the bar.
+
+     Takes an ability object or an id, because the seam that calls it
+     (battle3d's applyHits) is already holding the object. */
+  function declaredDamage(ability, mult) {
+    if (!st) return 0;
+    var a = (ability && typeof ability === 'object') ? ability : ABIL()[ability];
+    if (!a) return 0;
+    var p = party(), m = p.get(st.charId);
+    if (!m) return 0;
+    var eff = p.effStats(m);
+    var base = a.usesMag ? eff.mag : eff.atk;
+    var rand = 0.9 + Math.random() * 0.2;
+    return Math.max(1, Math.round(base * ((a.power || 50) / 100) * (mult || 1) * rand));
+  }
+
   /* The knight's swing landed, missed, or was evaded. `index` is optional and
      names WHICH knight swung: with the §28 spread on the floor, a level-1
-     knight and a level-7 one no longer hit for the same number. */
+     knight and a level-7 one no longer hit for the same number.
+     §32: `pattern` may instead be a DECLARED hit (see declaredHit above), in
+     which case `index` is ignored — there is no local striker to ask about. */
   function takeHit(pattern, index) {
     if (isOver()) return null;
     /* §25 THE BUG: no pattern means no hit, and a miss must cost NOTHING.
@@ -1188,29 +1375,55 @@ CHLOE.engine.combat3 = (function () {
        us on a miss (defence in depth, §25) — this is the backstop for the next
        caller, which is the one that would otherwise re-arm the trap. */
     if (!pattern) return { dmg: 0, missed: true, dead: false };
+    /* §32: the i-frames are checked in the SAME place for a declared hit, and
+       that ordering is the whole reason evade still means something in the
+       Ring. A declaration is the attacker's word that they connected; whether
+       I was there to be connected with is mine. */
     if (invulnerable()) return { dmg: 0, evaded: true, dead: false };
     var p = party();
     var m = p.get(st.charId);
     var eff = p.effStats(m);
+    var declared = isDeclared(pattern);
+    var cdef = (CHLOE.data.characters || {})[st.charId] || {};
     /* §21 gave him a LEVELLED attack — round 8 is not round 1. §28 A makes it
        HIS attack: the striker's own stat line if we can tell who swung, the
-       round's baseline if we cannot. */
-    var who = (typeof index === 'number' && st.enemies[index]) ? index : strikerIndex();
-    var es = (who >= 0 && st.enemies[who] && st.enemies[who].stats) ||
-             st.enemyStats || st.enemyDef.stats || {};
-    var cdef = (CHLOE.data.characters || {})[st.charId] || {};
-    var atkType = st.enemyDef.type || st.enemyDef.element;
+       round's baseline if we cannot. A declared hit skips all of it: the
+       number is already made, and st.enemyDef describes a knight who is not
+       the one who hit me. */
+    /* Both spellings again (see declaredHit): a raw descriptor built straight
+       from a wire message reads `dtype`/`ability`, one built here reads
+       `type`/`abilityId`, and takeHit accepts either rather than making the
+       caller translate. */
+    var atkType = declared
+      ? (pattern.type || pattern.dtype ||
+         declaredType(pattern.abilityId || pattern.ability))
+      : (st.enemyDef.type || st.enemyDef.element);
     var chart = types().multiplier(atkType, { type: cdef.type || cdef.element, resists: cdef.resists || null });
-    var rand = 0.9 + Math.random() * 0.2;
-    var dmg = Math.max(1, Math.round(
-      (es.atk || 8) * (patternPower(pattern) / 100) * chart * rand - eff.def * 0.5));
+    var dmg;
+    if (declared) {
+      var told = Math.max(0, Math.round(pattern.dmg || 0));
+      dmg = pattern.raw ? told
+                        : (told > 0 ? Math.max(1, Math.round(told * chart - eff.def * 0.5)) : 0);
+    } else {
+      var who = (typeof index === 'number' && st.enemies[index]) ? index : strikerIndex();
+      var es = (who >= 0 && st.enemies[who] && st.enemies[who].stats) ||
+               st.enemyStats || st.enemyDef.stats || {};
+      var rand = 0.9 + Math.random() * 0.2;
+      dmg = Math.max(1, Math.round(
+        (es.atk || 8) * (patternPower(pattern) / 100) * chart * rand - eff.def * 0.5));
+    }
     // tree resist nodes are PERCENT cuts, applied after the chart (like §16)
     var tr = CHLOE.engine.tree;
     if (tr && typeof tr.passives === 'function') {
       var pv = tr.passives(st.charId);
       var key = types().migrate ? types().migrate(atkType) : atkType;
       var cut = (pv && pv.resists && pv.resists[key]) || 0;
-      if (cut) dmg = Math.max(1, Math.round(dmg * (1 - Math.min(90, cut) / 100)));
+      /* §32 added the `dmg > 0` half. The floor below is `Math.max(1, ...)`,
+         which is right for a swing that landed and wrong for a declaration
+         that already resolved to nothing — a resist node would otherwise turn
+         a zero into a point of damage. Every derived hit is >= 1 by the line
+         above, so PvE never reaches the new clause. */
+      if (cut && dmg > 0) dmg = Math.max(1, Math.round(dmg * (1 - Math.min(90, cut) / 100)));
     }
     st.hp = Math.max(0, st.hp - dmg);
     if (m) m.hp = st.hp;
@@ -1223,37 +1436,67 @@ CHLOE.engine.combat3 = (function () {
        her level, her hotbar, her cooldowns, the run intact. If she has no
        potion bound, or none left in the bag, nothing here happens at all and
        the swap below runs exactly as it did before. */
-    var revived = (st.hp <= 0) ? tryPassiveRevive() : null;
+    /* §32: NOT IN THE RING. "Everyone has exactly one life" is the whole mode,
+       and a potion that stands you back up is the same second life the Ash
+       swap below is — through another door, and just as invisible to the seven
+       other players, who were told you fell the moment you did. The potion is
+       not spent either: it never got to work, so it is still in the bag for
+       the next floor. */
+    var revived = (st.hp <= 0 && !st.pvp) ? tryPassiveRevive() : null;
 
     /* §19: the leader falling does NOT end the run while someone else can
        still fight — the next member takes over as leader mid-fight and the
        camera keeps going with their stats and their own hotbar. */
     var swapped = null;
     if (st.hp <= 0) {
-      var next = p.firstAliveOther(st.charId);
-      if (next) {
-        p.setActive(next.id);
-        st.charId = next.id;
-        var neff = p.effStats(next);
-        st.max = { hp: neff.life, mana: neff.magic, sta: neff.stamina };
-        st.hp = next.hp;
-        st.mana = neff.magic;
-        st.sta = neff.stamina;
-        st.cast = null;
-        st.lockUntil = 0;
-        st.cd = {};                       // fresh cooldowns for the new fighter
-        st.iframeUntil = st.now + 900;    // a breath to recover, not a free kill
-        swapped = next.id;
+      if (st.pvp) {
+        /* §32 ONE LIFE, AND THIS IS THE LINE THAT MAKES IT TRUE.
+           BOTH branches below are wrong in the Ring, for different reasons.
+           The swap is the silent one: three kills take you to level 4, ladder
+           row 4 carries `ally:'ash'`, and from that moment firstAliveOther()
+           finds her and hands you a second life with a different level and a
+           different hotbar — a bug you would only ever meet by dying twice.
+           (party.ensureAllies refuses to seat her while a match runs, so this
+           branch should have nobody to find; it is bypassed anyway, because
+           one life must not depend on a guard in another file.)
+           defeat() is the loud one: it ends the whole roguelike run, and a
+           deathmatch you lose is not a night you lose.
+           So neither runs. The fight terminates with a result and no
+           bookkeeping at all, exactly as cloneEnd() does for the mirror. */
+        pvpDown();
       } else {
-        defeat();
+        var next = p.firstAliveOther(st.charId);
+        if (next) {
+          p.setActive(next.id);
+          st.charId = next.id;
+          var neff = p.effStats(next);
+          st.max = { hp: neff.life, mana: neff.magic, sta: neff.stamina };
+          st.charLevel = next.level;        // §32: st.max is priced at THIS level now
+          st.hp = next.hp;
+          st.mana = neff.magic;
+          st.sta = neff.stamina;
+          st.cast = null;
+          st.lockUntil = 0;
+          st.cd = {};                       // fresh cooldowns for the new fighter
+          st.iframeUntil = st.now + 900;    // a breath to recover, not a free kill
+          swapped = next.id;
+        } else {
+          defeat();
+        }
       }
     }
-    return { dmg: dmg, dead: st.hp <= 0 && !swapped, evaded: false,
-             leaderSwap: swapped,
-             /* Non-null only on the frame the potion fired, so the HUD can
-                splash it without diffing anything: {itemId, name, pct, hp,
-                count, charId}. */
-             revived: revived };
+    var out = { dmg: dmg, dead: st.hp <= 0 && !swapped, evaded: false,
+                leaderSwap: swapped,
+                /* Non-null only on the frame the potion fired, so the HUD can
+                   splash it without diffing anything: {itemId, name, pct, hp,
+                   count, charId}. */
+                revived: revived };
+    /* §32: the two extra fields ride on the DECLARED path only, so a PvE
+       caller reads exactly the object it has always read. `by` is what lets
+       the victim's own death message name its killer — §32 has exactly one
+       peer ever say "I died", and it says who did it. */
+    if (declared) { out.declared = true; out.by = pattern.by || null; }
+    return out;
   }
 
   /* ---------- §27C: the potion you never press ----------
@@ -1326,6 +1569,52 @@ CHLOE.engine.combat3 = (function () {
   function takeRevive() { var v = lastRevive; lastRevive = null; return v; }
 
   /* ---------- tick ---------- */
+
+  /* §32: THE LEVEL YOU JUST EARNED, MADE REAL INSIDE THE FIGHT.
+
+     `st.max` is the ceiling every pool clamps and regenerates against, and it
+     was written in exactly two places — start() and the leader swap — and
+     nowhere else. So a level that lands mid-fight raises party.effStats and
+     buys NOTHING: tick()'s regen still fills to the old number, and a row
+     reading "+12 life, +6 stamina" is a line of text. In PvE that was
+     invisible, because no level can land inside a live fight (victory() pays
+     out with st.over already set). In the Ring a kill grants one immediately,
+     and "killing people levels you up" has to be worth something before the
+     match ends.
+
+     WHY THE POOL IS CREDITED AND NOT JUST RE-CAPPED. progression.grantXp
+     already bumps `member.hp` by the row's growth — and combat3 overwrites
+     `m.hp = st.hp` on the very next hit, so that bump has always been thrown
+     away silently. The two files are keeping one number in two places, and
+     this is the seam where they are reconciled. The honest direction is to
+     KEEP the grant: a row that says +12 life hands you twelve life, now, and
+     the hole you were already carrying stays exactly the size it was. Only a
+     RISE credits (a ceiling that somehow fell just clamps), and a leader who
+     is already down is not stood back up by one — that is the potion's job in
+     PvE (§27C) and nobody's in the Ring.
+
+     The body is the leader-swap branch's own pattern, minus everything that
+     belongs to changing WHO you are: cooldowns, the cast and the i-frames all
+     stay, because this is the same fighter one row further up the ladder. */
+  function refreshLeaderStats() {
+    if (!st) return null;
+    var p = party(), m = p.get(st.charId);
+    if (!m) return null;
+    var eff = p.effStats(m);
+    var next = { hp: eff.life, mana: eff.magic, sta: eff.stamina };
+    var was = st.max || next;
+    var gained = { hp: Math.max(0, next.hp - (was.hp || 0)),
+                   mana: Math.max(0, next.mana - (was.mana || 0)),
+                   sta: Math.max(0, next.sta - (was.sta || 0)) };
+    st.max = next;
+    if (st.hp > 0) st.hp = Math.min(next.hp, st.hp + gained.hp);
+    st.mana = Math.min(next.mana, st.mana + gained.mana);
+    st.sta = Math.min(next.sta, st.sta + gained.sta);
+    m.hp = st.hp;                 // the same mirror takeHit keeps
+    st.charLevel = m.level;       // st.max is priced at this level from here
+    return { level: m.level, max: next, gained: gained };
+  }
+
   /* §28 A: every knight levels on his own clock while the fight runs, so the
      numbers have to follow. The 3D layer owns the clock (it owns the
      personality, the seconds alive and the moment of death), so this PULLS —
@@ -1373,6 +1662,21 @@ CHLOE.engine.combat3 = (function () {
     st.now += dt * 1000;
     var lv = syncLevels();
     if (lv) for (var li = 0; li < lv.length; li++) ev.push(lv[li]);
+
+    /* §32: the KNIGHTS are not the only ones levelling any more. Watched here
+       rather than pushed by whoever granted the level, for the same reason
+       syncLevels above pulls instead of being pushed: the caller that credits
+       a kill (engine/pvp.js) should not also have to remember to reprice the
+       pools it just widened, and a level granted from anywhere else — a console,
+       a future mode — is picked up for free. One comparison of two integers per
+       frame. In PvE nothing raises a level inside a live fight, so this never
+       fires there. */
+    var lead = party().get(st.charId);
+    if (lead && lead.level !== st.charLevel) {
+      var grew = refreshLeaderStats();
+      ev.push({ t: 'level', charId: st.charId, level: lead.level,
+                gained: grew ? grew.gained : null });
+    }
 
     // cast progress -> hit windows
     if (st.cast) {
@@ -1436,6 +1740,17 @@ CHLOE.engine.combat3 = (function () {
 
   /* ---------- outcomes ---------- */
   function victory() {
+    /* §32: THE RING HAS NO ROUND TO BANK, and everything below is round
+       bookkeeping. Three of them would be actively wrong in a deathmatch:
+       runStats.round advances (so the next PvE floor is bigger for a fight
+       nobody had), a trophy goes up on the dressing-room wall for a squad
+       nobody put down, and XP is paid to every party member. A PvP match ends
+       through pvpEnd() instead, which is cloneEnd()'s shape.
+
+       Guarded HERE and not at the single call site, because this is the choke
+       point: any future path that reaches victory() during a PvP fight is
+       caught by the same line. */
+    if (pvpMode()) return;
     st.over = true;
     st.result = 'victory';
     var p = party(), state = p.state;
@@ -1651,17 +1966,45 @@ CHLOE.engine.combat3 = (function () {
   /* Mirror fight: tell combat3 the fight is over with a result, without
      running the normal victory/defeat bookkeeping (no knights to count, no
      trophies to hang). The clone's own xp/shards are handled in battle3d. */
-  function cloneEnd(result) {
+  function endWithout(result) {
     if (!st || st.over) return;
     st.over = true;
     st.result = result || 'victory';
   }
+  function cloneEnd(result) { endWithout(result); }
+
+  /* §32: the Ring's two exits, and they are cloneEnd's shape for cloneEnd's
+     reason — there is nothing to bank. No round to advance, no trophy to hang,
+     no XP to pay a party that is one person; the levels this mode hands out
+     were already granted, per kill, while the match ran.
+
+     pvpDown() is the local player falling: the one life is spent, the match
+     carries on for everybody else, and the run does NOT end. The result string
+     is what ui/battle3d.js and ui/room3d.js branch on to route the player back
+     to the dressing room WITHOUT CHLOE.game.startNew() — reusing 'defeat' here
+     would wipe the party, the levels and the binds, which is precisely the
+     thing this mode spends its evening earning.
+     pvpEnd(result) is the match ending around us (the host said 'over'), and
+     the caller names the result because only the caller knows whether we are
+     the one left standing. */
+  function pvpDown() { endWithout(PVP_RESULT.dead); }
+  function pvpEnd(result) { endWithout(result || PVP_RESULT.over); }
 
   return {
     start: start, get: get, isOver: isOver, tick: tick,
     press: press, evade: evade, spendSprint: spendSprint,
     hitEnemy: hitEnemy, takeHit: takeHit, invulnerable: invulnerable,
     playerDamage: playerDamage, cloneEnd: cloneEnd,
+    /* §32 PvP. `pvpActive` is the predicate the rest of the engine asks (the
+       ally gate in party.js, the toast gate in progression.js) — never a flag
+       of their own. `declaredHit`/`takeDeclaredHit` are the wire's way in;
+       `refreshLeaderStats` makes a mid-fight level real; `pvpEnd` ends the
+       match the way cloneEnd ends the mirror; `PVP_RESULT` names the two
+       result strings so no other file has to spell them. */
+    pvpMode: pvpMode, pvpActive: pvpActive, PVP_RESULT: PVP_RESULT,
+    declaredHit: declaredHit, takeDeclaredHit: takeDeclaredHit,
+    declaredDamage: declaredDamage,
+    refreshLeaderStats: refreshLeaderStats, pvpEnd: pvpEnd,
     aliveCount: aliveCount, allDown: allDown,
     flee: flee, snapshot: snapshot,
     knownAbilities: knownAbilities, slotCount: slotCount, binds: binds, bind: bind,

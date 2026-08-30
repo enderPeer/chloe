@@ -36,6 +36,15 @@ Kill him and you go back to the room. Next round he brings a friend. The round a
 Not copies of him, either — the one who has been coming since round one is a level for every
 night he has come back, and the body that walked in tonight is a level 1.
 
+Or you can go and fight someone who is also trying. Open a lobby, hand out the room code, and up to
+eight of you drop onto the Ring at once — eight seats around the edge of the circle, everyone facing
+the middle, same hands and same hotbar you have been using on him. **One life each.** When you go
+down you wake up in the dressing room and the match carries on without you, which is its own
+particular way to lose a fight. Every kill puts you up a level *while it is still happening*, so the
+person who is winning is also the person getting harder to kill, and the last one standing owns the
+Ring. It runs between tabs of your own browser with nothing switched on and no server anywhere, so
+you can have the first fight with yourself.
+
 **There are no saves.** No account, no cloud, no continue. One run per page load; death — or a
 reload — starts the night over at level 1 with nothing carried across. The only thing that
 outlives a run is your name on the record board on the wall.
@@ -79,7 +88,8 @@ flowchart LR
 | `W` `A` `S` `D` + mouse | move and look · `Shift` sprint · `Ctrl` / `C` crouch |
 | `Space` | **evade** — a short dash with invulnerability frames |
 | `1` – `9` | abilities and pocket consumables |
-| Left / right mouse | two more bindable slots, addressed as `LMB` / `RMB` |
+| Left / right mouse | two more bindable slots, addressed as `LMB` / `RMB` — the 9mm opens on both |
+| Wheel up / down | two more again, `⇑` / `⇓`. An unbound direction still scrolls the page |
 
 ---
 
@@ -96,10 +106,12 @@ change it.
 ### Combat is real-time, with a hotbar
 
 Three resources drive a fight — **Life, Stamina and Magic** — and you carry a hotbar of up to
-9 number keys plus `LMB`/`RMB`. Every ability has a cast time, a recovery, a cooldown, charges, a
-reach and an arc, and a damage type. Punch is the floor: free, fast, weak, always there.
-Everything the ladder grants you has to beat it on damage-per-stamina or on reach. Sprinting and
-evading spend from the same stamina bar your attacks do, so mobility is a real cost.
+9 number keys plus the whole mouse: both buttons and both wheel directions. Every ability has a cast
+time, a recovery, a cooldown, charges, a reach and an arc, and a damage type. The **9mm** is the
+floor, and it is a floor you can stand a long way back on — 22 m of hitscan for 10 stamina a shot,
+one in each hand. Everything the ladder grants you after it has to beat that on damage-per-stamina
+or on what it does to the space between you. Sprinting and evading spend from the same stamina bar
+your attacks do, so mobility is a real cost.
 
 Damage runs through an **11-type chart** — physical, magical, lightning, fire, occult, blood,
 poison, divine, virus, ghost, biological — with statuses that build up rather than land on a coin
@@ -118,19 +130,21 @@ game, and each one hands you something you can feel:
 
 | Level | What you get |
 |---|---|
-| 1 | **Fists** — key 1 |
+| 1 | **Akimbo** — a 9mm in each hand, on the two mouse buttons. Six shots, then a reload |
 | 2 | **Fire Tornado** — trace a sigil, drop a pillar of fire. Key 2 |
 | 3 | **Asteroid** — the first thing you can throw; it splashes, and it stuns. Key 3 |
 | 4 | **Ash joins**, and **Water Wave** — throws them aside and opens a lane. Key 4 |
-| 5 | +12 life, +6 stamina |
-| 6 | **Hammer Fist** — one committed overhand. Key 5 |
-| 7 | +8 magic, +2 magic power |
-| 8 | **Ember Jab** — a jab that lights on contact. Key 6 |
-| 9 | **Hollow Breaker** — the early kit is complete. Key 7 |
+| 5 | **Trigger Discipline** — the 9mm costs 8 stamina a shot instead of 10 |
+| 6 | **Wider Grip** — +1 keybind, key 5, and it arrives *empty*. Yours to fill |
+| 7 | +12 life, +6 stamina |
+| 8 | +8 magic, +2 magic power |
+| 9 | **Killer Fist** — a rising strike that hurts what armour cannot protect. Key 6 |
 
 Abilities and the keys to hold them arrive *together*, on purpose: granting a move with nowhere
-to bind it reads as a bug, not a reward. By level 9 that is 7 ability keys plus 2 pockets — the
-hotbar is exactly full, and levels 10–100 are honest, readable growth.
+to bind it reads as a bug, not a reward. Level 6 is the one deliberate exception — by then you own
+enough that an empty key is a real choice rather than somewhere to put a reward. Level 12 hands out
+the last one, and at 7 ability keys plus 2 pockets the hotbar is exactly full; everything above that
+is honest, readable growth.
 
 Ash fights at her own level, and if you fall she takes the lead. The run ends when the whole band
 is down, not when you are.
@@ -184,6 +198,26 @@ fastest attack in the set is the one that stops getting faster first.
 | Character | cold stone, close pillars, nowhere clean to stand | a lit circle in the dark, nowhere for him to hide |
 | Containment | the baked grid | a radius clamp — it needs no grid at all |
 
+### Eight on the Ring, one life each
+
+The deathmatch is the Ring's other job, and it gets it because the Ring is the only floor with
+nothing in it: eight seats spaced evenly around the circle, every one facing the middle, every one
+with clean sight of every other and none of them close enough to be shoving on the first frame. The
+church has pillars, and eight people plus pillars is a game of hide-and-seek.
+
+There is no server deciding anything. You are the only authority on where you are and whether you
+are still alive; whoever swings is the authority on their own hit, which is why your shots land the
+instant you fire them instead of a round trip later; and — the rule the whole thing rests on — **the
+person who dies is the one who announces it**, and names who did it. Exactly one player ever says
+"I died", so one kill counts the same on all eight screens with nobody arbitrating. The honest cost
+is that this is not cheat-proof: a modified client can lie about damage or refuse to die, the same
+way one can put a fake name on the record board. It is a friendly fight, not a ranked one.
+
+By default it all runs over a channel between tabs of your own browser — no server, nothing to
+deploy, nothing to configure, which also means you can test a lobby by yourself. Point it at a relay
+and the same lobby works between machines. Take the relay away again and it falls back to tabs
+rather than breaking.
+
 ### The room reads you back
 
 The props are instrumentation. The **mirror** shows your stats. The **poster** shows his. The
@@ -222,9 +256,9 @@ game/                     the game
   vendor/                 three.js r128 + GLTF/DRACO/RGBE loaders
   assets/                 3d/ · hdri/ · models/ · chloe/ · gen/
 tools/                    dev server, version bumper, rig builder, image gen, manifests
-worker/                   Cloudflare Worker — an optional records endpoint
+worker/                   Cloudflare Worker — optional records endpoint + PvP relay
 docs/                     the wiki
-GAME_SPEC.md              the binding design contract, §1 … §30
+GAME_SPEC.md              the binding design contract, §1 … §32
 ROADMAP.md                history and the decisions not to re-litigate
 ```
 

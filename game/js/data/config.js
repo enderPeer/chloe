@@ -68,4 +68,23 @@ CHLOE.data.config = {
      its next hit window, would spend the most expensive item in the game on
      nothing. It is a grace, not a reset — he is still standing over you. */
   reviveIframeMs: 900
+
+  /* ---- The PvP relay (spec §32) ------------------------------------------
+     There is deliberately NO `netUrl` key here, exactly as there is no
+     `apiUrl` — and in both cases the ABSENCE is the setting, not an oversight.
+
+     Absent means the deathmatch runs on `BroadcastChannel`: every tab of this
+     browser can see every other, so a lobby works with no server, no account
+     and nothing deployed. It is the whole mode, playable, out of the box.
+
+     Adding the key is what puts it on the internet. Deploy worker/ (its README
+     has the seven steps) and add ONE line here, with no trailing slash:
+
+         netUrl: 'https://chloe-api.your-subdomain.workers.dev'
+
+     engine/net.js swaps the scheme to ws/wss itself, so the same host string
+     that serves the record board serves the relay. Turning it off again is
+     deleting the line — §1's rule holds either way: a missing key, a dead host
+     or a refused socket must degrade in silence, never throw, and never keep
+     the room waiting. */
 };

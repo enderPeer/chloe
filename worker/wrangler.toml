@@ -5,3 +5,19 @@ compatibility_date = "2026-08-01"
 kv_namespaces = [
   { binding = "CHLOE_KV", id = "REPLACE_ME" }
 ]
+
+# The PvP relay (GAME_SPEC.md §32). One Durable Object per room code, reached
+# by idFromName(code), so everybody who types the same code lands in the same
+# object wherever they are.
+[[durable_objects.bindings]]
+name = "PVP_ROOM"
+class_name = "PvpRoom"
+
+# new_sqlite_classes, NOT new_classes. The migration type is load-bearing:
+# SQLite-backed Durable Objects are the class the Workers Free plan permits,
+# and the legacy KV-backed new_classes is paid-plan only — a free-plan deploy
+# of the wrong one is refused outright. PvpRoom persists nothing either way
+# (it only holds live sockets), so the SQLite backend costs it nothing.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PvpRoom"]

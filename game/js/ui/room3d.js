@@ -9,7 +9,13 @@
    is not locked. All Three.js logic lives in CHLOE.engine.world3d; this file
    only wires: show -> init+start, engage -> battle, battle end -> back here,
    M/Tab -> menu overlay (pause + release lock; resume on close).
-   Renders/wires ONLY — no world rules, no battle rules. */
+   Renders/wires ONLY — no world rules, no battle rules.
+
+   §32 adds the hub's half of the deathmatch: a door into ui/lobby.js, a
+   "N still standing" line in the top bar for a player watching from here after
+   being eliminated, and a THIRD branch in onBattleEnd that takes a dead
+   fighter back without ending their run. See inPvp below for why that is a
+   separate flag and not the one above it. */
 window.CHLOE = window.CHLOE || {};
 CHLOE.ui = CHLOE.ui || {};
 
@@ -21,6 +27,14 @@ CHLOE.ui.room3d = (function(){
   var wired = false;         // one-time wraps + listeners done
   var running = false;       // we believe the world loop is running
   var inBattle = false;      // battle engaged from the room is in progress
+  /* §32: a PvP match is running and WE are still in it. Deliberately NOT
+     inBattle: poll() early-returns on that flag, so reusing it would freeze
+     the crosshair, the hint caption, the lock overlay and the shards/level bar
+     for the whole match — including the stretch after you die, which is
+     exactly when the hub has something to show you. This flag is read in only
+     two places (the scene.onBattleEnd wrapper, and the handoff guard) and is
+     cleared the moment the match hands us back. */
+  var inPvp = false;
   var pollTimer = null;
   var respawnTimer = null;
   var warned = false;
@@ -30,6 +44,9 @@ CHLOE.ui.room3d = (function(){
   var cbHover = null;        // last hover kind from world3d.onHover: 'enemy'|'tv'|null
 
   function world(){ return (CHLOE.engine && CHLOE.engine.world3d) || null; }
+  /* §32: optional in every build. Every read of it is guarded, so a checkout
+     with the multiplayer files deleted gets exactly today's dressing room. */
+  function pvp(){ return (CHLOE.engine && CHLOE.engine.pvp) || null; }
   function enemyId(){
     var cfg = CHLOE.data && CHLOE.data.room3d;
     return (cfg && cfg.enemy && (cfg.enemy.id || cfg.enemy.enemyId)) || 'the_hollow';
@@ -63,9 +80,25 @@ CHLOE.ui.room3d = (function(){
     var hud = ui.el('div', 'hud r3d-hud');
     els.shards = ui.el('div', 'hud-shards', '◆ 0');
     hud.appendChild(els.shards);
+    /* §32: the deathmatch score, for a player watching from the hub after
+       being eliminated. Third child of the .hud flex row, so space-between
+       lands it in the middle; .hidden is display:none, so when no match is
+       running it is out of the layout entirely and the bar reads as it does
+       today. */
+    els.standing = ui.el('div', 'r3d-standing hidden', '');
+    hud.appendChild(els.standing);
     var right = ui.el('div', 'hud-right');
     els.level = ui.el('div', 'r3d-level', '');
     right.appendChild(els.level);
+    /* §32: the door into the lobby. Appended only when ui/lobby.js actually
+       shipped — with the multiplayer files removed the top bar keeps exactly
+       the two controls it has today, rather than growing a dead button. */
+    if (CHLOE.ui.lobby && typeof CHLOE.ui.lobby.open === 'function') {
+      var ringBtn = ui.el('button', 'r3d-ring', '⚔ The Ring');
+      ringBtn.title = 'Deathmatch — up to eight fighters, one life each';
+      ringBtn.addEventListener('click', openLobby);
+      right.appendChild(ringBtn);
+    }
     var menuBtn = ui.el('button', null, '☰ Menu');
     menuBtn.addEventListener('click', openMenu);
     right.appendChild(menuBtn);
@@ -106,6 +139,30 @@ CHLOE.ui.room3d = (function(){
         els.level.textContent = '';
       }
     }
+    paintStanding();
+  }
+
+  /* ---------- §32 spectator line ----------
+     How many fighters are still up, read straight from engine/pvp.js on every
+     repaint. A cached count goes stale the instant somebody else falls, and a
+     spectator who cannot see the score is just watching an empty room. Returns
+     null — meaning "say nothing" — whenever no match is live, which is every
+     frame of a normal PvE night. */
+  function pvpStanding(){
+    var P = pvp();
+    if (!P || typeof P.state !== 'function' || typeof P.alive !== 'function') return null;
+    var st, n;
+    try { st = P.state(); n = P.alive(); } catch (e) { return null; }
+    if (st !== 'match' && st !== 'starting' && st !== 'dead') return null;
+    return (typeof n === 'number' && n >= 0) ? n : null;
+  }
+  function paintStanding(){
+    if (!els.standing) return;
+    var n = pvpStanding();
+    els.standing.classList.toggle('hidden', n === null);
+    if (n === null) return;
+    var t = '⚔ ' + n + ' still standing';
+    if (els.standing.textContent !== t) els.standing.textContent = t;
   }
 
   /* ---------- pointer lock state ---------- */
@@ -371,6 +428,69 @@ CHLOE.ui.room3d = (function(){
     }
   }
 
+  /* ---------- §32 the Ring ---------- */
+  /* The lobby's door. lobby.open() stops the world itself (it calls _pause,
+     the same handle ui/shop.js uses), so this is only the click. */
+  function openLobby(){
+    if (inBattle || inPvp || menuOpenNow()) return;
+    var L = CHLOE.ui.lobby;
+    if (!L || typeof L.open !== 'function') return;
+    try { L.open(); } catch (e) { console.warn('[CHLOE] lobby.open failed', e); }
+  }
+
+  /* ui/lobby.js hands the match over HERE rather than straight to the arena,
+     because this file owns the flag that brings a dead fighter back to the
+     dressing room afterwards — a match entered around it would end up in
+     ui/scene.js's routing and start a new night. Returns false when there is
+     no arena to hand it to, so the lobby can put the player back where they
+     came from instead of onto a blank screen. */
+  function pvpEngage(opts){
+    if (inBattle || inPvp) return false;
+    var b3d = CHLOE.ui.battle3d;
+    if (!b3d || typeof b3d.beginPvp !== 'function') {
+      console.warn('[CHLOE] room3d: battle3d.beginPvp is missing — the Ring cannot open.');
+      return false;
+    }
+    inPvp = true;
+    pause();
+    var ok;
+    try {
+      ok = b3d.beginPvp(opts || {});
+    } catch (e) {
+      ok = false;
+      console.warn('[CHLOE] battle3d.beginPvp failed', e);
+    }
+    /* Compared against false rather than tested for truth: battle3d answers
+       false when it could not open the fight, and a version that simply
+       returns nothing on success must still be believed. A refused handoff
+       has to clear the flag, or the next PvE battle's end would be routed
+       here as a deathmatch. */
+    if (ok === false) { inPvp = false; return false; }
+    return true;
+  }
+
+  /* ui/battle3d.js PUBLISHES the string an eliminated player comes home with,
+     precisely so the two ends of this event cannot drift into two spellings of
+     it — so ask for it rather than hard-coding a copy. The 'pvp' prefix is the
+     fallback for a battle3d that predates the export, and it is the same line
+     onWorldHover takes with the engine's hover shapes: be liberal about what a
+     sibling hands you, strict about what you do with it. */
+  function isPvpEnd(result){
+    if (typeof result !== 'string' || !result) return false;
+    var b3d = CHLOE.ui.battle3d;
+    if (b3d && typeof b3d.PVP_RESULT === 'string' && result === b3d.PVP_RESULT) return true;
+    return result.indexOf('pvp') === 0;
+  }
+
+  /* Won or eliminated — asked of engine/pvp.js rather than parsed out of the
+     result string, so a new ending spelling cannot make the line lie. */
+  function pvpEndLine(){
+    var P = pvp(), m = null;
+    if (P && typeof P.me === 'function') { try { m = P.me(); } catch (e) {} }
+    if (m && m.alive) return 'The Ring is yours. Last one standing.';
+    return 'You are out. The Ring goes on without you.';
+  }
+
   function backToRoom(){
     party.state.scene = 'room3d';
     ui.show('room3d'); // onShow handler resumes the loop
@@ -381,6 +501,28 @@ CHLOE.ui.room3d = (function(){
   function onBattleEnd(result){
     inBattle = false;
     var w = world();
+
+    /* §32: a deathmatch ending — you were eliminated, or the match finished
+       under you. Ahead of the 'defeat' branch ON PURPOSE: it IS a death, but
+       it must not take the run's death path.
+         · No CHLOE.game.startNew(). party.newGame() wipes members, levels, the
+           tree, the skill points, all five bind stores, shards, flags and
+           runStats — and the levels your kills paid for are the entire point
+           of the mode.
+         · No record claim: the board is about the knight ladder, and a PvP
+           round is not a round of it.
+         · No setEnemyAlive(true). The Hollow's respawn clock belongs to the
+           room's own fight; re-arming it from here would stand him back up in
+           the middle of somebody else's match, and the respawnTimer already
+           running for the room is left exactly as it was.
+       backToRoom() is the whole return: it sets party.state.scene and shows
+       the room, and the room's OWN onShow handler resumes the world loop. */
+    if (isPvpEnd(result)) {
+      inPvp = false;
+      ui.toast(pvpEndLine());
+      backToRoom();
+      return;
+    }
 
     if (result === 'defeat') {
       // roguelike (spec §15): death ends the run. Reset the room (enemy back,
@@ -423,7 +565,10 @@ CHLOE.ui.room3d = (function(){
     if (scn && typeof scn.onBattleEnd === 'function') {
       var origEnd = scn.onBattleEnd;
       scn.onBattleEnd = function(result){
-        if (inBattle) { onBattleEnd(result); return; }
+        /* §32: inPvp too. A deathmatch is entered from the lobby, not from the
+           room's crosshair, so inBattle is false for it — without this the end
+           would fall through to the 2D scene routing and start a new night. */
+        if (inBattle || inPvp) { onBattleEnd(result); return; }
         return origEnd.apply(scn, arguments);
       };
     }
@@ -494,9 +639,19 @@ CHLOE.ui.room3d = (function(){
   return {
     enter: enter,
     openMenu: openMenu,
-    /* exposed for tests/debugging */
+    /* §32: the lobby's two handles into the hub. openLobby is the same click
+       the top-bar button makes; pvpEngage is the handoff that arms the flag
+       bringing a dead fighter back here. */
+    openLobby: openLobby,
+    pvpEngage: pvpEngage,
+    /* exposed for tests/debugging.
+       LOAD-BEARING, NOT HOUSEKEEPING: _pause/_resume are the only handles that
+       exist from outside this module — ui/shop.js's pauseWorld/resumeWorld and
+       ui/lobby.js's pauseWorld both hang off them. Tidying either away is a
+       shipped freeze bug (§28 D, and AGENTS.md's traps table). */
     _pause: pause,
     _resume: resume,
-    _engage: engage
+    _engage: engage,
+    _standing: pvpStanding
   };
 })();

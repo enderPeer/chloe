@@ -9,7 +9,7 @@ photoreal "Chloe" images + turn-based battles (Final Fantasy / Pokémon hybrid).
 - Everything must work when opened via `file://` AND from any static host (relative paths only).
 - Classic `<script>` tags in a fixed order. Single global namespace: `window.CHLOE = { data:{}, engine:{}, ui:{} }`.
 - Each data file assigns into the namespace, e.g. `CHLOE.data.skills = {...}`.
-- No external requests at runtime except the optional cloud-save API (`CHLOE.data.config.apiUrl`, empty string = local-only mode, must never error).
+- No external requests at runtime except **two** optional, config-gated ones — the records/cloud-save API (`CHLOE.data.config.apiUrl`, empty string = local-only mode, must never error) and, per §32, the PvP relay (`CHLOE.data.config.netUrl`, absent or empty = local-only mode over `BroadcastChannel`, **must never error**). Both keys are absent from `config.js` by default; absent means the feature runs locally, never that it breaks, so a missing key, a dead host or a refused socket degrades in silence rather than throwing.
 - Google Fonts allowed via <link> but every font MUST have a system fallback (page must look fine offline/file://).
 - Target: desktop + mobile responsive. No console errors on load.
 
@@ -782,3 +782,149 @@ It reaches the shop with **no shop edit** — `engine/shop.js` derives its shelf
 
 ### Verification hooks
 `ui/battle3d.js` gains `_wheel(direction)` beside `_press`/`_mouse`, or the wheel path is untestable headlessly — everything downstream of the listener runs off rAF, which is frozen in a non-compositing tab. A test must prove: a fresh run seeds exactly three slots — LMB, wheel-up, wheel-down — and leaves RMB for the ladder to claim; the wheel fires a bound pocket in the arena and nothing in the room; an unbound direction lets the page scroll; one notch spends exactly one item; the salts restore stamina in a fight rather than being refused; and the fist is on LMB and **not** duplicated on key 1.
+
+## 32. The Ring opens for eight, and everyone has one life (supersedes §1's single-external-request clause; extends §16/§17 the arena fight, §19 the shared ladder, §24 the Ring, §27E the reopened `worker/`; PvE is untouched — every path added here is additive and guarded)
+
+### The mode
+
+One player opens a **lobby** and gets a room code. Up to **8** players join it. Everyone drops onto **the Ring** and fights each other with the kit they already own — same hotbar, same evade, same stamina bar. Five rules, and they are the whole mode:
+
+1. **Up to 8, minimum 2.** Eight is a ceiling, not a preference — see *Contracts, not tuning dials*.
+2. **One life each.** No revive, no leader swap, no ally taking over. You get the fight you get.
+3. **Dying returns you to the dressing room**, and the match continues without you. You are out of the *match*, not out of the *run* — you keep your level, your binds, your shards and your night.
+4. **A kill raises the killer one level**, immediately, mid-match, on §19's shared 1–100 ladder. Not a separate PvP currency: the ladder is the game's one progression currency and this mode spends it rather than inventing a second.
+5. **Last one standing wins.**
+
+**PvE is unharmed, and that is a requirement rather than an aspiration.** Every PvP path is additive and guarded the way `main.js` already guards `records.start()`, so a build with the multiplayer files deleted boots and plays exactly as it does today. `sanityCheck()` gains a presence line for `data.pvp`, because §24's failure mode — a module shipped without its `<script>` tag, dead and *silent* — is the one this drop is most exposed to, carrying five new files at once.
+
+**The precedent is the mirror fight, and it is followed rather than reinvented.** `battle3d.beginClone()` already launches a second kind of fight out of the same room; `engine/cloneai.js` already models an opponent that lives deliberately **outside `party.state.members`** with its own resources and cooldowns; `combat3.cloneEnd(result)` already ends a fight while skipping `victory()`/`defeat()` bookkeeping. PvP is that shape with the decision loop replaced by the network. Remote players are therefore **never party members** — a remote body inside `party.state.members` would make the local client swap into someone else's body on death (§19's leader swap doing exactly its job, at exactly the wrong moment) and pay XP to everyone in the lobby.
+
+### Ownership — one authority per fact
+
+There is no server simulation. The relay is dumb fan-out; it stores nothing and decides nothing. Authority is instead **partitioned**, so that no two peers can ever contradict each other about the same fact:
+
+| Fact | Sole authority |
+|---|---|
+| my position, yaw, pitch, crouch, animation state | me |
+| my life total, and whether I am alive | me |
+| "my swing connected with you, for N damage of type T" | the attacker |
+| "I died, and X killed me" | **the victim** |
+| roster, seat assignment, match start, match end | the host (whoever opened the lobby) |
+
+**The victim owning its own death is the load-bearing row.** Exactly one peer ever says "I died", and that message names the killer, so every client in the lobby applies the same +1 level to the same player and the scoreboards cannot drift apart. There is nothing to reconcile because two claims on one kill cannot exist. The obvious alternative — the *attacker* declaring the kill — double-counts the first time two players land a finishing blow inside one round trip, and the boards are then permanently wrong in a way no client can detect and no client can repair.
+
+The attacker owning the hit is the other half, and it is about **feel** rather than truth: your hit lands on the frame you land it, never a round trip later. §21's one-clock rule is what makes that safe to declare rather than reckless — the attacker's animation and the damage it sends read the same numbers, so the picture the victim receives and the number it applies came off one clock even though they crossed a wire between them.
+
+Two consequences follow and are stated so nobody "fixes" them later. A declared hit still passes through `invulnerable()`: **evade i-frames work against a declared hit**, or evade stops meaning anything the moment a human is swinging at you. And §25's `!pattern` guard stays — a miss must still cost nothing, which is the whole of §25.
+
+### The transport is decoration (the `records.js` law)
+
+`engine/records.js` is the binding template: a config-gated URL, a hard timeout, callbacks only, silence on every failure path, and a game that plays perfectly when the server is absent. Netcode obeys the same law, and **§1 is amended above** to permit it as a second exception on exactly the same terms — the "must never error" clause is the important half and is carried forward verbatim.
+
+Two transports, selected automatically:
+
+- **`local`** — `BroadcastChannel('chloe.pvp.<room>')`. Same browser, several tabs, and **no server at all**. This is the default, and it is why the mode is playable and testable the moment the files land — and why it stays playable if the relay is never deployed, or is deployed and dies.
+- **`relay`** — a WebSocket to a Cloudflare Durable Object, used only when `CHLOE.data.config.netUrl` is a non-empty string.
+
+`netUrl` is **absent from `config.js` by default**, exactly as `apiUrl` is (§27E). Adding it is one line; deleting it is one line, and deleting it degrades the mode to same-browser play rather than breaking it. **The lobby must name the transport it is on, in words.** "8 players" means something different on each, and a player who thinks they are hosting the internet when they are hosting their own tab bar is owed the truth on screen rather than in a doc.
+
+**ES5 rules are not relaxed for the network.** `new WebSocket()` and `new BroadcastChannel()` are plain event emitters: no Promise, no `async`, no `fetch`, no module syntax. Both are feature-detected, and an absent constructor yields a **no-op transport** rather than a throw — the same posture as every other boundary in this codebase. `engine/` still never touches the DOM; the lobby is a `ui/` screen and the socket is an `engine/` module, and they meet through callbacks.
+
+**Wire format**: JSON, one object per message, every message carrying a protocol version `v` and a type `t`. An unknown `t` is ignored and never thrown on. Unknown fields are ignored. A `v` mismatch is **refused at the lobby**, with a readable line, rather than allowed through to produce a subtly broken match — the failure this protects against is not a crash, it is two clients agreeing to play a game they disagree about.
+
+`state` is the only high-rate message. It goes out at `data.pvp.sendHz`, **never once per rAF frame**, with metres rounded to 2 decimals and radians to 3. The rounding is a bandwidth decision and, equally, a correctness one: unrounded floats make every single tick a "change", and there is then no such thing as a player standing still.
+
+### The cheating trade, stated
+
+**This is not cheat-proof.** A modified client can lie about the damage it deals, or simply refuse to die, and no peer can prove otherwise, because there is no authority to appeal to. That is the same trade the record board already makes and already says out loud — *"a small friendly board, not a tamper-proof one"* (`worker/README.md`) — made for the same reason: the fix is an authoritative server simulation, and this game is hosted on free static hosting where no such thing can run. The honest expectation is a fight between people who came for a fight, not a ranked ladder. If that ever stops being an acceptable trade, the answer is a server that simulates, not a patch to the protocol.
+
+Two things the trade does **not** excuse. Display names are scrubbed **server-side** before fan-out, because `worker.js` already states the rule — *"a client is never a validator"* — and whitelists rather than escapes the record board's `patch` field precisely because it lands on a canvas in someone else's browser. A PvP display name has exactly that path. And the room is capped in the Durable Object itself: `ROOM_MAX_SOCKETS = 8`, with the ninth joiner **refused with a close code** rather than silently dropped, because a player staring at a lobby they were quietly not admitted to is the worst version of full.
+
+### Eight seats on the Ring
+
+`data/stages.js`'s `ring` entry gains `spawns: [{x, z, yaw} × 8]` — eight seats at 45° intervals on a circle of radius **10.5 m**, each facing the centre. Facing is `yaw = Math.atan2(x, z)`, and it is **checked against the Ring's own authored spawn rather than trusted**: `atan2(-6.5, 0)` is `-π/2`, which is exactly the `yaw` the authored `playerSpawn` already carries. A formula that reproduces the number already in the file is a formula; one that merely looks right is a guess.
+
+Why 10.5 m, in three measurements:
+
+- The **adjacent chord** is `2 · 10.5 · sin(22.5°) = 8.04 m`, far outside `knightMinDist` 1.3 and `crowdDist` 1.8, so no two players open the match inside each other's separation push.
+- Every seat sits **3.15 m inside the usable floor**: §24 clamps body centres at radius 14 and the kerb's inner face is at 14.4, leaving 13.65 m once a 0.35 m body radius is taken off.
+- The Ring has **zero interior colliders** (`colliders: []`, `nav: null`), so every seat has clean line of sight to every other.
+
+That third point is why the deathmatch happens on the Ring and not in the church, and it is a design decision rather than a convenience. The church's pillars make eight bodies a visibility problem, its walkable area is ~250 m² against the Ring's ~616 m², and its containment is a baked navgrid rather than §24's radius clamp — a grid that was flood-filled for one player and one squad walking in from one end.
+
+**`spawnSquad`'s fan formula is deliberately not reused.** It lays out a **line**, computed relative to the local player, not a circle: at n=8 it puts every body on one half of the disc at 1.6 m spacing — inside `crowdDist` — so the separation push fires on frame one and the match opens with eight people shoving each other. A circle of seats is not a nicer version of the fan; it is a different thing, and it belongs in the stage data where a stage's own geometry lives.
+
+### Remote bodies cost draw calls, not thinking
+
+A remote player is an existing knight body driven from the wire instead of from a brain. `updateOneKnight` gains a remote branch immediately after the navgrid rescue and before the brain cascade, which excises the whole of the AI — brain, movement, squad separation, min-distance push, lunges, containment, facing — while keeping the pose driver and the death path. Nothing above that line is AI, which is what makes the cut safe to make in one place.
+
+Five constraints that were **measured**, and that decide whether the mode is playable at all rather than merely correct:
+
+- **No per-body `PointLight` for remote players.** Every knight normally gets one. The Ring already runs five (four rim, one key); eight bodies would make thirteen, and `data/stages.js` already rejects twelve in writing — *"twelve point lights would force three r128 to recompile every material in the scene for a light count that big"*. Worse than the count is that the count would **change** as players join and die, re-keying every material's shader program in the middle of a match. Identity comes from tint instead.
+- **Tint with `m.color`, never `emissive`.** Emissive is triple-booked here — the hit flash, the kill flash and the level-up tell all write it and all reset it unconditionally to `0x000000`. An emissive identity marker is silently stomped the first time its owner is hit, which is to say the first time you need to tell players apart.
+- **`castShadow = false` on remote bodies.** Per knight: 103 meshes, 44,037 triangles. Eight bodies is roughly 824 draw calls in the colour pass and 824 more in the shadow pass, ~352 k triangles. Geometry and textures are shared by reference so VRAM does not multiply — draw calls do. Dropping the shadow pass roughly halves the cost, and a shadow under a body you are trying to shoot is not what makes a fight readable.
+- **A leaver is never spliced out of `knights[]`.** The array index **is** the only body identity in the arena: every command is `A.thing(…, index)`, `atk.timers` closures capture `k` rather than the index, and `debug()`'s per-knight arrays are positional. Splicing renumbers everyone below it and silently re-targets every in-flight timer, callback and HUD label. **A seat owns its index for the whole match**; a player who dies or leaves is marked dead and hidden in place.
+- **`patternForKnight` is bypassed for remote swings.** It substitutes a different pattern based on the body's *level*, behind the caller's back, to match the evade family. In PvP, where levels come from kills, a declared `overhead` could play a pattern with a different schedule and a different number of damage callbacks than the one the wire named — §21's two clocks, arriving by another road.
+
+Two smaller ones, both about degrading rather than throwing: `k.rig` can legitimately be `null` (if `knight.glb` is slow or fails, the arena stands fallback totems and `poseKnight` returns early), so every remote-drive path must survive a riggless body; and `spawnSquad` never disposes what it drops, so repeated lobbies would leak ~103 material objects per body — a match teardown disposes the remote bodies it made. Remote bodies also start at **index 1**, because `knights[0]` is structurally special: it is aliased as `var knight`, it keeps the source GLB's own materials rather than a clone, and it feeds `A.debug()`. Tinting player 0 would mutate the shared source materials for every body in the scene.
+
+### BALANCE — what a kill is worth, and the two things that had to change to make it true
+
+A kill is **+1 level, immediately**. The winner of a full eight-player match takes at most seven kills, so a deathmatch walks the low rungs of §19's ladder in minutes rather than in rounds. That is the intended shape and it is a real balance statement: the early ladder is priced against a night of PvE rounds, and PvP hands the same rungs out on a much faster clock. If a match ever feels like a level treadmill, the knob is `levelsPerKill`; the ladder itself is not the knob (§19), and the ally row is not the knob (§25).
+
+Two things in the existing code made "a kill levels you" nominally true and actually false:
+
+1. **The ally, and this one silently breaks the entire mode.** `progression.grantXp` calls `party.ensureAllies()` on every level-up, and ladder row 4 carries `ally: 'ash'`. A player's **third kill** therefore puts an AI ally in their party — and `combat3.takeHit`'s death branch then finds `firstAliveOther` and swaps them into Ash **instead of killing them**. From the third kill onward, "exactly one life" would have been quietly false, and quietly is the worst way for a rule to be false: the match still runs, the scoreboard still updates, and the winner is simply wrong. The ally grant is suppressed while a PvP match is running, at the single choke point that reads `alliesAt` — `party.ensureAllies`. Row 4 is **not** renumbered to dodge this: §25 overloaded that row rather than renumbering precisely because the authored 1–9 ladder is referenced *by level number* throughout this document.
+2. **The stat ceiling.** `combat3`'s `st.max` is written in exactly two places — `start()` and the leader-swap branch — and nowhere else, so a level gained mid-fight bought **nothing live**. The new life, stamina and magic existed in `party.effStats` and never reached the bars on screen. A new `refreshLeaderStats()` re-reads `effStats` into `st.max` after a kill-level lands, copying the leader-swap branch's working pattern. Without it, the reward for a kill is a number on a scoreboard and a hotbar key.
+
+Everything else about a mid-fight level was **already live and needed no work**, which is worth recording because it is unusual: `binds()` self-heals and auto-places the new ability on the new key, `readiness()` lazily creates a cooldown entry for an ability that did not exist at `start()`, `costOf()` routes through `skilltree.costFor` (so a row's `costMod` applies the moment it is earned), `effStats` is read fresh on every hit, and `refreshHotbar` rebuilds the HUD when the slot signature changes.
+
+Level-up's own **noise** is suppressed. It mints an unspendable skill point and toasts one line per learnset move — the first kill alone fires three toasts — which in a deathmatch is per-kill spam over the fight you are trying to watch. One line, **LEVEL n**, says the same thing once.
+
+And `victory()` must **never** fire in a PvP match: it bumps `runStats.round`, pushes a trophy onto the dressing-room wall and pays XP to every party member. A deathmatch is not a round of the night.
+
+### Death returns you to the room, and the run survives it
+
+`room3d.onBattleEnd` gains a third branch, **ahead of** the `'defeat'` branch, for the elimination result. Three prohibitions, each of which has a specific thing it would destroy:
+
+- It must **not** call `CHLOE.game.startNew()`. That runs `party.newGame()`, which wipes members, levels, tree, skill points, all five bind stores, shards, flags and runStats — it would destroy the very levels the mode is built around, at the exact moment the player earned them.
+- It must **not** claim a record and must **not** re-arm the ghost. A deathmatch is not a night on the board.
+- It **does** call `backToRoom()`, which sets `party.state.scene` and shows the room so its own `onShow` handler resumes the world loop.
+
+Two flags, not one. The module-private `inBattle` flag must **not** be reused to mean "a PvP match is running": `poll()` early-returns on it, so the crosshair, hint caption, lock overlay and shards/level bar would freeze for the whole match. And the local player's elimination does **not** go through `end('defeat')` — it does `end`'s teardown and then calls `a3d.releaseLock()` rather than `a3d.stop()`, handing back cursor and keyboard while leaving the render loop running, which is exactly the shape a spectator transition wants.
+
+### The lobby is an overlay in a game that already owns the keyboard
+
+`ui/lobby.js` owns `#screen-lobby`, and three of its rules exist because the room was written before it:
+
+- **Key handling is capture phase** (`addEventListener(…, true)` plus `stopPropagation`), because `ui/room3d.js` listens for `M`/`Tab` on `document` in the bubble phase and knows nothing about newer overlays. Typing a name must not drive the player. `engine/records.js`'s name modal is the existing model for a text field in this game.
+- **No PvP module may call `ui.onShow('room3d', …)`.** `ui._onShow` is a **one-slot registry** — one handler per screen name, and registering a second silently unregisters the first. The room would simply stop resuming, with no error anywhere.
+- **The room code must be selectable.** `body { user-select: none }` is global, so the code needs `user-select: text` and a copy button, or the one string a player has to send to a friend is the one string they cannot copy.
+
+`#screen-lobby` also needs its own `display` pair in `game.css`: `.screen.active` is `display: block` only, so a screen that wants flex has to say so or it renders anchored to the top left.
+
+### Contracts, not tuning dials
+
+Turning one of these is changing the mode, not adjusting its feel:
+
+- **The authority table.** One authority per fact, and the victim owns its own death. Moving any row is a protocol change.
+- **One life.** There is no respawn timer, because there is no respawn.
+- **Remote players live outside `party.state.members`.** Following §16's clone rather than the party.
+- **A seat owns its `knights[]` index for the whole match.** The index is the body's only identity.
+- **Remote bodies start at index 1.** `knights[0]` is structurally special.
+- **No per-body light for remote players.** The shader-recompile budget, not a look.
+- **Eight.** The ceiling is where the light budget, the draw-call budget and the 45° seat geometry all land together; raising it moves all three at once.
+- **`netUrl` absent by default**, and a missing relay degrades rather than fails.
+- **A `v` mismatch is refused at the lobby**, never tolerated into a match.
+
+Actual dials, all of them in `data/pvp.js` where tuning constants belong (rule 7): `sendHz`, `interpMs`, `pingMs`, `peerTimeoutMs`, `startCountdownMs`, `seatRadius`, `respawnToHubMs`, `roomCodeLen`, `levelsPerKill`, the kill-feed length and lifetime, and the eight seat colours.
+
+Three numbers in `data/pvp.js` are **restated** from files that do not know it exists, and a restated number is a promise to change both: `nameMaxLen` is `records.js`'s `NAME_MAX` (a player has one name in this game, so a name that fits the record board fits a roster row), `connectTimeoutMs` is the same 4000 ms `records.js` gives a request for the same stated reason, and `seatRadius` is the radius the resolved seats in `data/stages.js` were computed on. `maxPlayers` is restated twice over — as `ROOM_MAX_SOCKETS` in the worker and as the length of the colour list. Those eights are one eight.
+
+One deliberate omission: the BroadcastChannel name is **not** versioned. Folding `protocolVersion` into the channel name would make two mismatched builds simply never hear each other, and the lobby would show an empty room forever. They meet on one channel, exchange `hello`, and the version check gets to say the true thing out loud.
+
+### Verification
+
+`file://` silently degrades the 3D mode, so every one of these is proved on a real server, with two tabs on `localhost:8080`. Make each probe fail on purpose first: this codebase degrades rather than throws at almost every boundary, so a probe with no failure path hands back a plausible number instead of an error.
+
+Prove: **two real clients play** — one hosts, one joins, both enter the Ring and both see the other's body move in real time, with frames actually advancing; **a kill levels the killer *effectively*** — `combat3.snapshot().max` grows, the new key appears on the hotbar and the new ability is pressable, not merely that the level number changed; **one life holds past the third kill** — drive a killer to level 4+ and confirm Ash never appears and never absorbs a death; **death returns you to the dressing room with the level intact**, the match continues for the others, and `party.state.members` still holds exactly one member; **last one standing ends the match** and nothing calls `startNew()` anywhere along the way; **PvE is unharmed** — a normal round still starts, the squad still spawns, `arena3d.debug()` still reports knights, and the console is clean; and **absent-transport degradation** — with no `netUrl` configured the lobby still works on `BroadcastChannel`, says so on screen, throws nothing and blocks no frame.
